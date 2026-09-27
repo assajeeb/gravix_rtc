@@ -1,0 +1,14 @@
+# Baselined `flutter analyze` issues.
+#
+# These two predate the Gravix fork: they are in vendored upstream
+# livekit_client 2.11.0 code under lib/src/rtc_core/, which is re-synced from
+# upstream rather than edited here, so fixing them locally would be undone by
+# the next sync.
+#
+# Format: <severity>|<path>|<rule>. Line numbers are deliberately excluded so
+# an unrelated edit above an issue does not turn the job red.
+#
+# tool/check_analyze.sh fails on any issue NOT listed here. Adding a line to
+# this file is a deliberate act and should be reviewed as one.
+# (2026-09-27: the two caching.dart warnings were fixed with `return await` -- the future is already
+# completed there, so behaviour is unchanged; nothing is baselined now.)

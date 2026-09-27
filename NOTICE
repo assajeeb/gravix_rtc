@@ -1,0 +1,47 @@
+# NOTICE — gravix_rtc
+
+Copyright (c) 2024–2026 Gravity Compile.
+
+## Derived software
+
+This package is derived from the following open-source components, which are
+licensed under the Apache License, Version 2.0 (see `LICENSE` in this
+directory):
+
+### livekit / client-sdk-flutter (vendored as `lib/src/rtc_core/`)
+Real-time video/audio client library for Flutter.
+- Project: https://github.com/livekit/client-sdk-flutter
+- License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
+- Notes: vendored under `lib/src/rtc_core/` and re-branded/purged for
+  white-label distribution. Generic type names (`Room`, `Track`,
+  `Participant`, …) are preserved to keep upstream merges clean.
+
+### livekit / protocol (`.proto` sources in `proto/`)
+Protobuf wire definitions regenerated into `lib/src/rtc_core/src/proto/`.
+- Project: https://github.com/livekit/protocol
+- Version referenced: v1.50.4
+- License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
+- Notes: `package livekit;` was renamed (`gravixcloud`) so the compiled
+  binary contains no upstream package-name strings.
+
+### livekit / client-sdk-flutter native plugin (`android/.../rtc/`, `ios/gravix_rtc/Sources/gravix_rtc/rtc/`)
+Android (Kotlin) and iOS (Swift) native plugin code answering the vendored RTC
+core's method channel: audio session management, audio processing,
+visualizer/renderer, broadcast (iOS).
+- Project: https://github.com/livekit/client-sdk-flutter (`android/`, `shared_swift/`, `ios/Classes/`)
+- Version referenced: 2.13.0
+- License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
+- Notes: ported and re-branded (package, class, channel and event-channel
+  names); the FFT dependency was replaced by an in-tree implementation
+  (`RealFft.kt`). Gravix additions: screen-capture foreground service,
+  direct Apple output selection, route-change reporting, iOS music mixer.
+
+### Background music mixing pipeline (`android/.../music/`)
+Native Android audio decoder/mixer/monitor pipeline, originally authored
+in-house under `com.rgn.live`, relocated and repackaged here. No third-party
+license obligations beyond the WebRTC SDK it hooks into.
+
+## Compliance note
+The upstream SDK name does not appear in `lib/` or in any generated/published
+artifact. This file and `LICENSE` are the only intentional references to the
+upstream project.

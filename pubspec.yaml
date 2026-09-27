@@ -1,0 +1,77 @@
+name: gravix_rtc
+description: >-
+  Real-time video and audio rooms for Flutter on Gravix Cloud: one room
+  service, region-aware connect, token providers, join analytics and a
+  video-effect hook.
+version: 0.4.0
+homepage: https://gravitycompile.com
+repository: https://github.com/assajeeb/gravix_rtc
+issue_tracker: https://github.com/assajeeb/gravix_rtc/issues
+topics:
+  - webrtc
+  - video-call
+  - audio
+  - realtime
+  - rtc
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.38.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+
+  # Vendored RTC core (lib/src/rtc_core) — do NOT add a separate
+  # third-party RTC client package here; that code ships in-tree.
+  # Exact pin on purpose: the vendored core and this package's native code are
+  # built and tested against 1.6.0 only (pub's "allow more than one version"
+  # hint is accepted until a newer flutter_webrtc has been validated).
+  flutter_webrtc: 1.6.0
+  dart_webrtc: ^1.8.0
+  asn1lib: ^1.6.5
+  async: ^2.13.0
+  collection: ^1.19.1
+  connectivity_plus: ^7.0.0
+  crypto: ^3.0.0
+  fixnum: ^1.1.1
+  meta: ^1.17.0
+  http: ^1.6.0
+  logging: ^1.3.0
+  uuid: ^4.5.3
+  synchronized: ^3.4.0
+  protobuf: ^6.0.0
+  device_info_plus: ">=12.3.0 <14.0.0"
+  sdp_transform: ^0.3.2
+  web: ^1.1.1
+  mime_type: ^1.0.1
+  path: ^1.9.1
+  dart_jsonwebtoken: ^3.3.2
+  json_annotation: ^4.12.0
+
+  # App-facing layers (room service)
+  audio_session: ^0.1.21
+  # Persists the start-up region list across launches (GravixSharedPrefsRegionListStore).
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # Deterministic timer control for the audio-routing ladder/debounce tests.
+  fake_async: ^1.3.1
+  flutter_lints: ^6.0.0
+  lints: ^6.0.0
+  # Narrow pin so the committed json codegen stays deterministic across machines
+  json_serializable: ">=6.14.1 <6.15.0"
+  build_runner: ^2.4.13
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.gravitycompile.gravix_cloud
+        pluginClass: GravixCloudPlugin
+      ios:
+        pluginClass: GravixCloudPlugin

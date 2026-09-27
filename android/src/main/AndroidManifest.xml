@@ -1,0 +1,21 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  package="com.gravitycompile.gravix_cloud">
+
+  <!-- Audio routing (mode, communication device, speakerphone). Normal
+       permission, granted at install. BLUETOOTH_CONNECT (runtime, API 31+) is
+       left to the app: without it Bluetooth headsets are not detected. -->
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+  <!-- Screen share: MediaProjection must run inside a foreground service,
+       typed mediaProjection on API 34+. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+  <application>
+    <service
+      android:name="com.gravitycompile.gravix_cloud.rtc.ScreenCaptureService"
+      android:enabled="true"
+      android:exported="false"
+      android:foregroundServiceType="mediaProjection" />
+  </application>
+</manifest>

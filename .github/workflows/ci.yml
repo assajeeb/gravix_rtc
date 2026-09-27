@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first — CI is a gate, not a
+# historical record, and only the tip matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: gitleaks (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, not the default shallow clone: a key that was
+          # committed and then "removed" in a later commit is still in the
+          # pack, and a depth-1 clone is exactly how that gets missed.
+          fetch-depth: 0
+
+      # The binary rather than gitleaks/gitleaks-action@v2: the action is
+      # license-gated for organisation accounts and fails closed on a missing
+      # GITLEAKS_LICENSE, which turns "we have no key to scan with" into a red
+      # build that people learn to ignore.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # --all --full-history: every ref and every parent, so a key committed
+      # and then removed in a later commit is still caught.
+      - name: Scan committed history
+        run: gitleaks git --log-opts="--all --full-history" --redact --verbose
+
+  analyze:
+    name: flutter analyze (baselined)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # Pinned, not read from pubspec: the package's `flutter: ">=3.38.0"`
+          # is a range, and a range resolves to whatever stable happens to be
+          # current, which makes an unrelated Flutter release look like this
+          # repo went red. Bump this line deliberately.
+          flutter-version: 3.47.3
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # Not a bare `flutter analyze`: tool/check_analyze.sh compares the issues
+      # against tool/analyze_baseline.txt (empty today — nothing is baselined)
+      # and fails on any issue not listed there, so an upstream re-sync can
+      # baseline a vendored warning deliberately instead of turning CI off.
+      - name: Analyze against the baseline
+        run: ./tool/check_analyze.sh
+
+  test:
+    name: flutter test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # Pinned, not read from pubspec: the package's `flutter: ">=3.38.0"`
+          # is a range, and a range resolves to whatever stable happens to be
+          # current, which makes an unrelated Flutter release look like this
+          # repo went red. Bump this line deliberately.
+          flutter-version: 3.47.3
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter test --reporter expanded
