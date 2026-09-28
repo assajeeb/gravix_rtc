@@ -2,11 +2,13 @@
 
 Copyright (c) 2024–2026 Gravity Compile.
 
-## Derived software
+gravix_rtc is licensed under the MIT License (`LICENSE`).
 
-This package is derived from the following open-source components, which are
-licensed under the Apache License, Version 2.0 (see `LICENSE` in this
-directory):
+## Third-party components (Apache License 2.0)
+
+The components below are derived from open-source software licensed under the
+Apache License, Version 2.0. They remain under that license: its full text is in
+`LICENSES/Apache-2.0.txt`, and their files keep their Apache-2.0 headers.
 
 ### livekit / client-sdk-flutter (vendored as `lib/src/rtc_core/`)
 Real-time video/audio client library for Flutter.

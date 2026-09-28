@@ -246,5 +246,6 @@ await music.stop();
 
 ## Licensing
 
-Apache-2.0. Derived in part from Apache-2.0 open source (the vendored RTC client
-and its protocol definitions); see `NOTICE` and `LICENSE`.
+MIT (`LICENSE`), Copyright (c) Gravity Compile. The vendored RTC client, its
+protocol definitions and the ported native plugin code are third-party components
+under the Apache License 2.0 (`LICENSES/Apache-2.0.txt`); see `NOTICE`.

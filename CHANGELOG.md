@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-09-28
+
+- License: gravix_rtc is now MIT (Gravity Compile). The vendored RTC client, its protocol
+  definitions and the ported native plugin code stay under Apache-2.0 as third-party
+  components (`LICENSES/Apache-2.0.txt`, `NOTICE`). No code changes.
+
 ## 0.4.0 — 2026-09-27
 
 First release as **gravix_rtc** on pub.dev (renamed from gravix_cloud; import `package:gravix_rtc/gravix_rtc.dart`). iOS privacy manifest bundled.
