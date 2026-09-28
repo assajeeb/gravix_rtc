@@ -10,9 +10,24 @@ The components below are derived from open-source software licensed under the
 Apache License, Version 2.0. They remain under that license: its full text is in
 `LICENSES/Apache-2.0.txt`, and their files keep their Apache-2.0 headers.
 
+Each derived file carries the upstream copyright notice (for example
+"Copyright 2024 LiveKit, Inc.") followed by Gravity Compile's modification notice
+("Modifications Copyright 2024-2026 Gravity Compile") and the unchanged Apache-2.0
+license header. Files without a notice upstream (generated protobuf and JSON code,
+and a few sources upstream ships without a header) are left without one and are
+covered by this NOTICE.
+
+The following files inside those directories are Gravity Compile additions, not
+derived from upstream, and are licensed under the MIT License (`LICENSE`):
+- `lib/src/rtc_core/src/managers/android_screen_capture.dart`
+- `android/src/main/kotlin/com/gravitycompile/gravix_cloud/rtc/ScreenCaptureService.kt`
+- `android/src/main/kotlin/com/gravitycompile/gravix_cloud/rtc/RealFft.kt`
+- `ios/gravix_rtc/Sources/gravix_rtc/rtc/AppleAudioOutput.swift`
+
 ### livekit / client-sdk-flutter (vendored as `lib/src/rtc_core/`)
 Real-time video/audio client library for Flutter.
 - Project: https://github.com/livekit/client-sdk-flutter
+- Copyright 2024 LiveKit, Inc. (upstream NOTICE)
 - License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
 - Notes: vendored under `lib/src/rtc_core/` and re-branded/purged for
   white-label distribution. Generic type names (`Room`, `Track`,
@@ -22,6 +37,7 @@ Real-time video/audio client library for Flutter.
 Protobuf wire definitions regenerated into `lib/src/rtc_core/src/proto/`.
 - Project: https://github.com/livekit/protocol
 - Version referenced: v1.50.4
+- Copyright 2023 LiveKit, Inc. (upstream NOTICE)
 - License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
 - Notes: `package livekit;` was renamed (`gravixcloud`) so the compiled
   binary contains no upstream package-name strings.
@@ -32,6 +48,7 @@ core's method channel: audio session management, audio processing,
 visualizer/renderer, broadcast (iOS).
 - Project: https://github.com/livekit/client-sdk-flutter (`android/`, `shared_swift/`, `ios/Classes/`)
 - Version referenced: 2.13.0
+- Copyright 2024 LiveKit, Inc. (upstream NOTICE)
 - License: Apache-2.0 — https://www.apache.org/licenses/LICENSE-2.0
 - Notes: ported and re-branded (package, class, channel and event-channel
   names); the FFT dependency was replaced by an in-tree implementation
@@ -44,6 +61,8 @@ in-house under `com.rgn.live`, relocated and repackaged here. No third-party
 license obligations beyond the WebRTC SDK it hooks into.
 
 ## Compliance note
-The upstream SDK name does not appear in `lib/` or in any generated/published
-artifact. This file and `LICENSE` are the only intentional references to the
-upstream project.
+In the shipped sources the upstream name appears only as attribution: in this
+file and in the copyright lines at the top of the derived files listed above
+(plus fork-maintenance notes under `doc/` and `CHANGELOG.md`). It is not used in
+any identifier, package name, channel name or runtime string; source comments do
+not reach compiled artifacts.

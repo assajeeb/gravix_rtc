@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 — 2026-09-28
+
+- Upstream copyright notices restored in the Apache-2.0 third-party files; no code changes.
+
 ## 0.4.1 — 2026-09-28
 
 - License: gravix_rtc is now MIT (Gravity Compile). The vendored RTC client, its protocol

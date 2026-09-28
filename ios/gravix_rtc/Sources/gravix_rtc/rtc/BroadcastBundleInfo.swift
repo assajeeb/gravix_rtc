@@ -1,5 +1,6 @@
 /*
- * Copyright 2026 Gravity Compile (derived work, see NOTICE)
+ * Copyright 2025 LiveKit
+ * Modifications Copyright 2024-2026 Gravity Compile
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
