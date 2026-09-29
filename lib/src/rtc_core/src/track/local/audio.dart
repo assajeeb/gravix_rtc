@@ -121,29 +121,7 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
       rethrow;
     }
 
-    AudioSenderStats? senderStats;
-    for (var v in stats) {
-      if (v.type == 'outbound-rtp') {
-        senderStats ??= AudioSenderStats(v.id, v.timestamp);
-        senderStats.packetsSent = getNumValFromReport(v.values, 'packetsSent');
-        senderStats.packetsLost = getNumValFromReport(v.values, 'packetsLost');
-        senderStats.bytesSent = getNumValFromReport(v.values, 'bytesSent');
-        senderStats.roundTripTime = getNumValFromReport(v.values, 'roundTripTime');
-        senderStats.jitter = getNumValFromReport(v.values, 'jitter');
-
-        final c = stats.firstWhereOrNull((element) => element.type == 'codec');
-        if (c != null) {
-          senderStats.mimeType = getStringValFromReport(c.values, 'mimeType');
-          senderStats.payloadType = getNumValFromReport(c.values, 'payloadType');
-          senderStats.channels = getNumValFromReport(c.values, 'channels');
-          senderStats.clockRate = getNumValFromReport(c.values, 'clockRate');
-        }
-      } else if (v.type == 'media-source') {
-        senderStats ??= AudioSenderStats(v.id, v.timestamp);
-        senderStats.audioSourceStats = AudioSourceStats.fromReport(v);
-      }
-    }
-    return senderStats;
+    return audioSenderStatsFrom(stats);
   }
 
   // private constructor
@@ -257,4 +235,45 @@ String _unknownAudioProcessingMessage(String? code, String message) {
     return 'Unknown audio processing result code: $code.';
   }
   return '';
+}
+
+/// The sender stats of a published audio track from its getStats() reports.
+///
+/// GRAVIX 2026-09-29: packetsLost / roundTripTime / jitter are what the REMOTE
+/// receiver (the SFU) reports back about our uplink: the `remote-inbound-rtp`
+/// report (matched by the outbound-rtp `remoteId`, or its `localId`), as the video
+/// path already did. They used to be read from `outbound-rtp`, which has none of
+/// them: the Kuwait tester's app showed 0 % loss and no RTT while doh1 measured
+/// ~15 % uplink loss. Null (not 0) until the first RTCP receiver report arrives.
+AudioSenderStats? audioSenderStatsFrom(List<rtc.StatsReport> stats) {
+  AudioSenderStats? senderStats;
+  for (var v in stats) {
+    if (v.type == 'outbound-rtp') {
+      senderStats ??= AudioSenderStats(v.id, v.timestamp);
+      senderStats.packetsSent = getNumValFromReport(v.values, 'packetsSent');
+      senderStats.bytesSent = getNumValFromReport(v.values, 'bytesSent');
+
+      final remoteId = getStringValFromReport(v.values, 'remoteId');
+      final r =
+          stats.firstWhereOrNull((e) => remoteId != null && e.id == remoteId) ??
+          stats.firstWhereOrNull((e) => e.type == 'remote-inbound-rtp' && e.values['localId'] == v.id);
+      if (r != null) {
+        senderStats.packetsLost = getNumValFromReport(r.values, 'packetsLost');
+        senderStats.roundTripTime = getNumValFromReport(r.values, 'roundTripTime');
+        senderStats.jitter = getNumValFromReport(r.values, 'jitter');
+      }
+
+      final c = stats.firstWhereOrNull((element) => element.type == 'codec');
+      if (c != null) {
+        senderStats.mimeType = getStringValFromReport(c.values, 'mimeType');
+        senderStats.payloadType = getNumValFromReport(c.values, 'payloadType');
+        senderStats.channels = getNumValFromReport(c.values, 'channels');
+        senderStats.clockRate = getNumValFromReport(c.values, 'clockRate');
+      }
+    } else if (v.type == 'media-source') {
+      senderStats ??= AudioSenderStats(v.id, v.timestamp);
+      senderStats.audioSourceStats = AudioSourceStats.fromReport(v);
+    }
+  }
+  return senderStats;
 }

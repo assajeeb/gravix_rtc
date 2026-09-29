@@ -41,6 +41,7 @@ typedef WebSocketConnector =
       WebSocketEventHandlers? options,
       Map<String, String>? headers,
       NetworkOptions? networkOptions,
+      Object? preconnected,
     });
 
 abstract class GravixRtcWebSocket extends Disposable {
@@ -51,5 +52,14 @@ abstract class GravixRtcWebSocket extends Disposable {
     WebSocketEventHandlers? options,
     Map<String, String>? headers,
     NetworkOptions? networkOptions = const NetworkOptions(),
-  }) => lkWebSocketConnect(uri, options: options, headers: headers, networkOptions: networkOptions);
+    // a standby client (standby_io.dart) whose pooled TLS connection the upgrade
+    // reuses; ignored on web
+    Object? preconnected,
+  }) => lkWebSocketConnect(
+    uri,
+    options: options,
+    headers: headers,
+    networkOptions: networkOptions,
+    preconnected: preconnected,
+  );
 }

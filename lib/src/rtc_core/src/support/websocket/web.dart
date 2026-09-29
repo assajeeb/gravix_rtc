@@ -31,6 +31,7 @@ Future<GravixRtcWebSocketWeb> lkWebSocketConnect(
   WebSocketEventHandlers? options,
   Map<String, String>? headers, // |headers| will be ignored on web
   NetworkOptions? networkOptions = const NetworkOptions(),
+  Object? preconnected, // no pre-connected sockets in a browser
 }) => GravixRtcWebSocketWeb.connect(uri, options: options, networkOptions: networkOptions);
 
 class GravixRtcWebSocketWeb extends GravixRtcWebSocket {

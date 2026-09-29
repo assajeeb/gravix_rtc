@@ -91,6 +91,11 @@ abstract final class GravixJoinStep {
   /// See [kGravixFirstAudioDefinition].
   static const firstAudioPlayoutProxy = 'firstAudioPlayoutProxy';
   static const connectReturned = 'connectReturned';
+
+  /// The microphone track is published (the initial `setMicEnabled(true)` of the
+  /// join returned). With `publishInBackground` this comes AFTER connectReturned;
+  /// without it, before. Compare joins on this, not on connectReturned alone.
+  static const micPublished = 'micPublished';
   static const emittedAt = 'emittedAt';
 
   /// JSON order. Also the complete list: a step not named here is not reported.
@@ -98,7 +103,7 @@ abstract final class GravixJoinStep {
     tapAt, tokenRequestStart, tokenRequestEnd, connectStart, regionProbeStart, regionProbeEnd, //
     audioSessionStart, audioSessionEnd, micPermissionStart, micPermissionEnd,
     wsConnectStart, wsOpen, joinResponse, pcSetupDone, iceConnected, pcConnected,
-    firstAudioSubscribed, firstAudioPacket, firstAudioPlayoutProxy, connectReturned, emittedAt,
+    firstAudioSubscribed, firstAudioPacket, firstAudioPlayoutProxy, connectReturned, micPublished, emittedAt,
   ];
 
   /// Steps that belong to ONE connection attempt. A connect ladder that falls to
@@ -133,7 +138,7 @@ const String kGravixFirstAudioDefinition =
 /// This package's version, for the report. Kept in step with pubspec.yaml by
 /// `test/connect/join_timeline_test.dart`, because a Dart package cannot read
 /// its own pubspec at runtime.
-const String kGravixSdkVersion = '0.4.2';
+const String kGravixSdkVersion = '0.4.3';
 
 /// Default stats poll while waiting for first audio. 50 ms keeps the proxy's
 /// resolution well under the ~100 ms differences the phone runs need to
@@ -342,6 +347,47 @@ class GravixSelectedPair {
   );
 }
 
+/// Round-trip time of the selected ICE candidate pair, ms: the pair named by
+/// `transport.selectedCandidatePairId`, else the one flagged `selected`, else a
+/// nominated + succeeded one; its `currentRoundTripTime` (STUN consent checks,
+/// so it exists on every platform -- unlike `remote-inbound-rtp.roundTripTime`,
+/// which flutter_webrtc on Android did not report: tester field logs 2026-09-29,
+/// `rtt_ms` always null). Null when none is known yet.
+double? gravixSelectedPairRttMs(Iterable<GravixStat> stats) {
+  String? selectedId;
+  final pairs = <String, Map<dynamic, dynamic>>{};
+  for (final s in stats) {
+    if (s.type == 'transport') {
+      final id = s.values['selectedCandidatePairId'];
+      if (id is String && id.isNotEmpty) selectedId = id;
+    } else if (s.type == 'candidate-pair') {
+      pairs[s.id] = s.values;
+    }
+  }
+  bool yes(Object? v) => v == true || v == 'true';
+  double? rtt(Map<dynamic, dynamic>? p) {
+    final v = p?['currentRoundTripTime'];
+    final d = v is num ? v.toDouble() : (v is String ? double.tryParse(v) : null);
+    return d != null && d > 0 ? d * 1000 : null;
+  }
+
+  final byId = rtt(pairs[selectedId]);
+  if (byId != null) return byId;
+  for (final p in pairs.values) {
+    if (yes(p['selected'])) {
+      final r = rtt(p);
+      if (r != null) return r;
+    }
+  }
+  for (final p in pairs.values) {
+    if (yes(p['nominated']) && p['state'] == 'succeeded') {
+      final r = rtt(p);
+      if (r != null) return r;
+    }
+  }
+  return null;
+}
+
 bool _isInboundAudio(GravixStat s) =>
     s.type == 'inbound-rtp' && (s.values['kind'] == 'audio' || s.values['mediaType'] == 'audio');
 
@@ -452,6 +498,15 @@ class GravixJoinTimelineRecorder {
   GravixSelectedPair? pair;
   String? dtlsState;
   int attempts = 0;
+
+  /// What the join found of the standby connection (SignalClient.gravixStandby):
+  /// `outcome` used | awaited | dead | expired | none, `ageMs`, `waitedMs`,
+  /// `reused`, `mechanism` (`preconnect`: TCP+TLS pre-opened, NOT the JS SDK's
+  /// protocol-level standby socket). Null when the join never dialled.
+  Map<String, Object?>? standby;
+
+  /// The join returned before the mic/camera were published (connect option).
+  bool publishInBackground = false;
 
   bool has(String step) => _wallAt.containsKey(step);
 
@@ -621,6 +676,9 @@ class GravixJoinTimelineRecorder {
         'tapToFirstAudioSubscribed': _delta(s, GravixJoinStep.firstAudioSubscribed),
         'tapToFirstAudioPacket': _delta(s, GravixJoinStep.firstAudioPacket),
         'tapToFirstAudioPlayoutProxy': _delta(s, GravixJoinStep.firstAudioPlayoutProxy),
+        'pcToConnectReturned': _delta(GravixJoinStep.pcConnected, GravixJoinStep.connectReturned),
+        'pcToMicPublished': _delta(GravixJoinStep.pcConnected, GravixJoinStep.micPublished),
+        'tapToMicPublished': _delta(s, GravixJoinStep.micPublished),
       },
       appSpans: input.appSpans,
       tokenFromCache: input.tokenFromCache,
@@ -651,6 +709,8 @@ class GravixJoinTimelineRecorder {
       endReason: endReason,
       complete: _wallAt.containsKey(GravixJoinStep.firstAudioPlayoutProxy),
       context: input.context,
+      standby: standby,
+      publishInBackground: publishInBackground,
     );
   }
 }
@@ -681,6 +741,8 @@ class GravixJoinTimeline {
     required this.endReason,
     required this.complete,
     required this.context,
+    this.standby,
+    this.publishInBackground = false,
   });
 
   static const int schema = 1;
@@ -736,6 +798,10 @@ class GravixJoinTimeline {
   final bool complete;
   final Map<String, Object?> context;
 
+  /// See [GravixJoinTimelineRecorder.standby].
+  final Map<String, Object?>? standby;
+  final bool publishInBackground;
+
   /// The pair is TCP or TURN: direct UDP to the SFU did not work for this join.
   bool get fallbackDetected => pair?.isFallback ?? false;
 
@@ -765,6 +831,8 @@ class GravixJoinTimeline {
     'firstPacketEstimate': firstPacketEstimate,
     'complete': complete,
     'endReason': endReason.name,
+    'standby': standby,
+    'publishInBackground': publishInBackground,
     'context': context,
   };
 

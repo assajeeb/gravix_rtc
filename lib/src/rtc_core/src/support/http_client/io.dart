@@ -25,15 +25,32 @@ import '../certificate_pinning.dart';
 http.Client createSdkHttpClient(NetworkOptions networkOptions) =>
     http_io.IOClient(createSdkIoHttpClient(networkOptions));
 
-io.HttpClient createSdkIoHttpClient(NetworkOptions networkOptions) {
+/// [onConnect]: called for every NEW socket the client opens (not for a request
+/// served from its keep-alive pool). The standby pre-connect (standby_io.dart)
+/// uses it to tell whether the join's upgrade really reused its warm connection.
+io.HttpClient createSdkIoHttpClient(NetworkOptions networkOptions, {void Function()? onConnect}) {
   final validator = CertificatePinValidator(networkOptions.certificatePinning);
   final client = io.HttpClient();
-  if (!validator.isEnabled) {
+  if (!validator.isEnabled && onConnect == null) {
     return client;
   }
 
-  client.connectionFactory = _CertificatePinningConnectionFactory(validator).connect;
+  final connect = validator.isEnabled ? _CertificatePinningConnectionFactory(validator).connect : _plainConnect;
+  client.connectionFactory = onConnect == null
+      ? connect
+      : (url, proxyHost, proxyPort) {
+          onConnect();
+          return connect(url, proxyHost, proxyPort);
+        };
   return client;
+}
+
+// What io.HttpClient does without a connectionFactory (no pinning): a plain socket
+// to the proxy (the client tunnels and secures it itself), a TLS socket for https.
+Future<io.ConnectionTask<io.Socket>> _plainConnect(Uri url, String? proxyHost, int? proxyPort) {
+  if (proxyHost != null && proxyPort != null) return io.Socket.startConnect(proxyHost, proxyPort);
+  if (url.scheme == 'https' || url.scheme == 'wss') return io.SecureSocket.startConnect(url.host, _portFor(url));
+  return io.Socket.startConnect(url.host, _portFor(url));
 }
 
 class _CertificatePinningConnectionFactory {

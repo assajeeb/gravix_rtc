@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:audio_session/audio_session.dart';
 import 'package:collection/collection.dart'; // firstOrNull
 import 'package:flutter/foundation.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCPeerConnectionState;
+import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCPeerConnection, RTCPeerConnectionState;
 import 'package:uuid/uuid.dart';
 
 import '../audio/gravix_audio_host.dart';
@@ -26,6 +26,8 @@ import '../music/gravix_music_controller.dart';
 import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
+import '../rtc_core/src/support/websocket/standby.dart';
+import '../rtc_core/src/utils.dart' show Utils;
 import '../rtc_core/src/internal/events.dart'
     show
         EngineJoinResponseEvent,
@@ -339,6 +341,11 @@ class GravixRoomService implements GravixAudioHost {
   bool logJoinTimelines = false;
 
   GravixJoinTimelineRecorder? _timeline;
+
+  /// The join's mic/camera publication while it runs behind a connect() that
+  /// already returned (`publishInBackground`). setMicEnabled / setCameraEnabled /
+  /// disconnect wait for it, so a fast toggle never races the initial publish.
+  Future<void>? _initialPublish;
   bool _timelineEmitted = false;
   Timer? _timelinePoll;
   Timer? _timelineIcePoll;
@@ -546,6 +553,17 @@ class GravixRoomService implements GravixAudioHost {
     //   not touched. Ignored under audio routing v2.
     bool earlyCallAudio = false,
     // </candidate:earlyCallAudio>
+    // [publishInBackground] opt-in (2026-09-29). connect() returns once the peer
+    //   connection is up; the mic (and camera) publication, the music-mixer
+    //   install and the audio route run behind it. Field logs (Android, Kuwait ->
+    //   doh1, ~50 ms RTT): ~0.5 s between pcConnected and connect() returning,
+    //   spent publishing the mic (track create + capture start + AddTrack round
+    //   trip + publisher renegotiation) and, in a video room, opening and
+    //   publishing the camera. Nothing the user hears depends on it: remote audio
+    //   plays from the subscriber side. The timeline's `micPublished` mark says
+    //   when the mic went live; setMicEnabled / setCameraEnabled / disconnect wait
+    //   for the initial publication. Off = exactly the old order.
+    bool publishInBackground = false,
   }) async {
     final joinWatch = Stopwatch()..start();
     final analyticsSink = analyticsUrl != null ? GravixAnalytics(url: analyticsUrl) : analytics;
@@ -903,44 +921,62 @@ class GravixRoomService implements GravixAudioHost {
         }
       }
 
-      // Music mixing: install the native mixer callback before the mic may
-      // start recording (cheap no-op when the feature is unused).
-      // The service's own post-connect platform calls go into the subscriber-path
-      // log: they share the platform thread with the core's offer/answer handling
-      // for the offer that carries the first audio track, and a serialised await is
-      // one of the things that path log exists to find.
-      timeline?.notePath('svc:musicInstallStart');
-      try {
-        await music.install();
-      } catch (e) {
-        debugPrint('Music mixer install skipped: $e');
-      }
-      timeline?.notePath('svc:musicInstallEnd');
+      timeline?.publishInBackground = publishInBackground;
+      Future<void> publishInitial() async {
+        // Music mixing: install the native mixer callback before the mic may
+        // start recording (cheap no-op when the feature is unused).
+        // The service's own post-connect platform calls go into the subscriber-path
+        // log: they share the platform thread with the core's offer/answer handling
+        // for the offer that carries the first audio track, and a serialised await is
+        // one of the things that path log exists to find.
+        timeline?.notePath('svc:musicInstallStart');
+        try {
+          await music.install();
+        } catch (e) {
+          debugPrint('Music mixer install skipped: $e');
+        }
+        timeline?.notePath('svc:musicInstallEnd');
 
-      // Only a publisher pays this step: enabling the mic is where the OS
-      // permission prompt (first run) and the capture start are paid.
-      if (publishMic) timeline?.mark(GravixJoinStep.micPermissionStart);
-      await setMicEnabled(publishMic);
-      if (publishMic) timeline?.mark(GravixJoinStep.micPermissionEnd);
-      timeline?.notePath('svc:setMicDone');
-      if (enableVideo) {
-        // The RTC core opens the camera; the video effect (if any) is attached
-        // to the new track inside setCameraEnabled.
-        await setCameraEnabled(true);
+        // Only a publisher pays this step: enabling the mic is where the OS
+        // permission prompt (first run) and the capture start are paid.
+        if (publishMic) timeline?.mark(GravixJoinStep.micPermissionStart);
+        await _setMicEnabledNow(publishMic);
+        if (publishMic) timeline?.mark(GravixJoinStep.micPermissionEnd);
+        if (publishMic) timeline?.mark(GravixJoinStep.micPublished);
+        timeline?.notePath('svc:setMicDone');
+        if (enableVideo) {
+          // The RTC core opens the camera; the video effect (if any) is attached
+          // to the new track inside setCameraEnabled.
+          await _setCameraEnabledNow(true);
+        }
+
+        if (_v2Active) {
+          // AFTER the track is live, and on BOTH paths. WebRTC reprograms
+          // AudioManager when playout starts, so a single apply gets overwritten;
+          // the ladder re-asserts once the ADM has settled. v1 applied once and
+          // skipped video rooms entirely.
+          GravixAudioRouting.foreignCall.ourSessionActive = true;
+          GravixAudioRouting.foreignCall.start();
+          GravixAudioRouting.routeManager.applyAfterTrackStart(reason: 'connect');
+        } else if (!enableVideo) {
+          await _routeAudioPreferringExternal();
+        }
+        timeline?.notePath('svc:audioRouteDone');
       }
 
-      if (_v2Active) {
-        // AFTER the track is live, and on BOTH paths. WebRTC reprograms
-        // AudioManager when playout starts, so a single apply gets overwritten;
-        // the ladder re-asserts once the ADM has settled. v1 applied once and
-        // skipped video rooms entirely.
-        GravixAudioRouting.foreignCall.ourSessionActive = true;
-        GravixAudioRouting.foreignCall.start();
-        GravixAudioRouting.routeManager.applyAfterTrackStart(reason: 'connect');
-      } else if (!enableVideo) {
-        await _routeAudioPreferringExternal();
+      if (publishInBackground) {
+        final publishing = publishInitial().catchError((Object e) {
+          debugPrint('Gravix background publish failed: $e');
+        });
+        _initialPublish = publishing;
+        unawaited(
+          publishing.whenComplete(() {
+            if (identical(_initialPublish, publishing)) _initialPublish = null;
+          }),
+        );
+      } else {
+        await publishInitial();
       }
-      timeline?.notePath('svc:audioRouteDone');
 
       debugPrint('✅ Gravix connected room="${room.name}" id="${localParticipant?.identity}"');
 
@@ -994,6 +1030,54 @@ class GravixRoomService implements GravixAudioHost {
       }
       return false;
     }
+  }
+
+  // ══ STANDBY (pre-connect the signalling host) ══════════════════════════════
+  /// Opens the signalling connection's TCP + TLS for a later [connect] to [url]
+  /// with [token], ahead of the user's tap; the join's WebSocket upgrade then
+  /// goes over it (one round trip instead of TCP + TLS + upgrade). Resolves true
+  /// when one is open; never throws. Same contract as the JS SDK's
+  /// `room.standby(url, token)`: the exact url + token of the join, used for at
+  /// most 110 s, a call on one older than 45 s opens a replacement, at most 4
+  /// kept, a join waits up to 5 s for one still opening, idempotent (call it
+  /// every 15-20 s from the lobby as a liveness tick). Unlike the JS SDK it is
+  /// NOT a protocol-level standby socket (that one is a single-peer-connection
+  /// join on the server, which this SDK does not speak): see
+  /// lib/src/rtc_core/src/support/websocket/standby_io.dart. No-op on web.
+  ///
+  /// Also reads the device info the join's URL carries, so the tap does not.
+  Future<bool> standby(String url, String token) async {
+    unawaited(Utils.warmClientInfo());
+    return GravixSignalStandby.open(url, token);
+  }
+
+  /// The standby connection for (url, token): `open` (with its age), `opening`,
+  /// `dead` or `none`.
+  GravixStandbyState standbyState(String url, String token) => GravixSignalStandby.state(url, token);
+
+  // ══ CALL STATS ═════════════════════════════════════════════════════════════
+  /// Round-trip time of the selected ICE candidate pair of each peer connection,
+  /// ms (see [gravixSelectedPairRttMs]); null for a PC that is missing or has no
+  /// measurement yet. Never throws.
+  Future<({double? publisherMs, double? subscriberMs})> selectedPairRtt() async {
+    final room = _room;
+    if (room == null) return (publisherMs: null, subscriberMs: null);
+    Future<double?> read(RTCPeerConnection? pc) async {
+      if (pc == null) return null;
+      try {
+        final reports = await pc.getStats();
+        return gravixSelectedPairRttMs([
+          for (final r in reports) (id: r.id, type: r.type, timestampUs: r.timestamp, values: r.values),
+        ]);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final engine = room.engine;
+    final pub = await read(engine.publisher?.pc);
+    final sub = await read(engine.subscriber?.pc);
+    return (publisherMs: pub, subscriberMs: sub);
   }
 
   // ══ PREWARM (call when the room list opens) ════════════════════════════════
@@ -1601,7 +1685,13 @@ class GravixRoomService implements GravixAudioHost {
     };
     _timelineCancels
       ..add(engine.signalClient.events.on<SignalConnectingEvent>((_) => timeline.mark(GravixJoinStep.wsConnectStart)))
-      ..add(engine.signalClient.events.on<SignalConnectedEvent>((_) => timeline.mark(GravixJoinStep.wsOpen)))
+      ..add(
+        engine.signalClient.events.on<SignalConnectedEvent>((_) {
+          timeline
+            ..mark(GravixJoinStep.wsOpen)
+            ..standby = engine.signalClient.gravixStandby;
+        }),
+      )
       // The signal client's event, not the engine's: the engine re-emits its own
       // only after it has built the peer connections, which is tens of ms of
       // phone CPU that would otherwise be booked as server time.
@@ -1782,6 +1872,9 @@ class GravixRoomService implements GravixAudioHost {
           timeline.firstAudioEvidence = gravixInboundAudioEvidence(stats, staleBy);
           // The marks above are already taken, so waiting here moves no number.
           await _timelinePairRead?.timeout(const Duration(milliseconds: 500), onTimeout: () {});
+          // publishInBackground: first audio can come before the mic is live; wait
+          // (bounded) so the report carries `micPublished` too
+          await _initialPublish?.timeout(const Duration(seconds: 3), onTimeout: () {});
           if (!identical(_timeline, timeline)) return;
           _emitTimeline(GravixJoinTimelineEnd.firstAudio);
         }
@@ -1911,6 +2004,16 @@ class GravixRoomService implements GravixAudioHost {
   /// Become a speaker (true) or listener (false).
   /// Requires token canPublish=true to actually publish.
   Future<void> setMicEnabled(bool enabled) async {
+    await _awaitInitialPublish();
+    await _setMicEnabledNow(enabled);
+  }
+
+  Future<void> _awaitInitialPublish() async {
+    final p = _initialPublish;
+    if (p != null) await p.timeout(const Duration(seconds: 3), onTimeout: () {});
+  }
+
+  Future<void> _setMicEnabledNow(bool enabled) async {
     try {
       await localParticipant?.setMicrophoneEnabled(enabled);
       isMicMuted.value = !enabled;
@@ -1926,6 +2029,7 @@ class GravixRoomService implements GravixAudioHost {
 
   /// Direct analogue of muteLocalAudioStream(mute) — note the inverted arg.
   Future<void> muteLocalAudio(bool mute) async {
+    await _awaitInitialPublish();
     try {
       await localParticipant?.setMicrophoneEnabled(!mute);
       isMicMuted.value = mute;
@@ -1938,6 +2042,11 @@ class GravixRoomService implements GravixAudioHost {
   //  CAMERA  — video rooms only (audio room never calls these)
   // ═══════════════════════════════════════════════════════════════════════════
   Future<void> setCameraEnabled(bool enabled) async {
+    await _awaitInitialPublish();
+    await _setCameraEnabledNow(enabled);
+  }
+
+  Future<void> _setCameraEnabledNow(bool enabled) async {
     try {
       await localParticipant?.setCameraEnabled(
         enabled,
@@ -2137,6 +2246,9 @@ class GravixRoomService implements GravixAudioHost {
   //  LEAVE  — replaces leaveChannel + release
   // ═══════════════════════════════════════════════════════════════════════════
   Future<void> disconnect() async {
+    // a publication still running behind connect() finishes first: tearing the
+    // tracks down under it could leave a camera capturing after the leave
+    await _awaitInitialPublish();
     try {
       // A session that ends before audio arrives still gets the event, with
       // null audio fields — otherwise the short sessions this split exists to

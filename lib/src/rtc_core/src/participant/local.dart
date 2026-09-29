@@ -167,7 +167,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         muted: track.muted,
         stream: buildStreamId(publishOptions, track.source),
         disableDtx: !publishOptions.dtx,
-        disableRed: room.e2eeManager != null ? true : publishOptions.red ?? true,
+        disableRed: gravixDisableRed(e2ee: room.e2eeManager != null, red: publishOptions.red),
         encryption: room.roomOptions.lkEncryptionType,
       );
 
@@ -1162,3 +1162,11 @@ extension DataStreamParticipantMethods on LocalParticipant {
     return byteWriter;
   }
 }
+
+/// The AddTrackRequest's `disableRed` for an audio publish. GRAVIX 2026-09-29: it
+/// was `publishOptions.red ?? true`, i.e. RED DISABLED whenever it was asked for
+/// (and by default), so no Flutter publisher ever sent redundant audio -- on the
+/// Kuwaiti cellular uplink that lost ~15 % of packets. RED is on by default and
+/// off when asked (`red: false`) or with E2EE (the SFU cannot rewrite encrypted
+/// RED payloads).
+bool gravixDisableRed({required bool e2ee, bool? red}) => e2ee ? true : !(red ?? true);

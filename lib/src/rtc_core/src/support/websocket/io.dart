@@ -22,13 +22,21 @@ import '../../logger.dart';
 import '../../options.dart';
 import '../http_client/io.dart';
 import '../websocket.dart';
+import 'standby_types.dart' show kGravixStandbyUpgradeTimeout;
 
 Future<GravixRtcWebSocketIO> lkWebSocketConnect(
   Uri uri, {
   WebSocketEventHandlers? options,
   Map<String, String>? headers,
   NetworkOptions? networkOptions = const NetworkOptions(),
-}) => GravixRtcWebSocketIO.connect(uri, options: options, headers: headers, networkOptions: networkOptions);
+  Object? preconnected,
+}) => GravixRtcWebSocketIO.connect(
+  uri,
+  options: options,
+  headers: headers,
+  networkOptions: networkOptions,
+  preconnected: preconnected,
+);
 
 class GravixRtcWebSocketIO extends GravixRtcWebSocket {
   final io.WebSocket _ws;
@@ -76,9 +84,39 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
     WebSocketEventHandlers? options,
     Map<String, String>? headers,
     NetworkOptions? networkOptions = const NetworkOptions(),
+    Object? preconnected,
   }) async {
     logger.fine('[WebSocketIO] Connecting(uri: ${uri.toString()})...');
     final resolvedNetworkOptions = networkOptions ?? const NetworkOptions();
+    if (preconnected is io.HttpClient) {
+      // The standby client: its keep-alive pool holds a TLS connection to this
+      // host, and the upgrade request goes over it (standby_io.dart). The caller
+      // owns and releases the client. A pooled connection that died silently (a
+      // carrier NAT) fails the upgrade: retried once below, cold, as if there had
+      // been no standby.
+      try {
+        // A pooled connection a carrier NAT dropped silently does not fail: the
+        // upgrade request goes into a black hole and dart:io waits. A warm upgrade
+        // is one round trip (72-83 ms on the 2026-09-29 emulator proof), so a short
+        // bound hands the join to the cold path with most of its timeout left.
+        final ws = await io.WebSocket.connect(
+          uri.toString(),
+          headers: headers,
+          customClient: preconnected,
+        ).timeout(kGravixStandbyUpgradeTimeout);
+        logger.fine('[WebSocketIO] Connected (standby connection)');
+        return GravixRtcWebSocketIO._(ws, options);
+      } on CertificatePinningException {
+        rethrow;
+      } on io.WebSocketException catch (err) {
+        // the server answered the upgrade (a 401/403/404...): a cold retry gets
+        // the same answer, and the caller validates it
+        logger.severe('[WebSocketIO] did throw $err');
+        throw WebSocketException('Failed to connect', err);
+      } catch (err) {
+        logger.warning('[WebSocketIO] standby connection failed ($err), connecting cold');
+      }
+    }
     final useCustomClient = resolvedNetworkOptions.certificatePinning?.isEnabled ?? false;
     final customClient = useCustomClient ? createSdkIoHttpClient(resolvedNetworkOptions) : null;
     try {

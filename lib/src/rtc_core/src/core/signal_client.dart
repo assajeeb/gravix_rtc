@@ -36,6 +36,7 @@ import '../support/disposable.dart';
 import '../support/http_client.dart';
 import '../support/platform.dart';
 import '../support/websocket.dart';
+import '../support/websocket/standby.dart';
 import '../types/other.dart';
 import '../utils.dart' show Utils, UriExt;
 
@@ -62,6 +63,12 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
   String? participantSid;
 
   int _requestId = 0;
+
+  /// GRAVIX: what the last (non-reconnect) connect found of the standby
+  /// connection (standby_io.dart): `outcome`, `ageMs`, `waitedMs`, `reused`
+  /// (the upgrade went over the warm connection) and `mechanism`. The join
+  /// timeline's `standby` block; null before the first connect.
+  Map<String, Object?>? gravixStandby;
 
   @internal
   int getNextRequestId() {
@@ -150,15 +157,42 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       }
       // Clean up existing socket
       await cleanUp();
+      // GRAVIX standby: a connection to this host opened ahead of the tap
+      // (GravixRoomService.standby) carries the upgrade. A first join only: a
+      // reconnect keeps its own path.
+      var taken = GravixStandbyTaken.none;
+      if (!reconnect) {
+        final half = connectOptions.timeouts.connection ~/ 2;
+        taken = await GravixSignalStandby.take(
+          uriString,
+          token,
+          wait: half < kGravixStandbyJoinWait ? half : kGravixStandbyJoinWait,
+        );
+      }
       // Attempt to connect
       var future = _wsConnector(
         rtcUri,
         options: WebSocketEventHandlers(onData: _onSocketData, onDispose: _onSocketDispose, onError: _onSocketError),
         headers: {'Authorization': 'Bearer $token'},
         networkOptions: roomOptions.networkOptions,
+        preconnected: taken.client,
       );
       future = future.timeout(connectOptions.timeouts.connection);
-      _ws = await future;
+      try {
+        _ws = await future;
+      } finally {
+        if (!reconnect) {
+          gravixStandby = <String, Object?>{
+            'outcome': taken.outcome,
+            'ageMs': taken.ageMs,
+            'waitedMs': taken.waitedMs,
+            // false: the warm connection was gone and the upgrade opened a new one
+            'reused': taken.usable ? GravixSignalStandby.connectsOf(taken.client) == taken.connectsAtTake : null,
+            'mechanism': GravixSignalStandby.mechanism,
+          };
+        }
+        GravixSignalStandby.release(taken.client);
+      }
       // Successful connection
       _connectionState = ConnectionState.connected;
       events.emit(const SignalConnectedEvent());

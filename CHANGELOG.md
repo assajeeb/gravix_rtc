@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.3 — 2026-09-30
+
+From the Gravix Tester field logs (Kuwait, OnePlus Android 15, cellular -> doh1).
+
+### Added
+- **`GravixRoomService.standby(url, token)`** / **`standbyState(url, token)`**: pre-connects
+  the signalling host (TCP + TLS) ahead of the tap; the join's WebSocket upgrade reuses
+  that connection, so the tap pays one round trip instead of TCP + TLS + upgrade (field:
+  tap -> wsOpen 420-630 ms cold at ~50 ms RTT). Bookkeeping as the JS SDK's
+  `room.standby` (exact url + token, 110 s, rotate at 45 s, at most 4, the join waits up
+  to 5 s for one still opening). NOT the JS protocol-level standby socket: that is a
+  single-peer-connection (v1) join on the server, which this SDK does not speak. Works
+  against any server. Join timeline: `standby {outcome, ageMs, waitedMs, reused,
+  mechanism: "preconnect"}`.
+- **`connect(publishInBackground: true)`** (opt-in): connect() returns once the peer
+  connection is up; the mic/camera publication runs behind it (field: ~0.5 s between
+  pcConnected and connect() returning). New timeline mark `micPublished`, deltas
+  `pcToConnectReturned`, `pcToMicPublished`, `tapToMicPublished`. setMicEnabled /
+  setCameraEnabled / disconnect wait for the initial publication.
+- **`selectedPairRtt()`** and `gravixSelectedPairRttMs(stats)`: RTT of the selected ICE
+  candidate pair per peer connection.
+
+### Fixed
+- `LocalAudioTrack.getSenderStats`: packetsLost / roundTripTime / jitter are read from
+  `remote-inbound-rtp` (they were read from `outbound-rtp`, which has none: uplink loss
+  showed 0 % and RTT null while the SFU measured ~15 % uplink loss).
+- Audio publish: RED (redundant audio) was DISABLED by default and whenever asked for
+  (`disableRed: red ?? true`). Now on by default, off with `red: false` or E2EE.
+- The device info in the join URL is read once per process, not on every join.
+
 ## 0.4.2 — 2026-09-28
 
 - Upstream copyright notices restored in the Apache-2.0 third-party files; no code changes.

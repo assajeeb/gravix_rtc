@@ -85,7 +85,33 @@ class Utils {
   // DeviceInfoPlugin caches internally
   static final _deviceInfoPlugin = DeviceInfoPlugin();
 
-  static Future<lk_models.ClientInfo?> _clientInfo() async {
+  // GRAVIX 2026-09-29: the device / OS info never changes while the process runs,
+  // but every connect asked the platform again (device_info_plus: a platform-channel
+  // round trip on the join path, before the WebSocket dial, queued behind whatever
+  // the audio session is doing on Android's main thread). Asked once now; a failed
+  // read is asked again next time.
+  static Future<lk_models.ClientInfo?>? _clientInfoCache;
+
+  static Future<lk_models.ClientInfo?> _clientInfo() {
+    final cached = _clientInfoCache;
+    if (cached != null) return cached;
+    final f = _clientInfoUncached();
+    _clientInfoCache = f;
+    f.catchError((Object _) {
+      if (identical(_clientInfoCache, f)) _clientInfoCache = null;
+      return null;
+    });
+    return f;
+  }
+
+  /// Reads the client info ahead of a join (the standby / prewarm path).
+  static Future<void> warmClientInfo() async {
+    try {
+      await _clientInfo();
+    } catch (_) {}
+  }
+
+  static Future<lk_models.ClientInfo?> _clientInfoUncached() async {
     if (!kIsWeb && lkPlatformIsTest()) {
       return lk_models.ClientInfo(os: 'test');
     }
