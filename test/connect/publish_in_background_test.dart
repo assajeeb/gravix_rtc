@@ -76,14 +76,19 @@ void main() {
     expect(ok, isTrue);
     expect(order, ['transport', 'install:start'], reason: 'returned with the publication still held');
 
-    // a toggle meanwhile waits for the initial publication instead of racing it
+    // a mute meanwhile does not race the initial publication: nothing is live
+    // yet, so it returns at once (field review 2026-09-30: it must not wait on a
+    // blocked first enable), and the publication applies it at its mic step
     var toggled = false;
     final toggle = s.setMicEnabled(false).then((_) => toggled = true);
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(toggled, isFalse);
+    expect(toggled, isTrue);
+    expect(s.isMicMuted.value, isTrue);
     installGate.complete();
     await toggle;
+    await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(order.last, 'install:end');
+    expect(s.isMicMuted.value, isTrue, reason: 'the tap during the join wins over publishMic');
 
     await s.disconnect();
     final t = s.joinTimeline.value!;

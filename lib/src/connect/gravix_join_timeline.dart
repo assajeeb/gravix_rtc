@@ -138,7 +138,7 @@ const String kGravixFirstAudioDefinition =
 /// This package's version, for the report. Kept in step with pubspec.yaml by
 /// `test/connect/join_timeline_test.dart`, because a Dart package cannot read
 /// its own pubspec at runtime.
-const String kGravixSdkVersion = '0.4.3';
+const String kGravixSdkVersion = '0.4.5';
 
 /// Default stats poll while waiting for first audio. 50 ms keeps the proxy's
 /// resolution well under the ~100 ms differences the phone runs need to
@@ -539,6 +539,25 @@ class GravixJoinTimelineRecorder {
   int icePolls = 0;
   bool? dtlsUpWhenIceFirstSeenUp;
 
+  /// Field review 2026-09-30: Android ICE-connected -> pcConnected took 540-935 ms
+  /// even at 10 ms RTT (web: 115-156 ms). The poll now also runs on until the
+  /// stats show DTLS connected, so the join tells the handshake itself (stats
+  /// time) apart from the delivery of the peer connection's `connected` callback
+  /// to Dart (pcConnected): `ms.dtlsStatsToPcConnected`.
+  DateTime? dtlsLastSeenDown;
+  DateTime? dtlsFirstSeenUp;
+
+  /// `transport.dtlsRole` (client = this side sends the ClientHello) and
+  /// `selectedCandidatePairChanges` of the primary transport, when reported.
+  String? dtlsRole;
+  int? pairChanges;
+
+  /// First poll in which a candidate pair was `nominated` (the phone is the ICE
+  /// CONTROLLED side of the subscriber connection: the SFU nominates), and the
+  /// last in which none was. The DTLS handshake cannot finish before this.
+  DateTime? nominatedFirstSeen;
+  DateTime? nominatedLastUnseen;
+
   /// The inbound-audio counters in the snapshot that satisfied the playout proxy.
   Map<String, Object?>? firstAudioEvidence;
 
@@ -631,6 +650,12 @@ class GravixJoinTimelineRecorder {
     iceFirstSeenUp = null;
     dtlsUpWhenIceFirstSeenUp = null;
     icePolls = 0;
+    dtlsLastSeenDown = null;
+    dtlsFirstSeenUp = null;
+    dtlsRole = null;
+    pairChanges = null;
+    nominatedFirstSeen = null;
+    nominatedLastUnseen = null;
     offersMs.clear();
     // Per ATTEMPT, like the marks above - except the service's own per-join
     // events, which happen once whatever the ladder does.
@@ -646,6 +671,12 @@ class GravixJoinTimelineRecorder {
     final ma = _monoAt[from], mb = _monoAt[to];
     if (ma != null && mb != null) return (mb - ma).inMilliseconds;
     return b.difference(a).inMilliseconds;
+  }
+
+  int? _wallDeltaTo(DateTime? from, String to) {
+    final b = _wallAt[to];
+    if (from == null || b == null) return null;
+    return b.difference(from).inMilliseconds;
   }
 
   GravixJoinTimeline build(GravixJoinTimelineEnd endReason, {String sdkVersion = ''}) {
@@ -679,6 +710,18 @@ class GravixJoinTimelineRecorder {
         'pcToConnectReturned': _delta(GravixJoinStep.pcConnected, GravixJoinStep.connectReturned),
         'pcToMicPublished': _delta(GravixJoinStep.pcConnected, GravixJoinStep.micPublished),
         'tapToMicPublished': _delta(s, GravixJoinStep.micPublished),
+        // stats saw DTLS connected -> the `connected` callback reached Dart; large =
+        // the event waited on the platform thread, not the network
+        'dtlsStatsToPcConnected': _wallDeltaTo(dtlsFirstSeenUp, GravixJoinStep.pcConnected),
+        // ICE up (writable) -> the SFU nominated a pair (stats time)
+        'iceToNominated': iceFirstSeenUp != null && nominatedFirstSeen != null
+            ? nominatedFirstSeen!.difference(iceFirstSeenUp!).inMilliseconds
+            : null,
+        'nominatedToPcConnected': _wallDeltaTo(nominatedFirstSeen, GravixJoinStep.pcConnected),
+        // ICE up -> DTLS up, both from the stats (the handshake itself)
+        'dtlsStats': iceFirstSeenUp != null && dtlsFirstSeenUp != null && dtlsUpWhenIceFirstSeenUp != true
+            ? dtlsFirstSeenUp!.difference(iceFirstSeenUp!).inMilliseconds
+            : null,
       },
       appSpans: input.appSpans,
       tokenFromCache: input.tokenFromCache,
@@ -694,6 +737,12 @@ class GravixJoinTimelineRecorder {
         'lastSeenDown': iceLastSeenDown == null ? null : _iso(iceLastSeenDown!),
         'firstSeenUp': iceFirstSeenUp == null ? null : _iso(iceFirstSeenUp!),
         'dtlsAlreadyUpThen': dtlsUpWhenIceFirstSeenUp,
+        'dtlsLastSeenDown': dtlsLastSeenDown == null ? null : _iso(dtlsLastSeenDown!),
+        'dtlsFirstSeenUp': dtlsFirstSeenUp == null ? null : _iso(dtlsFirstSeenUp!),
+        'dtlsRole': dtlsRole,
+        'pairChanges': pairChanges,
+        'nominatedFirstSeen': nominatedFirstSeen == null ? null : _iso(nominatedFirstSeen!),
+        'nominatedLastUnseen': nominatedLastUnseen == null ? null : _iso(nominatedLastUnseen!),
         'polls': icePolls,
         'resolved': _wallAt.containsKey(GravixJoinStep.iceConnected),
       },

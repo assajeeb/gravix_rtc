@@ -44,6 +44,7 @@ export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding;
 export 'src/large_room/large_room.dart';
 export 'src/music/gravix_music_controller.dart';
 export 'src/room/gravix_audio_first.dart';
+export 'src/room/gravix_red_mode.dart';
 export 'src/room/gravix_room_service.dart';
 export 'src/rtc_core/gravix_client.dart';
 export 'src/rtc_core/src/support/websocket/standby_types.dart' show GravixStandbyState, kGravixStandbyJoinWait;

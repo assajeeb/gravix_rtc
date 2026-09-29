@@ -14,7 +14,10 @@ void main() {
       // configured layer is two layers on the wire.
       expect(preset.simulcast, isTrue);
       expect(preset.videoSimulcastLayers, hasLength(1));
-      expect(preset.videoSimulcastLayers.single, VideoParametersPresets.h180_169);
+      // 180p at the stock h180 bitrate, at the top layer's 24 fps (one fps per ladder).
+      expect(preset.videoSimulcastLayers.single, GravixPublishPresets.lowLayer);
+      expect(preset.videoSimulcastLayers.single.dimensions, VideoParametersPresets.h180_169.dimensions);
+      expect(preset.videoSimulcastLayers.single.encoding!.maxFramerate, preset.videoEncoding!.maxFramerate);
     });
 
     test('keeps the balanced degradation preference', () {

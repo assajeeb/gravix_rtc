@@ -56,6 +56,23 @@ void main() {
     expect(gravixPickMeasuredRegion(blr.url, [blr, sgp, nyc])?.region, 'nyc1');
   });
 
+  test('the pinned (token) region is kept unless the pick is clearly faster (field 2026-09-30)', () async {
+    // first measurement of the process: nothing held, blr1 is the raw best
+    await gravixMeasureRegions(regionUrls: [blr, sgp], sampler: fixed({'blr1': 167, 'sgp1': 180}));
+    expect(gravixPickMeasuredRegion(sgp.url, [blr, sgp])?.region, 'sgp1', reason: '13 ms is noise');
+    expect(gravixPickMeasuredRegion(blr.url, [blr, sgp])?.region, 'blr1');
+  });
+
+  test('the pinned region clearly slower, or not answering: the measured pick', () async {
+    await gravixMeasureRegions(regionUrls: [blr, sgp], sampler: fixed({'blr1': 100, 'sgp1': 180}));
+    expect(gravixPickMeasuredRegion(sgp.url, [blr, sgp])?.region, 'blr1', reason: '80 ms and 44 % faster');
+    await gravixMeasureRegions(
+      regionUrls: [blr, sgp],
+      sampler: fixed({'blr1': 100, 'sgp1': 90}, down: {'sgp1'}),
+    );
+    expect(gravixPickMeasuredRegion(sgp.url, [blr, sgp])?.region, 'blr1');
+  });
+
   test('nothing measured, or stale: no pick', () async {
     expect(gravixPickMeasuredRegion(blr.url, [blr, sgp]), isNull);
     await gravixMeasureRegions(regionUrls: [blr], sampler: fixed({'blr1': 50}));

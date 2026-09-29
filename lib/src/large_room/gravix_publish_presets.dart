@@ -1,7 +1,7 @@
 // Copyright (c) 2024-2026 Gravity Compile. MIT License; see LICENSE.
 
 import '../rtc_core/gravix_client.dart'
-    show DegradationPreference, VideoEncoding, VideoParametersPresets, VideoPublishOptions;
+    show DegradationPreference, VideoDimensionsPresets, VideoEncoding, VideoParameters, VideoPublishOptions;
 
 /// Publish profiles for large rooms.
 ///
@@ -28,6 +28,20 @@ import '../rtc_core/gravix_client.dart'
 /// negotiated codec. That is a deployment decision, not something an SDK should
 /// make for an app on upgrade, which is why nothing applies this for you.
 abstract final class GravixPublishPresets {
+  /// The 180p simulcast rung of [host] and of `GravixRoomService`'s default
+  /// ladder: 320x180 at 160 kbps (the `VideoParametersPresets.h180_169` bitrate)
+  /// and **24 fps, the same as the top layer**.
+  ///
+  /// Every layer of a Gravix ladder runs at one framerate. A server relay bug kept
+  /// cross-region viewers on the lowest layer when a track's layers had different
+  /// `maxFramerate` (the stock 180p preset is 15 fps); the server fix ships
+  /// separately and this is defence in depth. 160 kbps is still ~0.12 bit per
+  /// pixel per frame at 24 fps, so the rung needs no extra bitrate.
+  static const VideoParameters lowLayer = VideoParameters(
+    dimensions: VideoDimensionsPresets.h180_169,
+    encoding: VideoEncoding(maxBitrate: 160 * 1000, maxFramerate: 24),
+  );
+
   /// Large-room host: two simulcast layers, H.264.
   ///
   /// Two layers, not three. The capture resolution is published as `f`
@@ -40,8 +54,8 @@ abstract final class GravixPublishPresets {
     videoCodec: 'h264',
     simulcast: true,
     videoEncoding: VideoEncoding(maxBitrate: 800_000, maxFramerate: 24),
-    // f = capture resolution (~540p), q = 180p. Two layers total.
-    videoSimulcastLayers: [VideoParametersPresets.h180_169],
+    // f = capture resolution (~540p), q = 180p. Two layers total, both 24 fps.
+    videoSimulcastLayers: [lowLayer],
     degradationPreference: DegradationPreference.balanced,
   );
 

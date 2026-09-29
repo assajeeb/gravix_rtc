@@ -282,18 +282,44 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
 /// else the fastest measured region it does offer. A lookup, never a probe.
 /// Null -- and `connect()` does what it did before -- when nothing fresh is
 /// measured or no measured region is offered. Matched by url, else by region.
+///
+/// The pinned url (the token's region: the app's own choice) is kept unless the
+/// pick is clearly faster in the same measurement -- the decision cache's rule,
+/// more than [GravixRegionDecisionCache.switchMinGain] AND more than
+/// [GravixRegionDecisionCache.switchMinGainRatio] lower. Field 2026-09-30: the
+/// tester kept sgp1 (180 ms) over blr1 (167 ms), minted its token and opened its
+/// standby for sgp1, and this lookup moved the join to blr1 anyway: a cold dial
+/// (wsOpen 200-1300 ms instead of ~80) to another region than the token named,
+/// and the region flip-flop the app was avoiding.
 GravixRegionUrl? gravixPickMeasuredRegion(String pinnedUrl, List<GravixRegionUrl> candidates, {DateTime? now}) {
   final m = gravixRegionMeasurement(now: now);
   if (m == null || m.best == null || candidates.isEmpty) return null;
   final order = [m.best!, ...m.regions.where((r) => r.region != m.best!.region)];
+  GravixRegionMeasurement? pickedM;
+  GravixRegionUrl? picked;
   for (final r in order) {
     if (!r.ok) continue;
     final offered =
         candidates.where((c) => c.url == r.url).firstOrNull ??
         candidates.where((c) => c.region == r.region).firstOrNull;
-    if (offered != null) return offered;
+    if (offered != null) {
+      pickedM = r;
+      picked = offered;
+      break;
+    }
   }
-  return null;
+  if (picked == null || pickedM == null) return null;
+  String norm(String u) => u.replaceAll(RegExp(r'/+$'), '');
+  if (norm(picked.url) == norm(pinnedUrl)) return picked;
+  final pinnedM = m.regions.where((r) => r.ok && norm(r.url) == norm(pinnedUrl)).firstOrNull;
+  final pinned = candidates.where((c) => norm(c.url) == norm(pinnedUrl)).firstOrNull;
+  if (pinnedM == null || pinned == null) return picked;
+  final gain = pinnedM.rttMs! - pickedM.rttMs!;
+  final needed = [
+    GravixRegionDecisionCache.switchMinGain.inMilliseconds.toDouble(),
+    pinnedM.rttMs! * GravixRegionDecisionCache.switchMinGainRatio,
+  ].reduce((a, b) => a > b ? a : b);
+  return gain > needed ? picked : pinned;
 }
 
 /// The measured regions as join candidates, for a connect whose token came with

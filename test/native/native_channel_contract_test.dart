@@ -148,6 +148,24 @@ void main() {
     expect(calls.last.method, 'stopLocalRecording');
   });
 
+  group('setMicrophoneMute', () {
+    test('sends {mute}; true only when the native side confirms', () async {
+      answer((_) async => true);
+      expect(await Native.setMicrophoneMute(true), isTrue);
+      expect(calls.single.method, 'setMicrophoneMute');
+      expect(calls.single.arguments, {'mute': true});
+    });
+
+    test('no audio device module yet (false) / error / no plugin: false, never throws', () async {
+      answer((_) async => false);
+      expect(await Native.setMicrophoneMute(true), isFalse);
+      answer((_) => throwing('setMicrophoneMute'));
+      expect(await Native.setMicrophoneMute(true), isFalse);
+      unregistered();
+      expect(await Native.setMicrophoneMute(false), isFalse);
+    });
+  });
+
   group('getAudioProcessingState', () {
     test('returns the native map', () async {
       answer((_) async => {'hasAudioProcessingModule': true});

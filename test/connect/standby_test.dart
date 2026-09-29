@@ -242,7 +242,8 @@ void main() {
       final watch = Stopwatch()..start();
       final ws = await _dial(url, taken.client);
       expect(watch.elapsedMilliseconds, lessThan(2000));
-      expect(accepts, 2, reason: 'the cold retry opened its own connection');
+      expect(accepts, 2, reason: 'the fresh dial opened its own connection');
+      expect(ws.gravixDial?.path, 'redial');
       GravixSignalStandby.release(taken.client);
       await ws.dispose();
     } finally {
@@ -253,5 +254,110 @@ void main() {
       await proxy.close();
       await http.close(force: true);
     }
+  });
+
+  test(
+    'upgrade reached the server, the answer is lost: fresh dial at the bound, the abandoned session is closed',
+    () async {
+      // field 2026-09-30: the SFU started a session at the tap from the upgrade over
+      // the standby connection; nothing came back. The proxy forwards everything
+      // client -> server, and on the FIRST connection nothing server -> client after
+      // the warm-up's response.
+      final serverSockets = <WebSocket>[];
+      final closed = <int>[];
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      http.listen((req) async {
+        if (WebSocketTransformer.isUpgradeRequest(req)) {
+          final ws = await WebSocketTransformer.upgrade(req);
+          final n = serverSockets.length;
+          serverSockets.add(ws);
+          ws.listen(ws.add, onDone: () => closed.add(n), onError: (_) {});
+          return;
+        }
+        req.response.statusCode = 404;
+        await req.response.close();
+      });
+      var accepts = 0;
+      final sockets = <Socket>[];
+      final proxy = await ServerSocket.bind('127.0.0.1', 0);
+      proxy.listen((c) async {
+        final n = ++accepts;
+        final up = await Socket.connect('127.0.0.1', http.port);
+        sockets
+          ..add(c)
+          ..add(up);
+        var responses = 0;
+        c.listen(up.add, onError: (_) {}, onDone: () => up.destroy());
+        up.listen(
+          (d) {
+            if (n == 1 && ++responses > 1) return; // the HEAD's answer only
+            c.add(d);
+          },
+          onError: (_) {},
+          onDone: () => c.destroy(),
+        );
+      });
+      final url = 'ws://127.0.0.1:${proxy.port}';
+      try {
+        expect(await GravixSignalStandby.open(url, 'tok', rttHintMs: 10), isTrue);
+        final taken = await GravixSignalStandby.take(url, 'tok');
+        expect(taken.upgradeBound, kGravixStandbyUpgradeFloor, reason: '3 x 10 ms is below the floor');
+        final watch = Stopwatch()..start();
+        final ws = await GravixRtcWebSocket.connect(Uri.parse('$url/rtc?x=1'), preconnected: taken);
+        final ms = watch.elapsedMilliseconds;
+        expect(ms, greaterThanOrEqualTo(kGravixStandbyUpgradeFloor.inMilliseconds - 20));
+        expect(ms, lessThan(kGravixStandbyUpgradeFloor.inMilliseconds + 700), reason: 'redialled at the bound');
+        expect(ws.gravixDial?.path, 'redial');
+        expect(ws.gravixDial?.stalledAfterMs, kGravixStandbyUpgradeFloor.inMilliseconds);
+        expect(accepts, 2);
+        // the server got both upgrades; the first (abandoned) one is closed, the
+        // fresh one is alive
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        expect(serverSockets.length, 2);
+        expect(closed, [0], reason: 'the abandoned session was closed, the fresh one was not');
+        GravixSignalStandby.release(taken.client);
+        await ws.dispose();
+      } finally {
+        for (final s in sockets) {
+          s.destroy();
+        }
+        await proxy.close();
+        await http.close(force: true);
+      }
+    },
+  );
+
+  test('a normal warm upgrade is path standby, not raced', () async {
+    await GravixSignalStandby.open(server.url, 'tok');
+    final taken = await GravixSignalStandby.take(server.url, 'tok');
+    final ws = await GravixRtcWebSocket.connect(Uri.parse('${server.url}/rtc?x=1'), preconnected: taken);
+    expect(ws.gravixDial?.path, 'standby');
+    expect(server.accepts, 1, reason: 'no fresh dial');
+    GravixSignalStandby.release(taken.client);
+    await ws.dispose();
+  });
+
+  test('upgrade bound: 3 x RTT within 0.5 - 1.5 s, 1.5 s without an RTT', () {
+    expect(gravixStandbyUpgradeBound(null), const Duration(milliseconds: 1500));
+    expect(gravixStandbyUpgradeBound(10), const Duration(milliseconds: 500));
+    expect(gravixStandbyUpgradeBound(171), const Duration(milliseconds: 513));
+    expect(gravixStandbyUpgradeBound(400), const Duration(milliseconds: 1200));
+    expect(gravixStandbyUpgradeBound(900), const Duration(milliseconds: 1500));
+  });
+
+  test('reopenAll (app resumed): the old connection is closed at once and a new one opened', () async {
+    await GravixSignalStandby.open(server.url, 'tok');
+    expect(server.accepts, 1);
+    final reopening = GravixSignalStandby.reopenAll();
+    // the suspect one is not handed out while its replacement opens
+    expect(GravixSignalStandby.state(server.url, 'tok').state, 'opening');
+    await reopening;
+    expect(server.accepts, 2);
+    expect(GravixSignalStandby.state(server.url, 'tok').state, 'open');
+    final taken = await GravixSignalStandby.take(server.url, 'tok');
+    final ws = await _dial(server.url, taken.client);
+    expect(server.accepts, 2, reason: 'the join used the reopened connection');
+    GravixSignalStandby.release(taken.client);
+    await ws.dispose();
   });
 }

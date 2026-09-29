@@ -17,6 +17,7 @@
 
 package com.gravitycompile.gravix_cloud.rtc
 
+import com.gravitycompile.gravix_cloud.music.MusicMixerEngine
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
@@ -305,6 +306,34 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
   }
 
+  // Microphone mute inside the audio device module, recorder left running
+  // (field 2026-09-30): disabling the mic track makes the engine stop the
+  // AudioRecord and re-create it on unmute, and re-opening a VOICE_COMMUNICATION
+  // input under a live call re-routes the voice path on OEM HALs, interrupting
+  // the playout of the other participants. WebRtcAudioRecord zeroes the buffer
+  // right after AudioRecord.read(), before the mixer callback and the native
+  // delivery; the music mixer is held too, so nothing but silence is sent.
+  // Returns true only when the module exists; Dart falls back to disabling the
+  // track otherwise.
+  private fun handleSetMicrophoneMute(call: MethodCall, result: Result) {
+    val audioDeviceModule = flutterWebRTCPlugin?.audioDeviceModule
+    if (audioDeviceModule == null) {
+      result.success(false)
+      return
+    }
+    val mute = call.argument<Boolean>("mute") ?: false
+    try {
+      // mixer first on mute, last on unmute: no window where music goes out alone
+      if (mute) MusicMixerEngine.captureMuted = true
+      audioDeviceModule.setMicrophoneMute(mute)
+      if (!mute) MusicMixerEngine.captureMuted = false
+      result.success(true)
+    } catch (error: Throwable) {
+      Log.w(TAG, "setMicrophoneMute($mute) failed", error)
+      result.error("setMicrophoneMute", error.message, null)
+    }
+  }
+
   private fun handleStopLocalRecording(result: Result) {
     val audioDeviceModule = flutterWebRTCPlugin?.audioDeviceModule
     if (audioDeviceModule == null) {
@@ -453,6 +482,10 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
       "stopLocalRecording" -> {
         handleStopLocalRecording(result)
+      }
+
+      "setMicrophoneMute" -> {
+        handleSetMicrophoneMute(call, result)
       }
 
       "getAudioProcessingState" -> {

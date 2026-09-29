@@ -18,7 +18,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data' show Uint8List;
 
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb, defaultTargetPlatform;
 
 import 'package:collection/collection.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -36,6 +36,7 @@ import 'support/platform.dart';
 import 'track/local/video.dart';
 import 'types/other.dart';
 import 'types/priority.dart';
+import 'types/video_cap.dart';
 import 'types/video_dimensions.dart';
 import 'types/video_encoding.dart';
 import 'types/video_parameters.dart';
@@ -310,6 +311,23 @@ class Utils {
     return result;
   }
 
+  static final Set<String> _warnedMixedFramerateLadders = <String>{};
+
+  /// Debug builds: one warning per distinct app-supplied ladder whose layers do
+  /// not share one maxFramerate. The ladder itself is published as given.
+  static void _warnMixedFramerate(List<VideoParameters> ladder) {
+    if (!kDebugMode) return;
+    final fps = ladder.map((p) => p.encoding?.maxFramerate).toList();
+    if (fps.toSet().length < 2) return;
+    final key = fps.join(',');
+    if (!_warnedMixedFramerateLadders.add(key)) return;
+    logger.warning(
+      'Simulcast layers have different maxFramerate (${fps.join(' / ')} fps, low -> high). '
+      'Some server relays keep viewers on the lowest layer when the layers of one track '
+      'differ in fps; give every layer the top layer\'s maxFramerate.',
+    );
+  }
+
   @internal
   static List<rtc.RTCRtpEncoding> encodingsFromPresets(
     VideoDimensions dimensions, {
@@ -331,13 +349,19 @@ class Utils {
     return result;
   }
 
+  /// [sdkLadder]: the ladder was picked by the SDK, not the app (the app gave no
+  /// simulcast layers; with a plan cap the defaults arrive here already resolved
+  /// in [requestedPresets]). Every rung of such a ladder runs at the top
+  /// layer's framerate, see [_clampSimulcastPreset].
   @internal
   static List<VideoParameters> computeSimulcastPresets({
     required VideoDimensions dimensions,
     required VideoParameters original,
     required List<VideoParameters> requestedPresets,
     required bool isScreenShare,
+    bool sdkLadder = false,
   }) {
+    final followTop = sdkLadder || requestedPresets.isEmpty;
     final params =
         (requestedPresets.isNotEmpty
                 ? requestedPresets
@@ -353,21 +377,31 @@ class Utils {
     final size = dimensions.max();
     if (size >= 960 && midPreset != null) {
       return [
-        _clampSimulcastPreset(lowPreset, to: original, inDimensions: dimensions),
-        _clampSimulcastPreset(midPreset, to: original, inDimensions: dimensions),
+        _clampSimulcastPreset(lowPreset, to: original, inDimensions: dimensions, followTopFramerate: followTop),
+        _clampSimulcastPreset(midPreset, to: original, inDimensions: dimensions, followTopFramerate: followTop),
         original,
       ];
     }
     if (size >= 480) {
-      return [_clampSimulcastPreset(lowPreset, to: original, inDimensions: dimensions), original];
+      return [
+        _clampSimulcastPreset(lowPreset, to: original, inDimensions: dimensions, followTopFramerate: followTop),
+        original,
+      ];
     }
     return [original];
   }
 
+  /// Gravix: [followTopFramerate] gives the rung the top layer's fps. A server
+  /// relay bug kept cross-region viewers on the lowest layer when a track's
+  /// layers had different maxFramerate; the server fix ships separately, this is
+  /// defence in depth. The top keeps its fps (it is what most viewers watch);
+  /// the low rungs have the bitrate headroom. Off (app-supplied layers), a rung
+  /// is only capped at the top's fps, as before.
   static VideoParameters _clampSimulcastPreset(
     VideoParameters preset, {
     required VideoParameters to,
     required VideoDimensions inDimensions,
+    bool followTopFramerate = false,
   }) {
     final presetEncoding = preset.encoding;
     final topEncoding = to.encoding;
@@ -376,7 +410,9 @@ class Utils {
     }
 
     final rawScaleDownBy = inDimensions.max() / preset.dimensions.max();
-    final clampedFramerate = math.min(presetEncoding.maxFramerate, topEncoding.maxFramerate);
+    final clampedFramerate = followTopFramerate
+        ? topEncoding.maxFramerate
+        : math.min(presetEncoding.maxFramerate, topEncoding.maxFramerate);
     final clampedBitrate = rawScaleDownBy <= 1.0
         ? math.min(presetEncoding.maxBitrate, topEncoding.maxBitrate)
         : presetEncoding.maxBitrate;
@@ -442,13 +478,29 @@ class Utils {
   }
 
   @internal
+  ///
+  /// [maxShortEdge] is the EFFECTIVE Gravix plan cap for this track (see
+  /// [GravixVideoCap.effective]); null = no cap known, behaviour unchanged.
+  /// With a cap, [dimensions] stays the real capture size (scale factors are
+  /// relative to what the encoder is fed) but the top layer is sized to the
+  /// clamped size, so every encoding's short edge is <= the cap.
   static List<rtc.RTCRtpEncoding>? computeVideoEncodings({
     required bool isScreenShare,
     VideoDimensions? dimensions,
     VideoPublishOptions? options,
     String? codec,
+    int? maxShortEdge,
   }) {
     options ??= const VideoPublishOptions();
+
+    // Size of the top published layer. Equal to [dimensions] when uncapped.
+    final VideoDimensions? topDimensions = (dimensions != null && maxShortEdge != null)
+        ? GravixVideoCap.clampDimensions(dimensions, maxShortEdge)
+        : dimensions;
+    // Scale for single-encoding paths (no per-preset scale is computed there).
+    final double? capScale = (dimensions != null && topDimensions != dimensions)
+        ? GravixVideoCap.scaleDownBy(dimensions, topDimensions!)
+        : null;
 
     VideoEncoding? videoEncoding = options.videoEncoding;
 
@@ -461,16 +513,18 @@ class Utils {
     if ((videoEncoding == null && !options.simulcast && scalabilityMode == null) || dimensions == null) {
       // don't set encoding when we are not simulcasting and user isn't restricting
       // encoding parameters
-      return [rtc.RTCRtpEncoding()];
+      return [rtc.RTCRtpEncoding(scaleResolutionDownBy: capScale ?? 1.0)];
     }
 
-    final presets = _presetsForDimensions(isScreenShare: isScreenShare, dimensions: dimensions);
+    // Bitrate is picked for the size actually published (the clamped one),
+    // not the capture size — a 1080p capture sent at 540p needs 540p bitrate.
+    final presets = _presetsForDimensions(isScreenShare: isScreenShare, dimensions: topDimensions!);
 
     if (videoEncoding == null) {
       // find the right encoding based on width/height
       videoEncoding = _findAppropriateEncoding(
         isScreenShare: isScreenShare,
-        dimensions: dimensions,
+        dimensions: topDimensions,
         presets: presets,
         codec: codec,
       );
@@ -478,7 +532,7 @@ class Utils {
       logger.fine('using video encoding', videoEncoding);
     }
 
-    final original = VideoParameters(dimensions: dimensions, encoding: videoEncoding);
+    final original = VideoParameters(dimensions: topDimensions, encoding: videoEncoding);
 
     if (scalabilityMode != null && isSVCCodec(options.videoCodec)) {
       logger.info('using svc with scalabilityMode ${scalabilityMode}');
@@ -499,31 +553,61 @@ class Utils {
           );
         }
       } else {
-        encodings.add(videoEncoding.toRTCRtpEncoding());
+        // Non-legacy SVC takes a scale on its single encoding; the legacy
+        // path above cannot (scaleResolutionDownBy unsupported there), so a
+        // capped legacy-SVC publish relies on the capture clamp alone.
+        encodings.add(videoEncoding.toRTCRtpEncoding(scaleResolutionDownBy: capScale ?? 1.0));
       }
       encodings[0].scalabilityMode = scalabilityMode;
       logger.fine('encodings $encodings');
       return encodings;
     } else if (!options.simulcast) {
       // not using simulcast
-      return [videoEncoding.toRTCRtpEncoding()];
+      return [videoEncoding.toRTCRtpEncoding(scaleResolutionDownBy: capScale ?? 1.0)];
     }
 
     // compute simulcast encodings
-    final userParams = isScreenShare ? options.screenShareSimulcastLayers : options.videoSimulcastLayers;
+    var userParams = isScreenShare ? options.screenShareSimulcastLayers : options.videoSimulcastLayers;
+    // No app layers: the SDK picks the ladder, and every rung follows the top
+    // layer's fps. Recorded here because the cap path below resolves the
+    // defaults into `userParams`.
+    final sdkLadder = userParams.isEmpty;
+
+    if (maxShortEdge != null) {
+      // Resolve the default ladder here (from the clamped top) so it can be
+      // filtered too. Rungs at or above the clamped top are dropped: above
+      // the cap the SFU won't forward them, and at the top they'd duplicate
+      // `f`. Filtering BEFORE rids are assigned keeps rids sequential (q,h,f).
+      final ladder = userParams.isNotEmpty
+          ? userParams
+          : _computeDefaultSimulcastParams(isScreenShare: isScreenShare, original: original);
+      userParams = ladder.where((p) => p.dimensions.min() < topDimensions.min()).toList();
+      if (userParams.isEmpty) {
+        // Nothing fits under the top: one layer. (An empty list would make
+        // computeSimulcastPresets fall back to the unfiltered defaults.)
+        return encodingsFromPresets(dimensions, presets: [original]);
+      }
+    }
 
     final computedParams = computeSimulcastPresets(
-      dimensions: dimensions,
+      // The top layer's size decides how many rungs are worth sending.
+      dimensions: topDimensions,
       original: original,
       requestedPresets: userParams,
       isScreenShare: isScreenShare,
+      sdkLadder: sdkLadder,
     );
+    if (!sdkLadder) _warnMixedFramerate(computedParams);
 
     return encodingsFromPresets(dimensions, presets: computedParams);
   }
 
   @internal
-  static List<rtc.RTCRtpEncoding>? computeTrackBackupEncodings(LocalVideoTrack track, BackupVideoCodec backupOpts) {
+  static List<rtc.RTCRtpEncoding>? computeTrackBackupEncodings(
+    LocalVideoTrack track,
+    BackupVideoCodec backupOpts, {
+    int? maxShortEdge,
+  }) {
     final opts = VideoPublishOptions(
       videoCodec: backupOpts.codec,
       videoEncoding: backupOpts.encoding,
@@ -533,6 +617,7 @@ class Utils {
       isScreenShare: track.source == TrackSource.screenShareVideo,
       dimensions: track.currentOptions.params.dimensions,
       options: opts,
+      maxShortEdge: maxShortEdge,
     );
     return encodings;
   }

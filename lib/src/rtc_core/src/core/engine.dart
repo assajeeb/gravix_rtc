@@ -49,6 +49,7 @@ import '../types/other.dart';
 import '../utils/data_packet_buffer.dart';
 import '../utils/ttl_map.dart';
 import '../../../connect/gravix_answer_order.dart'; // GRAVIX: subscriber answer ordering (fastAnswer)
+import 'add_track_rejection.dart';
 import 'reconnect_policy.dart';
 import 'signal_client.dart';
 import 'transport.dart';
@@ -248,6 +249,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     _setUpSignalListeners();
 
     onDispose(() async {
+      // GRAVIX: disposed while connected (no disconnect() first): leave, so the
+      // SFU does not keep a ghost participant until its ping timeout
+      gravixLeaveBestEffort();
       _isClosed = true;
       await cleanUp();
       await events.dispose();
@@ -348,17 +352,32 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   @internal
   Future<lk_models.TrackInfo> addTrack(lk_rtc.AddTrackRequest req) async {
-    // send request to add track
-    signalClient.sendAddTrack(req);
+    // Race TrackPublished against a RequestResponse refusal for the same cid,
+    // so a server rejection (e.g. video above the plan's resolution cap) fails
+    // the publish promptly with the server's reason instead of a timeout.
+    // Both listeners are registered before the request goes out.
+    final completer = Completer<lk_models.TrackInfo>();
+    final cancelPublished = _signalListener.on<SignalLocalTrackPublishedEvent>((event) {
+      if (!completer.isCompleted) completer.complete(event.track);
+    }, filter: (event) => event.cid == req.cid);
+    final cancelRejected = _signalListener.on<SignalRequestResponseEvent>((event) {
+      final reason = gravixAddTrackRejection(event.response, req.cid);
+      if (reason != null && !completer.isCompleted) {
+        logger.warning('[addTrack] $reason');
+        completer.completeError(TrackPublishException(reason));
+      }
+    });
 
-    // wait for response, or timeout
-    final event = await _signalListener.waitFor<SignalLocalTrackPublishedEvent>(
-      filter: (event) => event.cid == req.cid,
-      duration: connectOptions.timeouts.publish,
-      onTimeout: () => throw TrackPublishException(),
-    );
-
-    return event.track;
+    try {
+      signalClient.sendAddTrack(req);
+      return await completer.future.timeout(
+        connectOptions.timeouts.publish,
+        onTimeout: () => throw TrackPublishException(),
+      );
+    } finally {
+      await cancelPublished();
+      await cancelRejected();
+    }
   }
 
   @internal
@@ -687,6 +706,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     };
 
     publisher?.pc.onIceConnectionState = (rtc.RTCIceConnectionState state) async {
+      _gravixMark('pub:ice', state.name); // GRAVIX: Dart receipt, for the join timeline
       logger.fine('publisher iceConnectionState: $state');
       if (state == rtc.RTCIceConnectionState.RTCIceConnectionStateConnected) {
         await _handleGettingConnectedServerAddress(publisher!.pc);
@@ -699,6 +719,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     };
 
     subscriber?.pc.onIceConnectionState = (rtc.RTCIceConnectionState state) async {
+      _gravixMark('sub:ice', state.name); // GRAVIX: Dart receipt, for the join timeline
       logger.fine('subscriber iceConnectionState: $state');
       if (state == rtc.RTCIceConnectionState.RTCIceConnectionStateConnected) {
         await _handleGettingConnectedServerAddress(subscriber!.pc);
@@ -716,6 +737,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
 
     subscriber?.pc.onConnectionState = (state) async {
+      _gravixMark('sub:pc', state.name); // GRAVIX: Dart receipt, for the join timeline
       events.emit(EngineSubscriberPeerStateUpdatedEvent(state: state, isPrimary: _subscriberPrimary));
       logger.fine('subscriber connectionState: $state');
       if (state.isDisconnected() || state.isFailed()) {
@@ -727,6 +749,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     };
 
     publisher?.pc.onConnectionState = (state) async {
+      _gravixMark('pub:pc', state.name); // GRAVIX: Dart receipt, for the join timeline
       if ([
         rtc.RTCPeerConnectionState.RTCPeerConnectionStateClosed,
         rtc.RTCPeerConnectionState.RTCPeerConnectionStateFailed,
@@ -1542,6 +1565,17 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       }
       events.emit(EngineRoomMovedEvent(response: event.response));
     });
+
+  /// GRAVIX: writes the leave now, if the signal socket is connected and no leave
+  /// went out on it yet (engine/room disposed while connected, app detached).
+  /// Marks the engine closed first: the server closing the socket in answer is
+  /// then not a reason to reconnect. A later [disconnect] does not send it again.
+  /// Never throws.
+  void gravixLeaveBestEffort() {
+    if (_isClosed || signalClient.connectionState != ConnectionState.connected) return;
+    _isClosed = true;
+    signalClient.gravixLeaveOnDispose();
+  }
 
   Future<void> disconnect({DisconnectReason reason = DisconnectReason.clientInitiated}) async {
     _isClosed = true;

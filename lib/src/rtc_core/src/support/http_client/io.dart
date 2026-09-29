@@ -28,20 +28,40 @@ http.Client createSdkHttpClient(NetworkOptions networkOptions) =>
 /// [onConnect]: called for every NEW socket the client opens (not for a request
 /// served from its keep-alive pool). The standby pre-connect (standby_io.dart)
 /// uses it to tell whether the join's upgrade really reused its warm connection.
-io.HttpClient createSdkIoHttpClient(NetworkOptions networkOptions, {void Function()? onConnect}) {
+///
+/// [beforeUse]: called once a new socket is connected (TCP, and TLS for https)
+/// and BEFORE the client writes anything on it; throwing destroys the socket and
+/// fails the request. The standby race (websocket/io.dart) decides there whether
+/// the fresh dial still goes ahead: nothing of the fresh join has reached the
+/// server at that point, so dropping it leaves no session behind.
+io.HttpClient createSdkIoHttpClient(
+  NetworkOptions networkOptions, {
+  void Function()? onConnect,
+  void Function()? beforeUse,
+}) {
   final validator = CertificatePinValidator(networkOptions.certificatePinning);
   final client = io.HttpClient();
-  if (!validator.isEnabled && onConnect == null) {
+  if (!validator.isEnabled && onConnect == null && beforeUse == null) {
     return client;
   }
 
   final connect = validator.isEnabled ? _CertificatePinningConnectionFactory(validator).connect : _plainConnect;
-  client.connectionFactory = onConnect == null
-      ? connect
-      : (url, proxyHost, proxyPort) {
-          onConnect();
-          return connect(url, proxyHost, proxyPort);
-        };
+  client.connectionFactory = (url, proxyHost, proxyPort) async {
+    onConnect?.call();
+    final task = await connect(url, proxyHost, proxyPort);
+    if (beforeUse == null) return task;
+    final socket = task.socket.then<io.Socket>((socket) {
+      try {
+        beforeUse();
+      } catch (_) {
+        // HttpClient never takes ownership of a socket whose future fails
+        socket.destroy();
+        rethrow;
+      }
+      return socket;
+    });
+    return io.ConnectionTask.fromSocket<io.Socket>(socket, task.cancel);
+  };
   return client;
 }
 

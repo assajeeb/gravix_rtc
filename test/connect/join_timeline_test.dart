@@ -143,6 +143,41 @@ void main() {
     });
   });
 
+  group('DTLS from the stats vs the connected callback (field review 2026-09-30)', () {
+    test('dtlsStats = ICE up -> DTLS up (stats); dtlsStatsToPcConnected = callback delivery', () {
+      var wall = DateTime.utc(2026, 9, 30, 12);
+      var mono = const Duration(seconds: 1);
+      final r = GravixJoinTimelineRecorder(connectionId: 'c', wallClock: () => wall, monotonic: () => mono);
+      r.mark(GravixJoinStep.joinResponse);
+      r
+        ..iceFirstSeenUp = wall.add(const Duration(milliseconds: 250))
+        ..dtlsUpWhenIceFirstSeenUp = false
+        ..dtlsFirstSeenUp = wall.add(const Duration(milliseconds: 380))
+        ..dtlsRole = 'client'
+        ..pairChanges = 1
+        ..nominatedFirstSeen = wall.add(const Duration(milliseconds: 330));
+      wall = wall.add(const Duration(milliseconds: 900));
+      mono += const Duration(milliseconds: 900);
+      r.mark(GravixJoinStep.pcConnected);
+      final report = r.build(GravixJoinTimelineEnd.timeout);
+      expect(report.ms['dtlsStats'], 130);
+      expect(report.ms['dtlsStatsToPcConnected'], 520);
+      expect(report.ms['iceToNominated'], 80);
+      expect(report.ms['nominatedToPcConnected'], 570);
+      expect(report.ice['dtlsRole'], 'client');
+      expect(report.ice['pairChanges'], 1);
+      expect(report.ice['dtlsFirstSeenUp'], isNotNull);
+    });
+
+    test('without a DTLS observation the fields are null, not guessed', () {
+      final r = GravixJoinTimelineRecorder(connectionId: 'c');
+      r.mark(GravixJoinStep.pcConnected);
+      final report = r.build(GravixJoinTimelineEnd.timeout);
+      expect(report.ms['dtlsStats'], isNull);
+      expect(report.ms['dtlsStatsToPcConnected'], isNull);
+    });
+  });
+
   group('subscriber path (pcConnected -> first RTP)', () {
     test('an offer is summarised as audio=<m-lines>/<sending>, never as SDP', () {
       const dataOnly =
@@ -514,11 +549,14 @@ void main() {
       expect(r.ice['resolved'], isTrue);
       expect(r.ice['dtlsAlreadyUpThen'], isFalse);
       expect(r.ice['lastSeenDown'], isNotNull);
+      // 2026-09-30: the poll runs on after ICE up until the stats show DTLS
+      // connected (or the PC connects): one more read than before
       expect(
         primaryReads,
-        4,
-        reason: 'ICE polling stopped once ICE was seen up; read 3 was a stale cached snapshot, read 4 has the pair',
+        inInclusiveRange(4, 5),
+        reason: 'polling stopped at pcConnected; the stale cached snapshot, then the one with the pair',
       );
+      expect(r.ice['dtlsLastSeenDown'], isNotNull, reason: 'the poll saw DTLS still connecting after ICE was up');
       expect(r.ice['polls'], greaterThanOrEqualTo(2));
       expect(r.stats['calls'], greaterThanOrEqualTo(4));
       expect(r.firstAudioEvidence?['totalSamplesReceived'], 960);

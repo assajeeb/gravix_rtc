@@ -81,6 +81,7 @@ export 'src/types/participant_state.dart';
 export 'src/types/priority.dart';
 export 'src/types/rpc.dart';
 export 'src/types/transcription_segment.dart';
+export 'src/types/video_cap.dart';
 export 'src/types/video_dimensions.dart';
 export 'src/types/video_encoding.dart';
 export 'src/types/video_parameters.dart';

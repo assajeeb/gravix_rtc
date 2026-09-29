@@ -9,7 +9,7 @@ import 'standby_types.dart';
 abstract final class GravixSignalStandby {
   static const mechanism = 'none';
 
-  static Future<bool> open(String url, String token, {NetworkOptions? networkOptions}) async => false;
+  static Future<bool> open(String url, String token, {NetworkOptions? networkOptions, int? rttHintMs}) async => false;
 
   static GravixStandbyState state(String url, String token) => const GravixStandbyState('none');
 
@@ -21,4 +21,6 @@ abstract final class GravixSignalStandby {
   static void release(Object? client) {}
 
   static Future<void> closeAll() async {}
+
+  static Future<void> reopenAll() async {}
 }

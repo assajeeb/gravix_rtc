@@ -224,6 +224,25 @@ false, isOutputAvailable: false)`; the plugin applies it when it registers.
   without the latter `setScreenShareEnabled(true)` throws
   `PlatformException(broadcastExtensionNotConfigured)`.
 
+### Audio redundancy (RED)
+
+`connect(red: GravixRedMode.on | off | auto, redLossThresholdPct: 3.0)` sets RED
+(RFC 2198 redundant audio) for the published microphone. With RED each packet also
+carries the previous frame, so a lost packet is recovered instead of concealed:
+speech stays intelligible on a lossy uplink. It roughly doubles the audio upload
+(field 2026-09-30: ~125 kbps with RED vs ~50 kbps without at the 64 kbps cap), which
+is wasted on a clean uplink and competes with video on a constrained one.
+
+- `on` (default, unchanged): RED from the first packet.
+- `off`: plain Opus.
+- `auto`: plain Opus until the mic's uplink loss stays at or above
+  `redLossThresholdPct` for 20 s (not while the RTT is above 1.5 s: that loss is the
+  link's own queue, RED would add to it); then the mic is republished with RED once
+  for the rest of the call (listeners see the track leave and come back).
+
+E2EE always turns RED off. Same options and policy as the JS SDK (`red`,
+`redLossThresholdPct`).
+
 ### Music mixer
 
 ```dart

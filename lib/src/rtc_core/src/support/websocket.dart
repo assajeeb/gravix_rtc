@@ -15,6 +15,7 @@
 
 import '../options.dart';
 import '../support/disposable.dart';
+import 'websocket/standby_types.dart' show GravixStandbyDial;
 import 'websocket/io.dart' if (dart.library.js_interop) 'websocket/web.dart';
 
 class WebSocketException implements Exception {
@@ -46,6 +47,10 @@ typedef WebSocketConnector =
 
 abstract class GravixRtcWebSocket extends Disposable {
   void send(List<int> data);
+
+  /// GRAVIX: how this socket was dialled when a standby connection was handed in
+  /// (the join timeline's `standby.path`); null otherwise.
+  GravixStandbyDial? gravixDial;
 
   static Future<GravixRtcWebSocket> connect(
     Uri uri, {

@@ -137,6 +137,23 @@ class Native {
     }
   }
 
+  /// Mutes / unmutes the microphone inside the audio device module (Android),
+  /// with the recorder left running: the captured PCM is zeroed on the record
+  /// thread and the music mixer is held. True only when the native side
+  /// confirmed it; false when the platform has no such method.
+  @internal
+  static Future<bool> setMicrophoneMute(bool mute) async {
+    try {
+      final ok = await channel.invokeMethod<bool>('setMicrophoneMute', <String, dynamic>{'mute': mute});
+      return ok == true;
+    } on PlatformException catch (error) {
+      logger.warning('setMicrophoneMute($mute) did throw ${error.code}: ${error.message}');
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// Stops recording that was explicitly started through [startLocalRecording].
   @internal
   static Future<void> stopLocalRecording() async {

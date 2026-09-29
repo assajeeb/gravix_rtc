@@ -27,6 +27,9 @@ import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
 import '../rtc_core/src/support/websocket/standby.dart';
+import 'gravix_red_mode.dart';
+import '../large_room/gravix_publish_presets.dart' show GravixPublishPresets;
+import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMute;
 import '../rtc_core/src/utils.dart' show Utils;
 import '../rtc_core/src/internal/events.dart'
     show
@@ -92,7 +95,9 @@ class GravixRoomService implements GravixAudioHost {
     @visibleForTesting Future<void> Function(Room room, String url, String token)? connectRoom,
     @visibleForTesting Future<void> Function(String httpUrl)? prepareConnection,
     @visibleForTesting Future<bool> Function()? requestMicPermission,
-  }) : _prepareConnection = prepareConnection ?? _defaultPrepareConnection,
+    @visibleForTesting Future<void> Function(bool enabled)? applyMic,
+  }) : _applyMic = applyMic,
+       _prepareConnection = prepareConnection ?? _defaultPrepareConnection,
        _requestMicPermission = requestMicPermission ?? _defaultRequestMicPermission,
        assert(videoEffect == null || beauty == null, 'pass videoEffect OR the deprecated beauty, not both'),
        _effect = GravixVideoEffectBinding(videoEffect ?? (beauty == null ? null : GravixBeautyFilterEffect(beauty))),
@@ -405,14 +410,22 @@ class GravixRoomService implements GravixAudioHost {
   void Function(String uid, VideoTrack track)? onRemoteVideoTrack;
   void Function(String uid)? onRemoteVideoTrackRemoved;
 
-  VideoPublishOptions _videoPublishOptions(bool lowData) {
+  VideoPublishOptions _videoPublishOptions(bool lowData) => videoPublishOptionsFor(lowData: lowData);
+
+  /// The publish options [GravixRoomService] uses for the camera: normal, or the
+  /// data saver's (`lowData`).
+  @visibleForTesting
+  static VideoPublishOptions videoPublishOptionsFor({required bool lowData}) {
     // ══ SIMULCAST, COST-MINIMIZED ══
     // History: simulcast was OFF because it previously made SIM-data hosts
     // lag — that pain was the old h720 ladder bug (TWO full-res encodings,
     // limit=cpu), not simulcast itself. Beauty is NOT rendered per layer:
     // the GL pipeline runs once; layers are encoder downscales.
-    //  • Normal: one extra 180p rung (~+11% encoder pixels / +150kbps worst
-    //    case), and dynacast pauses it whenever no weak viewer needs it.
+    //  • Normal: one extra 180p rung (~+11% encoder pixels / +160kbps worst
+    //    case), and dynacast pauses it whenever no weak viewer needs it. The
+    //    rung runs at the top layer's 24 fps (GravixPublishPresets.lowLayer):
+    //    layers with different maxFramerate kept cross-region viewers on the
+    //    lowest layer (server relay bug, fixed separately).
     //  • Data saver (auto): single layer @600kbps for hosts whose own
     //    uplink is the bottleneck.
     return VideoPublishOptions(
@@ -421,7 +434,7 @@ class GravixRoomService implements GravixAudioHost {
       degradationPreference: DegradationPreference.balanced,
       // f=540p is added automatically at capture res; q=180p is the only
       // extra encoding.
-      videoSimulcastLayers: lowData ? const [] : const [VideoParametersPresets.h180_169],
+      videoSimulcastLayers: lowData ? const [] : const [GravixPublishPresets.lowLayer],
     );
   }
 
@@ -564,10 +577,34 @@ class GravixRoomService implements GravixAudioHost {
     //   when the mic went live; setMicEnabled / setCameraEnabled / disconnect wait
     //   for the initial publication. Off = exactly the old order.
     bool publishInBackground = false,
+    // [red] RED (redundant audio) for the microphone: on (default, as 0.4.3), off,
+    //   or auto = plain Opus until the uplink loses >= [redLossThresholdPct] % for
+    //   ~20 s (not with an RTT above 1.5 s), then the mic is republished with RED
+    //   once. RED roughly doubles the
+    //   audio upload (field 2026-09-30: ~125 vs ~50 kbps) and recovers lost
+    //   packets instead of concealing them; see gravix_red_mode.dart.
+    GravixRedMode red = GravixRedMode.on,
+    double redLossThresholdPct = kGravixRedLossThresholdPct,
+    // [earlyMicTrack] opt-in (2026-09-30). With [publishMic]: the microphone track
+    //   (capture start, the slow part of the mic step: 140-490 ms in the field) is
+    //   created right after the audio session, IN PARALLEL with the signalling, and
+    //   the join's mic step only publishes it. Field Android joins: micPublished
+    //   came 145-494 ms after pcConnected. Pass it only when the microphone
+    //   permission is already granted (otherwise the OS dialog would come up in
+    //   the middle of the join). Not before the tap: a capture running on the
+    //   room-code screen lights the OS privacy indicator and takes the audio mode
+    //   from other apps while the user has not joined anything.
+    bool earlyMicTrack = false,
   }) async {
     final joinWatch = Stopwatch()..start();
     final analyticsSink = analyticsUrl != null ? GravixAnalytics(url: analyticsUrl) : analytics;
     var attemptedUrl = url;
+    // a new room: nothing applied to its mic yet, and the join's mic step is ahead
+    // (a tap from here on is a wish the initial publication honours)
+    _wantedMic = null;
+    _micApplied = null;
+    final micGate = Completer<void>();
+    _initialMicGate = micGate;
     // Taken (and cleared) up front, whichever path this connect then follows: an
     // early race left behind by a join that ended up not racing (remembered
     // decision, probe off, token error) must never be picked up, minutes stale,
@@ -638,6 +675,30 @@ class GravixRoomService implements GravixAudioHost {
         audioReady.ignore();
       } else {
         await audioReady;
+      }
+
+      // The mic track, created while the signalling runs (earlyMicTrack). After
+      // the audio session (the capture must open in call mode) and the mixer
+      // install (its callback must be in before recording starts); the join's mic
+      // step publishes it, or disposes it when the mic is not wanted by then.
+      // a leftover of an earlier connect is stopped, never just dropped (it would
+      // keep capturing, with the OS privacy indicator on)
+      final leftover = _earlyMic;
+      _earlyMic = null;
+      if (leftover != null) unawaited(_disposeEarlyMic(leftover));
+      if (earlyMicTrack && publishMic && _applyMic == null) {
+        final early = audioReady.then((_) async {
+          try {
+            await music.install();
+          } catch (_) {}
+          timeline?.notePath('svc:earlyMicStart');
+          await GravixEngineMicMute.release();
+          final t = await LocalAudioTrack.create(_audioCaptureOptions);
+          timeline?.notePath('svc:earlyMicReady');
+          return t;
+        });
+        early.ignore();
+        _earlyMic = early;
       }
 
       // The race runs only when explicitly enabled AND the gateway actually
@@ -761,20 +822,8 @@ class GravixRoomService implements GravixAudioHost {
         roomOptions: RoomOptions(
           adaptiveStream: enableVideo, // only meaningful for video
           dynacast: true, // server stops forwarding unsubscribed tracks → CPU saver
-          defaultAudioCaptureOptions: const AudioCaptureOptions(
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            highPassFilter: true, // cuts low-frequency room rumble
-            typingNoiseDetection: false,
-            stopAudioCaptureOnMute: false,
-          ),
-          defaultAudioPublishOptions: const AudioPublishOptions(
-            encoding: AudioEncoding(maxBitrate: 64000),
-            // dtx OFF = keep transmitting during silence (no clipped word
-            // onsets for singing hosts)
-            dtx: false,
-          ),
+          defaultAudioCaptureOptions: _audioCaptureOptions,
+          defaultAudioPublishOptions: _audioPublishOptions(red: red == GravixRedMode.on),
           defaultVideoPublishOptions: _videoPublishOptions(lowDataMode),
           // AUTO DATA-SAVER needs republish-with-new-options WITHOUT killing
           // the capturer (and the beauty processor attached to its source):
@@ -940,7 +989,14 @@ class GravixRoomService implements GravixAudioHost {
         // Only a publisher pays this step: enabling the mic is where the OS
         // permission prompt (first run) and the capture start are paid.
         if (publishMic) timeline?.mark(GravixJoinStep.micPermissionStart);
-        await _setMicEnabledNow(publishMic);
+        // Through the same serializer as every toggle (0.4.4 left this one
+        // outside it: a toggle that came in while this step was blocked on the
+        // permission dialog ran a second transition beside it, and a
+        // setMicEnabled(false) then never returned). A tap during the join set
+        // _wantedMic already and wins over [publishMic].
+        _wantedMic ??= publishMic;
+        if (!micGate.isCompleted) micGate.complete();
+        await (_micWorker ??= _runMicWorker());
         if (publishMic) timeline?.mark(GravixJoinStep.micPermissionEnd);
         if (publishMic) timeline?.mark(GravixJoinStep.micPublished);
         timeline?.notePath('svc:setMicDone');
@@ -965,9 +1021,14 @@ class GravixRoomService implements GravixAudioHost {
       }
 
       if (publishInBackground) {
-        final publishing = publishInitial().catchError((Object e) {
-          debugPrint('Gravix background publish failed: $e');
-        });
+        final publishing = publishInitial()
+            .whenComplete(() {
+              // a publication that failed before its mic step must not hold toggles
+              if (!micGate.isCompleted) micGate.complete();
+            })
+            .catchError((Object e) {
+              debugPrint('Gravix background publish failed: $e');
+            });
         _initialPublish = publishing;
         unawaited(
           publishing.whenComplete(() {
@@ -977,6 +1038,9 @@ class GravixRoomService implements GravixAudioHost {
       } else {
         await publishInitial();
       }
+
+      _redMode = red;
+      if (red == GravixRedMode.auto && publishMic) _startRedAuto(redLossThresholdPct);
 
       debugPrint('✅ Gravix connected room="${room.name}" id="${localParticipant?.identity}"');
 
@@ -999,6 +1063,11 @@ class GravixRoomService implements GravixAudioHost {
       return true;
     } catch (e) {
       debugPrint('❌ Gravix connect error: $e');
+      // earlyMicTrack: a join that failed before its mic step must not leave the
+      // capture running (the app may not call disconnect() after a failed join)
+      final early = _earlyMic;
+      _earlyMic = null;
+      if (early != null) unawaited(_disposeEarlyMic(early));
       // <candidate:earlyCallAudio>
       // A join that died before a peer connection existed leaves nothing whose
       // disposal would make flutter_webrtc give call audio back.
@@ -1039,17 +1108,32 @@ class GravixRoomService implements GravixAudioHost {
   /// when one is open; never throws. Same contract as the JS SDK's
   /// `room.standby(url, token)`: the exact url + token of the join, used for at
   /// most 110 s, a call on one older than 45 s opens a replacement, at most 4
-  /// kept, a join waits up to 5 s for one still opening, idempotent (call it
+  /// kept, a join waits up to 1.5 s for one still opening, idempotent (call it
   /// every 15-20 s from the lobby as a liveness tick). Unlike the JS SDK it is
   /// NOT a protocol-level standby socket (that one is a single-peer-connection
   /// join on the server, which this SDK does not speak): see
   /// lib/src/rtc_core/src/support/websocket/standby_io.dart. No-op on web.
   ///
   /// Also reads the device info the join's URL carries, so the tap does not.
-  Future<bool> standby(String url, String token) async {
+  ///
+  /// [rttMs]: the round trip to that host if the app knows it (its region probe).
+  /// The join's upgrade over the standby connection gets 3 x RTT (0.5-1.5 s;
+  /// 1.5 s unknown) before a fresh dial races it, and the connection that did
+  /// not answer is closed (timeline `standby.outcome: stalled_redialed`).
+  Future<bool> standby(String url, String token, {int? rttMs}) async {
     unawaited(Utils.warmClientInfo());
-    return GravixSignalStandby.open(url, token);
+    return GravixSignalStandby.open(url, token, rttHintMs: rttMs);
   }
+
+  /// Call when the app comes back to the foreground: every standby connection is
+  /// closed and opened again. One opened while the app was paused (behind a
+  /// permission dialog, field 2026-09-30) is not trusted -- the join's upgrade
+  /// over such a connection went unanswered. Never throws.
+  Future<void> reopenStandby() => GravixSignalStandby.reopenAll();
+
+  /// Closes every standby connection (the app goes to the background; reopen by
+  /// calling [standby] again, or [reopenStandby]).
+  Future<void> closeStandby() => GravixSignalStandby.closeAll();
 
   /// The standby connection for (url, token): `open` (with its age), `opening`,
   /// `dead` or `none`.
@@ -1449,6 +1533,12 @@ class GravixRoomService implements GravixAudioHost {
     }
   }
 
+  @visibleForTesting
+  Future<void> debugRecoverAfterInterruption({required bool micWasEnabled}) {
+    _wasMicEnabledBeforeInterruption = micWasEnabled;
+    return _recoverAfterInterruption();
+  }
+
   Future<void> _recoverAfterInterruption() async {
     if (!isConnected.value) return;
     try {
@@ -1456,11 +1546,14 @@ class GravixRoomService implements GravixAudioHost {
       await session.setActive(true); // reclaim the session from the OS
 
       // Force the RTC core to recreate the native audio track rather than
-      // trust a track object that was bound to a now-dead session.
-      await localParticipant?.setMicrophoneEnabled(false);
-      await Future.delayed(const Duration(milliseconds: 250));
-      await localParticipant?.setMicrophoneEnabled(_wasMicEnabledBeforeInterruption);
-      isMicMuted.value = !_wasMicEnabledBeforeInterruption;
+      // trust a track object that was bound to a now-dead session. Through the
+      // mic serializer (field review 2026-09-30: this path called the core
+      // directly, beside the toggle worker): off, 250 ms, then the wanted state
+      // -- the state before the interruption, unless the user toggled since.
+      _micRecycle = true;
+      _wantedMic ??= _wasMicEnabledBeforeInterruption;
+      isMicMuted.value = !_wantedMic!;
+      await (_micWorker ??= _runMicWorker());
       if (_v2Active) {
         // The mic was just re-enabled, which reprograms AudioManager — this is
         // a track start like any other, so it gets the ladder, not one shot.
@@ -1753,7 +1846,7 @@ class GravixRoomService implements GravixAudioHost {
   void _startIcePoll(Room room, GravixJoinTimelineRecorder timeline) {
     _timelineIcePoll?.cancel();
     Future<void> tick() async {
-      if (_timelineIcePolling || !identical(_timeline, timeline) || timeline.iceFirstSeenUp != null) return;
+      if (_timelineIcePolling || !identical(_timeline, timeline) || timeline.dtlsFirstSeenUp != null) return;
       _timelineIcePolling = true;
       try {
         _noteConnectivity(timeline, await _timelineStats(room, timeline, inbound: false));
@@ -1768,26 +1861,56 @@ class GravixRoomService implements GravixAudioHost {
     unawaited(tick());
   }
 
-  void _noteConnectivity(GravixJoinTimelineRecorder timeline, List<GravixStat> stats) {
-    if (timeline.iceFirstSeenUp != null) return;
+  void _noteConnectivity(GravixJoinTimelineRecorder timeline, List<GravixStat> stats, {bool fromPoll = true}) {
+    final iceDone = timeline.iceFirstSeenUp != null;
+    if (iceDone && (!fromPoll || timeline.dtlsFirstSeenUp != null)) return;
     final seen = gravixConnectivityFrom(stats);
     timeline.icePolls++;
     if (!seen.known) return;
     final now = DateTime.now();
     final staleBy = gravixStatsStaleness(stats, now);
     final takenAt = now.subtract(staleBy);
-    if (!seen.iceUp) {
-      timeline.iceLastSeenDown = takenAt;
-      return;
+    if (fromPoll && timeline.nominatedFirstSeen == null) {
+      final nominated = stats.any((st) => st.type == 'candidate-pair' && st.values['nominated'] == true);
+      if (nominated) {
+        timeline.nominatedFirstSeen = takenAt;
+      } else {
+        timeline.nominatedLastUnseen = takenAt;
+      }
     }
-    timeline
-      ..iceFirstSeenUp = takenAt
-      ..dtlsUpWhenIceFirstSeenUp = seen.dtlsUp;
-    // Only a snapshot of the in-between state pins the boundary. One that shows
-    // DTLS up as well only says "both happened since the last snapshot".
-    if (!seen.dtlsUp) timeline.mark(GravixJoinStep.iceConnected, staleBy: staleBy);
-    _timelineIcePoll?.cancel();
-    _timelineIcePoll = null;
+    for (final st in stats) {
+      if (st.type != 'transport') continue;
+      final role = st.values['dtlsRole'];
+      if (role is String) timeline.dtlsRole = role;
+      final changes = st.values['selectedCandidatePairChanges'];
+      if (changes is num) timeline.pairChanges = changes.toInt();
+    }
+    if (!iceDone) {
+      if (!seen.iceUp) {
+        timeline.iceLastSeenDown = takenAt;
+        return;
+      }
+      timeline
+        ..iceFirstSeenUp = takenAt
+        ..dtlsUpWhenIceFirstSeenUp = seen.dtlsUp;
+      // Only a snapshot of the in-between state pins the boundary. One that shows
+      // DTLS up as well only says "both happened since the last snapshot".
+      if (!seen.dtlsUp) timeline.mark(GravixJoinStep.iceConnected, staleBy: staleBy);
+    }
+    // Field review 2026-09-30 (Android ICE -> pcConnected 540-935 ms at 10 ms
+    // RTT): the poll runs on until the STATS show DTLS connected, so the handshake
+    // is told apart from the `connected` callback's trip to Dart. Only from the
+    // poll that runs BEFORE pcConnected: a read after it proves nothing.
+    if (!fromPoll) return;
+    if (seen.dtlsUp) {
+      timeline
+        ..dtlsFirstSeenUp = takenAt
+        ..notePath('stats:dtlsConnected');
+      _timelineIcePoll?.cancel();
+      _timelineIcePoll = null;
+    } else {
+      timeline.dtlsLastSeenDown = takenAt;
+    }
   }
 
   Future<List<GravixStat>> _timelineStats(
@@ -1832,7 +1955,7 @@ class GravixRoomService implements GravixAudioHost {
       }
       if (!identical(_timeline, timeline)) return;
       // Also the last chance to learn that ICE came up (unresolved, by then).
-      _noteConnectivity(timeline, stats);
+      _noteConnectivity(timeline, stats, fromPoll: false);
       final found = gravixSelectedPairFrom(stats);
       timeline
         ..pair = found.pair
@@ -1997,16 +2120,158 @@ class GravixRoomService implements GravixAudioHost {
       }
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  RED (redundant audio)  — gravix_red_mode.dart
+  // ═══════════════════════════════════════════════════════════════════════════
+  static const AudioCaptureOptions _audioCaptureOptions = AudioCaptureOptions(
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    highPassFilter: true, // cuts low-frequency room rumble
+    typingNoiseDetection: false,
+    stopAudioCaptureOnMute: false,
+  );
+
+  /// The mic track created during the join (connect's earlyMicTrack), until the
+  /// join's mic step takes it.
+  Future<LocalAudioTrack>? _earlyMic;
+
+  static AudioPublishOptions _audioPublishOptions({required bool red}) => AudioPublishOptions(
+    encoding: const AudioEncoding(maxBitrate: 64000),
+    // dtx OFF = keep transmitting during silence (no clipped word
+    // onsets for singing hosts)
+    dtx: false,
+    red: red,
+  );
+
+  GravixRedMode _redMode = GravixRedMode.on;
+  Timer? _redAutoTimer;
+
+  /// The RED mode of the current call, and whether auto mode switched RED on.
+  GravixRedMode get redMode => _redMode;
+  bool get redAutoEnabled => _redAuto?.fired ?? false;
+  GravixRedAuto? _redAuto;
+
+  void _startRedAuto(double thresholdPct) {
+    final auto = GravixRedAuto(thresholdPct: thresholdPct);
+    _redAuto = auto;
+    _redAutoTimer?.cancel();
+    var busy = false;
+    _redAutoTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (busy || !identical(_redAuto, auto) || auto.fired) return;
+      busy = true;
+      try {
+        final pub = localParticipant?.getTrackPublicationBySource(TrackSource.microphone);
+        final track = pub?.track;
+        if (track is! LocalAudioTrack) return;
+        final st = await track.getSenderStats();
+        final rtt = st?.roundTripTime;
+        if (!auto.feed(st?.packetsSent, st?.packetsLost, rttMs: rtt == null ? null : rtt * 1000.0)) return;
+        debugPrint(
+          '🔁 uplink loss ${auto.lastLossPct?.toStringAsFixed(1)} % >= $thresholdPct %: republishing the mic with RED',
+        );
+        await _republishMicWithRed(track);
+        _redAutoTimer?.cancel();
+        _redAutoTimer = null;
+      } catch (e) {
+        debugPrint('RED auto: $e');
+      } finally {
+        busy = false;
+      }
+    });
+  }
+
+  /// The mic again, same capture (stopLocalTrackOnUnpublish is off), with RED.
+  /// Waits for a mic transition in flight; the mute state is kept.
+  Future<void> _republishMicWithRed(LocalAudioTrack track) async {
+    final w = _micWorker;
+    if (w != null) await w;
+    final local = localParticipant;
+    final pub = local?.getTrackPublicationBySource(TrackSource.microphone);
+    if (local == null || pub == null || !identical(pub.track, track)) return;
+    final wasMuted = pub.muted;
+    await local.removePublishedTrack(pub.sid, notify: true);
+    final again = await local.publishAudioTrack(track, publishOptions: _audioPublishOptions(red: true));
+    if (wasMuted) await again.mute();
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   //  MIC / ROLE  — replaces setClientRole + enableLocalAudio + muteLocalAudio
   // ═══════════════════════════════════════════════════════════════════════════
 
   /// Become a speaker (true) or listener (false).
   /// Requires token canPublish=true to actually publish.
-  Future<void> setMicEnabled(bool enabled) async {
-    await _awaitInitialPublish();
-    await _setMicEnabledNow(enabled);
+  ///
+  /// Toggles coalesce (field 2026-09-30: ~30 taps in 30 s): the LAST requested
+  /// state wins, at most one mic transition runs at a time, and calls made
+  /// while one runs only update the wanted state. [isMicMuted] follows the
+  /// request at once (what the user tapped) and is corrected if it fails.
+  /// Every caller's future completes once the wanted state is applied.
+  ///
+  /// A mute while nothing is live yet (the join's first enable still blocked,
+  /// e.g. on a permission dialog that ends in a denial) returns at once: there is
+  /// nothing to stop, and the wanted state is applied when the pending step
+  /// returns. 0.4.3 had this call wait behind the blocked enable, i.e. never
+  /// return.
+  Future<void> setMicEnabled(bool enabled) {
+    _wantedMic = enabled;
+    isMicMuted.value = !enabled;
+    final worker = _micWorker ??= _runMicWorker();
+    if (!enabled && _micApplied != true) return Future<void>.value();
+    return worker;
   }
+
+  bool? _wantedMic;
+  Future<void>? _micWorker;
+
+  /// The mic state last applied successfully in this room (null: none yet).
+  bool? _micApplied;
+
+  /// Completed when the join's publication reaches its mic step (or ends): a
+  /// toggle waits for that instead of racing the initial publish.
+  Completer<void>? _initialMicGate;
+
+  /// Audio interruption ended: re-create the native track (off, a pause, then
+  /// the wanted state) as ONE step of the serializer, so a user toggle can
+  /// neither interleave with it nor be undone by it.
+  bool _micRecycle = false;
+
+  Future<void> _runMicWorker() async {
+    try {
+      // once per burst, not per tap
+      final gate = _initialMicGate;
+      if (gate != null && !gate.isCompleted) {
+        await gate.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+      }
+      bool? done;
+      while (true) {
+        if (_micRecycle) {
+          _micRecycle = false;
+          try {
+            await localParticipant?.setMicrophoneEnabled(false);
+          } catch (e) {
+            debugPrint('Error recycling the mic: $e');
+          }
+          await Future<void>.delayed(_micRecyclePause);
+          _micApplied = false;
+          done = null; // whatever was applied before, apply the wanted state again
+          continue;
+        }
+        final want = _wantedMic;
+        if (want == null || want == done) break;
+        await _setMicEnabledNow(want);
+        done = want;
+      }
+    } finally {
+      // no await between the last check above and here: a tap cannot slip in
+      _micWorker = null;
+    }
+  }
+
+  static const Duration _micRecyclePause = Duration(milliseconds: 250);
+
+  final Future<void> Function(bool enabled)? _applyMic;
 
   Future<void> _awaitInitialPublish() async {
     final p = _initialPublish;
@@ -2015,8 +2280,34 @@ class GravixRoomService implements GravixAudioHost {
 
   Future<void> _setMicEnabledNow(bool enabled) async {
     try {
-      await localParticipant?.setMicrophoneEnabled(enabled);
+      final apply = _applyMic;
+      final early = _earlyMic;
+      _earlyMic = null;
+      final local = localParticipant;
+      if (apply != null) {
+        await apply(enabled);
+      } else if (early != null && local != null && local.getTrackPublicationBySource(TrackSource.microphone) == null) {
+        // earlyMicTrack: the capture is already running (or starting); publish it
+        LocalAudioTrack? track;
+        try {
+          track = await early;
+        } catch (e) {
+          debugPrint('early mic track failed ($e), creating it now');
+        }
+        if (track == null) {
+          await local.setMicrophoneEnabled(enabled);
+        } else if (enabled) {
+          await local.publishAudioTrack(track);
+        } else {
+          await track.stop();
+          await track.dispose();
+        }
+      } else {
+        if (early != null) unawaited(_disposeEarlyMic(early));
+        await local?.setMicrophoneEnabled(enabled);
+      }
       isMicMuted.value = !enabled;
+      _micApplied = enabled;
       // Enabling the mic opens a new AudioTrack, which reprograms AudioManager
       // and wipes the speakerphone flag. Re-assert on the ladder.
       if (_v2Active && enabled) {
@@ -2024,19 +2315,22 @@ class GravixRoomService implements GravixAudioHost {
       }
     } catch (e) {
       debugPrint('Error setMicEnabled($enabled): $e');
+      // show what is actually published, not the request that failed
+      final pub = localParticipant?.getTrackPublicationBySource(TrackSource.microphone);
+      isMicMuted.value = pub == null || pub.muted;
     }
   }
 
-  /// Direct analogue of muteLocalAudioStream(mute) — note the inverted arg.
-  Future<void> muteLocalAudio(bool mute) async {
-    await _awaitInitialPublish();
+  static Future<void> _disposeEarlyMic(Future<LocalAudioTrack> early) async {
     try {
-      await localParticipant?.setMicrophoneEnabled(!mute);
-      isMicMuted.value = mute;
-    } catch (e) {
-      debugPrint('Error muteLocalAudio($mute): $e');
-    }
+      final t = await early;
+      await t.stop();
+      await t.dispose();
+    } catch (_) {}
   }
+
+  /// Direct analogue of muteLocalAudioStream(mute) — note the inverted arg.
+  Future<void> muteLocalAudio(bool mute) => setMicEnabled(!mute);
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  CAMERA  — video rooms only (audio room never calls these)
@@ -2245,6 +2539,28 @@ class GravixRoomService implements GravixAudioHost {
   // ═══════════════════════════════════════════════════════════════════════════
   //  LEAVE  — replaces leaveChannel + release
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /// The leave for an app going away (lifecycle `detached`, a terminating
+  /// process, a foreground service's task removed): the signal leave is written
+  /// FIRST, then the normal [disconnect] runs, bounded by [timeout]. Best-effort,
+  /// never throws. No-op when not in a room.
+  ///
+  /// Field 2026-09-30: the tester app restarted mid-call six times without a
+  /// leave; each left a ghost participant the others saw for 10-20 s (the SFU's
+  /// ping timeout). [disconnect] sends its leave only after the publication, the
+  /// audio session and the unpublish steps; a process being torn down does not
+  /// live that long.
+  Future<void> leaveNow({Duration timeout = const Duration(milliseconds: 1500)}) async {
+    final room = _room;
+    if (room == null) return;
+    try {
+      room.engine.gravixLeaveBestEffort();
+    } catch (_) {}
+    try {
+      await disconnect().timeout(timeout);
+    } catch (_) {}
+  }
+
   Future<void> disconnect() async {
     // a publication still running behind connect() finishes first: tearing the
     // tracks down under it could leave a camera capturing after the leave
@@ -2275,6 +2591,8 @@ class GravixRoomService implements GravixAudioHost {
       _statsTimer = null;
       _qualityTimer?.cancel();
       _qualityTimer = null;
+      _redAutoTimer?.cancel();
+      _redAutoTimer = null;
       _poorSince = null;
       _goodSince = null;
       if (!_disposed) {
@@ -2283,9 +2601,15 @@ class GravixRoomService implements GravixAudioHost {
         activeSpeakers.value = <String>{};
         remoteFacing.value = <String, String>{};
       }
+      final early = _earlyMic;
+      _earlyMic = null;
+      if (early != null) await _disposeEarlyMic(early);
       _room = null;
       _joinWatch = null;
       cameraPosition = CameraPosition.front;
+      // the mic may have been muted in the audio device module (engine-wide);
+      // the next room's microphone must not start silent
+      await GravixEngineMicMute.release();
     }
   }
 
@@ -2294,6 +2618,9 @@ class GravixRoomService implements GravixAudioHost {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // the leave first: the teardown below awaits a publication still running and
+    // the audio session, and an app being disposed may not live that long
+    _room?.engine.gravixLeaveBestEffort();
     await disconnect();
     await _effect.dispose();
     music.dispose();

@@ -204,6 +204,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     preConnectAudioBuffer = PreConnectAudioBuffer(this);
 
     onDispose(() async {
+      // GRAVIX: disposed while still connected: the leave goes out before the
+      // cleanup below (which unpublishes tracks and closes the socket without one)
+      this.engine.gravixLeaveBestEffort();
       // complete pending getSid() waiters so they don't hang on teardown
       for (final completer in _pendingSidCompleters) {
         if (!completer.isCompleted) {

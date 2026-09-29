@@ -95,6 +95,13 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     });
 
     onDispose(() async {
+      // GRAVIX: a signal client disposed while connected (the app tore the room
+      // down without disconnect(), or is going away) tells the server it left.
+      // Without it the SFU keeps the participant until its ping timeout: field
+      // 2026-09-30, six app restarts mid-call left ghost participants for 10-20 s
+      // each. Written straight to the socket (_sendRequest drops everything once
+      // disposed); the socket's close below flushes it first.
+      gravixLeaveOnDispose();
       await cleanUp();
       await events.cancelAll();
       await events.dispose();
@@ -170,24 +177,44 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         );
       }
       // Attempt to connect
-      var future = _wsConnector(
+      final dialing = _wsConnector(
         rtcUri,
         options: WebSocketEventHandlers(onData: _onSocketData, onDispose: _onSocketDispose, onError: _onSocketError),
         headers: {'Authorization': 'Bearer $token'},
         networkOptions: roomOptions.networkOptions,
-        preconnected: taken.client,
+        // the taken standby itself: its client and its upgrade bound
+        preconnected: taken.usable ? taken : null,
       );
-      future = future.timeout(connectOptions.timeouts.connection);
       try {
-        _ws = await future;
+        _ws = await dialing.timeout(connectOptions.timeouts.connection);
+      } catch (_) {
+        // GRAVIX: a dial that answers after the join gave up (the connection
+        // timeout) is a server session nobody reads -- a ghost participant until
+        // the SFU's ping timeout: close it when it lands. (Caught broadly: this
+        // file's TimeoutException is the package's, not dart:async's.)
+        unawaited(dialing.then((ws) => ws.dispose(), onError: (Object _) {}));
+        rethrow;
       } finally {
         if (!reconnect) {
+          final dial = _ws?.gravixDial;
           gravixStandby = <String, Object?>{
-            'outcome': taken.outcome,
+            // `stalled_redialed`: the upgrade over the standby connection did not
+            // answer within its bound; that connection was closed and a fresh one
+            // carried the join (websocket/io.dart)
+            'outcome': dial?.path == 'redial' ? 'stalled_redialed' : taken.outcome,
             'ageMs': taken.ageMs,
             'waitedMs': taken.waitedMs,
+            // standby | standby_late | redial | cold_after_error; null without one
+            'path': dial?.path,
+            'boundMs': dial?.boundMs ?? taken.upgradeBound?.inMilliseconds,
+            'stalledAfterMs': dial?.stalledAfterMs,
+            'dialMs': dial?.totalMs,
             // false: the warm connection was gone and the upgrade opened a new one
-            'reused': taken.usable ? GravixSignalStandby.connectsOf(taken.client) == taken.connectsAtTake : null,
+            // (only meaningful when the upgrade went over it: a redial or a cold
+            // dial after an error never touches the standby client's counter)
+            'reused': taken.usable && (dial == null || dial.path.startsWith('standby'))
+                ? GravixSignalStandby.connectsOf(taken.client) == taken.connectsAtTake
+                : (taken.usable ? false : null),
             'mechanism': GravixSignalStandby.mechanism,
           };
         }
@@ -248,7 +275,33 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     }
   }
 
+  /// GRAVIX: a leave was written on the current socket (sent once per socket).
+  bool get gravixLeaveSent => _leaveSentOn != null && identical(_leaveSentOn, _ws);
+  Object? _leaveSentOn;
+
+  static final _leaveBytes = lk_rtc.SignalRequest(
+    leave: lk_rtc.LeaveRequest(
+      reason: lk_models.DisconnectReason.CLIENT_INITIATED,
+      action: lk_rtc.LeaveRequest_Action.DISCONNECT,
+    ),
+  ).writeToBuffer();
+
+  /// GRAVIX: the best-effort leave of the dispose / app-detached paths: written on
+  /// the socket if it is open and no leave went out on it yet. Never throws.
+  @internal
+  void gravixLeaveOnDispose() {
+    final ws = _ws;
+    if (ws == null || _connectionState != ConnectionState.connected || gravixLeaveSent) return;
+    try {
+      ws.send(_leaveBytes);
+      _leaveSentOn = ws;
+    } catch (_) {}
+  }
+
   Future<void> sendLeave() async {
+    // GRAVIX: once per socket (a best-effort leave may have gone out already)
+    if (gravixLeaveSent) return;
+    if (_connectionState == ConnectionState.connected) _leaveSentOn = _ws;
     _sendRequest(
       lk_rtc.SignalRequest(
         leave: lk_rtc.LeaveRequest(

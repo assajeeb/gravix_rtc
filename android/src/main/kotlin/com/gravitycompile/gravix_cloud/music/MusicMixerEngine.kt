@@ -34,6 +34,14 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
     @Volatile var captureChannels: Int = 1; private set
     @Volatile var captureSeen: Boolean = false; private set
 
+    /**
+     * Microphone muted in the audio device module (GravixClientPlugin
+     * setMicrophoneMute): the capture buffer is already zeroed, and the mix is
+     * held (not consumed) so the music pauses exactly as it did when a mute
+     * stopped the recorder.
+     */
+    @Volatile var captureMuted: Boolean = false
+
     @Volatile private var session: Session? = null
     @Volatile var onCompleted: (() -> Unit)? = null
 
@@ -136,6 +144,7 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         captureChannels = channelCount
         captureSeen = true
 
+        if (captureMuted) return captureTimeNs
         val s = session ?: return captureTimeNs
         if (s.paused) return captureTimeNs
         if (audioFormat != AudioFormat.ENCODING_PCM_16BIT) return captureTimeNs

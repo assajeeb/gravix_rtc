@@ -56,6 +56,7 @@ import '../types/audio_encoding.dart';
 import '../types/data_stream.dart';
 import '../types/other.dart';
 import '../types/participant_permissions.dart';
+import '../types/video_cap.dart';
 import '../types/video_dimensions.dart';
 import '../utils.dart' show buildStreamId, mimeTypeToVideoCodecString, Utils, isSVCCodec, isVideoCodec;
 import 'participant.dart';
@@ -100,8 +101,16 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   @override
   @internal
   Future<bool> updateFromInfo(lk_models.ParticipantInfo info) async {
+    final capBefore = GravixVideoCap.parse(attributes);
     final didUpdate = await super.updateFromInfo(info);
     if (!didUpdate) return false;
+
+    // The plan cap can change mid-session (plan up/downgrade). Only a LOWER
+    // cap needs action on live senders; see [_applyVideoCapToPublished].
+    final capAfter = GravixVideoCap.parse(attributes);
+    if (capAfter != null && (capBefore == null || capAfter < capBefore)) {
+      unawaited(_applyVideoCapToPublished(capAfter));
+    }
 
     // Reconcile local mute state with the server's copy.
     for (final trackInfo in info.tracks) {
@@ -120,6 +129,56 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     }
 
     return true;
+  }
+
+  /// Effective short-edge cap for a video track of [source] from the
+  /// server-owned `gravix.max_video_height` attribute; null = no cap known.
+  int? _videoCapFor(TrackSource source) {
+    final cap = GravixVideoCap.parse(attributes);
+    if (cap == null) return null;
+    return GravixVideoCap.effective(cap, isScreenShare: source == TrackSource.screenShareVideo);
+  }
+
+  /// Best-effort: bring already-published video under a newly LOWERED cap.
+  ///
+  /// Capture can't be changed without a republish, so each sender encoding
+  /// whose output short edge is above the cap gets a larger
+  /// `scaleResolutionDownBy`. Limits (documented, accepted):
+  ///  • the layer sizes the SFU was told at addTrack are not re-announced
+  ///    (this core has no UpdateLocalVideoTrack sender), so the SFU may still
+  ///    treat the old top layer as above-cap and stop forwarding it; lower
+  ///    layers keep flowing;
+  ///  • backup-codec senders and legacy-SVC senders are left as-is.
+  /// A RAISED cap is not applied to live senders — it takes effect on the
+  /// next publish. That is conservative: never above the cap, never rejected.
+  Future<void> _applyVideoCapToPublished(int planCap) async {
+    for (final pub in videoTrackPublications) {
+      final track = pub.track;
+      final sender = track?.transceiver?.sender;
+      if (track == null || sender == null) continue;
+      final cap = GravixVideoCap.effective(planCap, isScreenShare: track.source == TrackSource.screenShareVideo);
+      final source = track.currentOptions.params.dimensions;
+      if (source.min() <= 0) continue;
+      try {
+        final params = sender.parameters;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) continue;
+        var changed = false;
+        for (final e in encodings) {
+          final scale = e.scaleResolutionDownBy ?? 1.0;
+          if (source.min() / scale > cap) {
+            e.scaleResolutionDownBy = source.min() / cap;
+            changed = true;
+          }
+        }
+        if (!changed) continue;
+        params.encodings = encodings;
+        await sender.setParameters(params);
+        logger.info('applied lowered video cap ${cap}p to ${pub.sid}');
+      } catch (e) {
+        logger.warning('failed to apply lowered video cap to ${pub.sid}: $e');
+      }
+    }
   }
 
   /// Handle broadcast state change (iOS only)
@@ -308,7 +367,21 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       }
     }
 
-    logger.fine('Compute encodings with resolution: ${dimensions}, options: ${publishOptions}');
+    // Gravix plan cap: clamp every published layer's short edge so a
+    // compliant app is never rejected by the SFU. `dimensions` stays the real
+    // capture size (encoder scale factors are relative to it);
+    // `publishedDimensions` is what is actually sent and announced.
+    final planCap = GravixVideoCap.parse(attributes);
+    final videoCap = _videoCapFor(track.source);
+    // Remember the app's own ladder: a republish after a cap raise should get
+    // its rungs back rather than inherit today's clamp via lastPublishOptions.
+    final requestedOptions = publishOptions;
+    if (planCap != null) {
+      publishOptions = GravixVideoCap.clampPublishOptions(publishOptions, planCap);
+    }
+    final publishedDimensions = videoCap == null ? dimensions : GravixVideoCap.clampDimensions(dimensions, videoCap);
+
+    logger.fine('Compute encodings with resolution: ${dimensions}, cap: ${videoCap}, options: ${publishOptions}');
 
     // Video encodings and simulcasts
     var encodings = Utils.computeVideoEncodings(
@@ -316,6 +389,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       dimensions: dimensions,
       options: publishOptions,
       codec: publishOptions.videoCodec,
+      maxShortEdge: videoCap,
     );
 
     logger.fine('Using encodings: ${encodings?.map((e) => e.toMap())}');
@@ -328,7 +402,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       simulcastCodecs.add(lk_rtc.SimulcastCodec(codec: publishOptions.backupVideoCodec.codec.toLowerCase(), cid: ''));
     }
 
-    final layers = Utils.computeVideoLayers(dimensions, encodings, isSVC);
+    // The SVC branch ignores scaleResolutionDownBy and halves whatever size it
+    // is given, so hand it the clamped size; simulcast derives from scale.
+    final layers = Utils.computeVideoLayers(isSVC ? publishedDimensions : dimensions, encodings, isSVC);
 
     if (room.engine.isClosed) {
       throw UnexpectedConnectionState('cannot publish track when not connected');
@@ -382,10 +458,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       stream: buildStreamId(publishOptions, track.source),
     );
 
-    // video specific
-    if (dimensions.width > 0 && dimensions.height > 0) {
-      req.width = dimensions.width;
-      req.height = dimensions.height;
+    // video specific. Announce the size actually sent: the SFU checks the
+    // cap against this, so the raw capture size would be rejected.
+    if (publishedDimensions.width > 0 && publishedDimensions.height > 0) {
+      req.width = publishedDimensions.width;
+      req.height = publishedDimensions.height;
     }
 
     if (layers.isNotEmpty) {
@@ -395,8 +472,23 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     }
     late lk_models.TrackInfo trackInfo;
     if (room.engine.enabledPublishCodecs?.isNotEmpty ?? false) {
-      final rets = await Future.wait<lk_models.TrackInfo>([room.engine.addTrack(req), negotiate(publishOptions)]);
-      trackInfo = rets[0];
+      try {
+        final rets = await Future.wait<lk_models.TrackInfo>([room.engine.addTrack(req), negotiate(publishOptions)]);
+        trackInfo = rets[0];
+      } catch (_) {
+        // negotiate() already attached a sender; on a refused/timed-out
+        // addTrack drop it so a retry (e.g. at a lower resolution) starts clean.
+        final sender = track.transceiver?.sender;
+        if (sender != null) {
+          try {
+            await room.engine.publisher?.pc.removeTrack(sender);
+            await room.engine.negotiate();
+          } catch (e) {
+            logger.warning('cleanup after failed addTrack did throw $e');
+          }
+        }
+        rethrow;
+      }
     } else {
       trackInfo = await room.engine.addTrack(req);
 
@@ -418,6 +510,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
             dimensions: dimensions,
             options: publishOptions,
             codec: publishOptions.videoCodec,
+            maxShortEdge: videoCap,
           );
         }
       }
@@ -463,7 +556,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
     logger.fine('publishVideoTrack engine.addTrack response: ${trackInfo}');
 
-    track.lastPublishOptions = publishOptions;
+    track.lastPublishOptions = publishOptions.copyWith(
+      videoSimulcastLayers: requestedOptions.videoSimulcastLayers,
+      screenShareSimulcastLayers: requestedOptions.screenShareSimulcastLayers,
+    );
 
     await track.start();
 
@@ -761,8 +857,16 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         return publication;
       } else if (enabled) {
         if (source == TrackSource.camera) {
-          final CameraCaptureOptions captureOptions =
-              cameraCaptureOptions ?? room.roomOptions.defaultCameraCaptureOptions;
+          CameraCaptureOptions captureOptions = cameraCaptureOptions ?? room.roomOptions.defaultCameraCaptureOptions;
+          // Capture no bigger than the plan allows: encoding pixels the SFU
+          // won't forward wastes CPU/battery. The publish-time clamp still
+          // covers tracks created outside this path.
+          final cap = _videoCapFor(TrackSource.camera);
+          if (cap != null) {
+            captureOptions = captureOptions.copyWith(
+              params: GravixVideoCap.clampParameters(captureOptions.params, cap),
+            );
+          }
           final track = await LocalVideoTrack.createCameraTrack(captureOptions);
           return await _publishVideoTrack(track);
         } else if (source == TrackSource.microphone) {
@@ -772,6 +876,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         } else if (source == TrackSource.screenShareVideo) {
           ScreenShareCaptureOptions captureOptions =
               screenShareCaptureOptions ?? room.roomOptions.defaultScreenShareCaptureOptions;
+          final screenCap = _videoCapFor(TrackSource.screenShareVideo);
+          if (screenCap != null) {
+            captureOptions = captureOptions.copyWith(
+              params: GravixVideoCap.clampParameters(captureOptions.params, screenCap),
+            );
+          }
 
           if (lkPlatformIs(PlatformType.iOS) && !BroadcastManager().isBroadcasting) {
             // Wait until broadcasting to publish track
@@ -904,7 +1014,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       );
     }
 
-    final encodings = Utils.computeTrackBackupEncodings(track, backupCodecOpts);
+    final encodings = Utils.computeTrackBackupEncodings(
+      track,
+      backupCodecOpts,
+      maxShortEdge: _videoCapFor(track.source),
+    );
     if (encodings == null) {
       logger.fine('backup codec has been disabled, ignoring request to add additional codec for track');
       return;
@@ -912,8 +1026,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
     final simulcastTrack = track.addSimulcastTrack(backupCodec, encodings);
     final dimensions = track.currentOptions.params.dimensions;
-
-    final layers = Utils.computeVideoLayers(dimensions, encodings, isSVCCodec(backupCodec));
+    // Same plan-cap rule as the primary codec (see _publishVideoTrack).
+    final backupCap = _videoCapFor(track.source);
+    final publishedDimensions = backupCap == null ? dimensions : GravixVideoCap.clampDimensions(dimensions, backupCap);
+    final backupIsSVC = isSVCCodec(backupCodec);
+    final layers = Utils.computeVideoLayers(backupIsSVC ? publishedDimensions : dimensions, encodings, backupIsSVC);
 
     simulcastTrack.sender = await room.engine.createSimulcastTransceiverSender(
       track,
@@ -944,10 +1061,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       simulcastCodecs: <lk_rtc.SimulcastCodec>[lk_rtc.SimulcastCodec(codec: backupCodec.toLowerCase(), cid: cid)],
     );
 
-    // video specific
-    if (dimensions.width > 0 && dimensions.height > 0) {
-      req.width = dimensions.width;
-      req.height = dimensions.height;
+    // video specific: announce the size actually sent (capped).
+    if (publishedDimensions.width > 0 && publishedDimensions.height > 0) {
+      req.width = publishedDimensions.width;
+      req.height = publishedDimensions.height;
     }
 
     final trackInfo = await room.engine.addTrack(req);

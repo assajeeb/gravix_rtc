@@ -33,6 +33,7 @@ import '../../support/platform.dart';
 import '../../types/other.dart';
 import '../audio_management.dart';
 import '../options.dart' as track_options;
+import 'engine_mic_mute.dart';
 import 'local.dart';
 
 class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMixin {
@@ -76,8 +77,73 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
   AudioSenderStats? prevStats;
 
+  /// This track is muted through [GravixEngineMicMute] (track enabled, recorder
+  /// running, PCM zeroed in the audio device module) rather than disabled.
+  bool _engineMuted = false;
+
+  /// The track currently holding the engine-wide module mute.
+  static LocalAudioTrack? get _engineMuteOwner => GravixEngineMicMute.owner as LocalAudioTrack?;
+  static set _engineMuteOwner(LocalAudioTrack? t) => GravixEngineMicMute.owner = t;
+
+  /// Mutes without stopping the Android recorder when [stopOnMute] is false.
+  ///
+  /// Disabling the track would make the engine stop the AudioRecord (and
+  /// re-create it on unmute), which re-routes the voice path on OEM audio HALs
+  /// and interrupts the OTHER participants' playout (field 2026-09-30). Falls
+  /// back to the disable path when the module mute is unavailable.
+  @override
+  Future<bool> mute({bool stopOnMute = true}) async {
+    if (muted) return false;
+    if (!stopOnMute && GravixEngineMicMute.supported) {
+      final previous = _engineMuteOwner;
+      if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
+      if (await GravixEngineMicMute.engage()) {
+        _engineMuted = true;
+        _engineMuteOwner = this;
+        updateMuted(true, shouldSendSignal: true);
+        return true;
+      }
+    }
+    return super.mute(stopOnMute: stopOnMute);
+  }
+
+  @override
+  Future<bool> unmute({bool stopOnMute = true}) async {
+    if (!muted) return false;
+    if (_engineMuted) {
+      _engineMuted = false;
+      if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+      await GravixEngineMicMute.release();
+      await enable(); // it stayed enabled; a no-op unless something else disabled it
+      updateMuted(false, shouldSendSignal: true);
+      return true;
+    }
+    return super.unmute(stopOnMute: stopOnMute);
+  }
+
+  /// Converts an engine mute into a plain disabled track and releases the
+  /// module mute (the track stays muted, and silent).
+  Future<void> _leaveEngineMute() async {
+    if (!_engineMuted) return;
+    await disable();
+    _engineMuted = false;
+    if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+    await GravixEngineMicMute.release();
+  }
+
+  @override
+  Future<bool> stop() async {
+    await _leaveEngineMute();
+    return super.stop();
+  }
+
   @override
   Future<void> startCapture() async {
+    // A new microphone capture never inherits a stale module mute (it is
+    // engine-wide): a still-muted older track is turned into a disabled one.
+    final owner = _engineMuteOwner;
+    if (owner != null && !identical(owner, this)) await owner._leaveEngineMute();
+    if (GravixEngineMicMute.engaged && _engineMuteOwner == null) await GravixEngineMicMute.release();
     await super.startCapture();
     if (lkPlatformSupportsExplicitAudioRecordingStart()) {
       // Match Swift: start the ADM before publishing so capture-time audio

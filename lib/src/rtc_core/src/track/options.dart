@@ -60,7 +60,11 @@ class CameraCaptureOptions extends VideoCaptureOptions {
     this.exposureMode = CameraExposureMode.auto,
     String? deviceId,
     double? maxFrameRate,
-    VideoParameters params = VideoParametersPresets.h720_169,
+    // 540p (960x540), not 720p: it is what GravixRoomService already captures,
+    // it fits the lowest common Gravix plan cap without scaling, and 720p is
+    // ~2x the encoder pixels. Apps wanting more pass `params` explicitly; the
+    // plan cap (`gravix.max_video_height`) still clamps it at publish.
+    VideoParameters params = VideoParametersPresets.h540_169,
     this.stopCameraCaptureOnMute = true,
     TrackProcessor<VideoProcessorOptions>? processor,
   }) : super(params: params, deviceId: deviceId, maxFrameRate: maxFrameRate, processor: processor);

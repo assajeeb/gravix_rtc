@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.4.5 — 2026-09-30
+
+Includes 0.4.4, which was never published: the Android mute fix for "after mute +
+unmute the other participants' audio goes silent for a moment" (Gravix Tester Android
+0.3.2+5). Also the field review of Gravix Tester 0.3.2 (Android) / web 0.3.2, and the
+per-app maximum video resolution (Gravix plan cap).
+
+### Added
+- **Plan resolution cap.** The Gravix SFU sets the server-owned attribute
+  `gravix.max_video_height` (short edge, e.g. `"540"`) on the local participant after
+  join and may change it mid-session. The SDK honours it automatically so a compliant
+  app is never rejected: camera capture and every published layer are clamped so
+  `min(width, height) <= cap` (540x960 portrait = 540p); simulcast rungs above the cap
+  are dropped, the top layer becomes the cap; app-supplied presets / layers and
+  `GravixPublishPresets` are clamped the same way; the size announced at addTrack is the
+  clamped one. Screen share uses `max(cap, 1080)`. No attribute = no cap known,
+  behaviour unchanged.
+- **`GravixVideoCap`**: the pure clamp rules (`attributeKey`, `parse`, `effective`,
+  `clampDimensions`, `clampParameters`, `clampLayers`, `clampPublishOptions`,
+  `scaleDownBy`).
+- A cap LOWERED while video is already published is applied best-effort by raising
+  `scaleResolutionDownBy` on the live sender (capture is not restarted, and the layer
+  sizes the SFU was told at addTrack are not re-announced). A RAISED cap takes effect on
+  the next publish.
+- `connect(red: GravixRedMode.on | off | auto, redLossThresholdPct: 3.0)`: RED on
+  (default, unchanged), off, or auto = plain Opus until the mic's uplink loss stays
+  >= the threshold for four 5 s windows (20 s; an RTT above 1.5 s blocks it), then
+  the mic is republished with RED once (same policy as the JS SDK's `red: 'auto'`).
+  Trade-off: RED roughly doubles the audio upload (field: ~125 vs ~50 kbps) and
+  recovers lost packets instead of concealing them (gravix_red_mode.dart).
+- `connect(earlyMicTrack: true)` (opt-in): the mic track is created right after the
+  audio session, in parallel with the signalling; the mic step only publishes it.
+  Only with the permission already granted; never before the tap (privacy
+  indicator, audio mode taken from other apps).
+- Join timeline: the ICE poll runs on until the stats show DTLS connected:
+  `ms.dtlsStats` (ICE up -> DTLS up, stats time), `ms.dtlsStatsToPcConnected`
+  (stats DTLS up -> the `connected` callback in Dart), `ms.iceToNominated` /
+  `ms.nominatedToPcConnected` (when the SFU nominated the pair), `ice.dtlsRole`,
+  `ice.pairChanges`, and the Dart receipt of each peer connection's ICE /
+  connection-state callbacks in the path log (`pub:ice`, `sub:ice`, `pub:pc`,
+  `sub:pc`).
+
+### Changed
+- **`CameraCaptureOptions` defaults to 540p (960x540)**, was 720p. It is what
+  `GravixRoomService` already captured, and 720p is ~2x the encoder pixels. Pass
+  `params:` for more (still clamped to the plan).
+- **One framerate across every default simulcast ladder.** Every layer of a ladder
+  the SDK builds now runs at the TOP layer's `maxFramerate`. `GravixRoomService` and
+  `GravixPublishPresets.host` publish [180p, 540p] both at 24 fps (the 180p rung was
+  the stock 15 fps preset) through the new `GravixPublishPresets.lowLayer` (320x180,
+  160 kbps, 24 fps); the stock ladder with no app layers is 25 fps on every layer at
+  540p (was 15/20/25), 30 at 720p and 1080p, 20 at 360p, with or without a plan cap;
+  screen share already matched. Why: a server relay bug kept cross-region viewers on
+  the lowest layer when a track's layers had different `maxFramerate`; the server fix
+  ships separately, this is defence in depth. The top layer keeps its fps because it
+  is what most viewers watch; bitrates are unchanged (160 kbps at 320x180 is still
+  ~0.12 bit/pixel/frame at 24 fps). App-supplied `videoSimulcastLayers` keep the fps
+  they set (capped at the top layer's, as before); layers that differ log a one-time
+  warning in debug builds. Same rule as the JS SDK 0.6.3.
+
+### Fixed
+- **Android: muting the microphone no longer stops and re-creates the recorder.**
+  A mute disabled the mic track, and the WebRTC engine's stop-on-mute audio device
+  module then STOPPED the AudioRecord and opened a new one on every unmute (emulator:
+  one new record stream per unmute, 0 bytes sent while muted). Re-opening a
+  VOICE_COMMUNICATION input under a live call re-routes the voice path on OEM audio
+  HALs, which interrupted the playout of the other participants. With
+  `stopAudioCaptureOnMute: false` (GravixRoomService's default) a mute now keeps the
+  track enabled and the recorder running, and zeroes the captured audio inside the
+  audio device module (`JavaAudioDeviceModule.setMicrophoneMute`, new native method
+  `setMicrophoneMute` on the `gravix_client` channel); the music mixer is held while
+  muted, so only silence is sent (music pauses, as before). The mute signal to the
+  room is unchanged. Falls back to disabling the track when the module is not
+  available. The module mute is engine-wide: released when the muted track stops, on
+  disconnect, and before any new microphone capture. iOS / web unchanged.
+- **`setMicEnabled` / `muteLocalAudio` coalesce rapid toggles.** Each tap used to
+  queue one full transition behind the previous one; now the last requested state
+  wins, at most one transition runs at a time (20 rapid taps: at most 2), and
+  `isMicMuted` follows the tap at once (corrected to the published state if the
+  transition fails).
+- A refused addTrack (SFU `RequestResponse`, e.g. `LIMIT_EXCEEDED: video resolution above
+  plan limit (540p)`) now fails the publish at once with a `TrackPublishException`
+  carrying the server's reason, instead of waiting for the publish timeout. The sender
+  attached during parallel negotiation is removed on failure.
+- **Standby handoff stall.** A Bangladesh vivo join took 7.7 s (wsOpen 6750 ms,
+  `standby.outcome=used`): the upgrade over the standby connection reached the SFU
+  (session started at the tap) and no answer came back; 0.4.3 waited 2.5 s, then
+  dialled cold, and the SFU dropped the first session as DUPLICATE_IDENTITY 6.5 s
+  after the tap. The upgrade over a standby connection now gets 3 x RTT (0.5-1.5 s;
+  1.5 s without an RTT, `standby(url, token, rttMs:)`), then a fresh dial races it.
+  The race is decided when the fresh socket is connected and before its upgrade is
+  written: the warm connection is force-closed first (its server session sees the
+  signal connection drop), so the server never gets the fresh join followed by a
+  late warm one. A warm upgrade that still answers after it was abandoned is closed.
+  Timeline: `standby.outcome: stalled_redialed`, `standby.path`
+  (standby | standby_late | redial | cold_after_error), `boundMs`, `dialMs`;
+  `reused` is now false for a redial (it could not tell before). A join waits at
+  most 1.5 s (was 5 s) for a standby still opening. A dial that answers after the
+  join's connection timeout is closed instead of left as a ghost session.
+- **Standby after an app resume:** `reopenStandby()` (closes every standby
+  connection at once and opens it again) and `closeStandby()` for the app's
+  lifecycle; a connection opened while the app was paused is not trusted.
+- **Leave on dispose / app detach.** A signal client, engine or room disposed
+  while connected now writes the leave before closing the socket (once per socket);
+  `GravixRoomService.dispose()` writes it before its teardown, and the new
+  `leaveNow()` (app `detached`, process termination) writes it first and bounds the
+  teardown. The WebSocket close is bounded (1 s). Field: six mid-call restarts left
+  ghost participants for 10-20 s each.
+- **Mic serializer.** The join's own first mic enable and the audio-interruption
+  recovery go through the same worker as setMicEnabled (the coalescing change
+  above first left both outside it). A mute while nothing is live (the first
+  enable still blocked, e.g. on a permission dialog) returns at once and is
+  applied when the pending step returns (0.4.3: it never returned). A tap during the join wins over `publishMic`.
+- **Region: the measured pick keeps the token's region** unless another region is
+  clearly faster in the same measurement (> 30 ms and > 20 %, the decision cache's
+  rule). Emulator 2026-09-30: the app kept sgp1 (180 ms) over blr1 (167 ms) and
+  opened its standby for sgp1; `gravixPickMeasuredRegion` moved 3 of 4 joins to
+  blr1 anyway -- a cold dial (wsOpen 200-1314 ms instead of ~70) and the region
+  flip-flop the app avoided.
+
 ## 0.4.3 — 2026-09-30
 
 From the Gravix Tester field logs (Kuwait, OnePlus Android 15, cellular -> doh1).

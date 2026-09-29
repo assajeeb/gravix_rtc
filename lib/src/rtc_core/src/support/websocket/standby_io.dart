@@ -51,11 +51,27 @@ const Duration kGravixStandbyWait = kGravixStandbyJoinWait;
 const Duration kGravixStandbyOpenTimeout = Duration(seconds: 10);
 
 class _Standby {
-  _Standby(this.key, this.client, this.counter, this.openedAt);
+  _Standby(
+    this.key,
+    this.client,
+    this.counter,
+    this.openedAt, {
+    required this.url,
+    required this.token,
+    required this.networkOptions,
+    this.rttMs,
+  });
   final String key;
   final io.HttpClient client;
   final _Counter counter;
   final DateTime openedAt;
+  // what reopen() needs to open the same one again
+  final String url, token;
+  final NetworkOptions networkOptions;
+
+  /// The round trip to the host as far as known when it was opened: the app's hint
+  /// (region probe / ICE pair), else a third of the warm-up (TCP + TLS + HEAD).
+  final int? rttMs;
 }
 
 class _Counter {
@@ -147,7 +163,7 @@ abstract final class GravixSignalStandby {
     }
   }
 
-  static _Opening _start(String url, String key, NetworkOptions networkOptions) {
+  static _Opening _start(String url, String token, String key, NetworkOptions networkOptions, {int? rttHintMs}) {
     final startedAt = now();
     Future<_Standby?> run() async {
       final counter = _Counter();
@@ -159,9 +175,11 @@ abstract final class GravixSignalStandby {
       } catch (_) {
         return null;
       }
+      final warmWatch = Stopwatch()..start();
       try {
         final ok = await warm(client, _warmUri(url)).timeout(kGravixStandbyOpenTimeout);
         if (!ok) throw StateError('no keep-alive');
+        warmWatch.stop();
       } catch (e) {
         logger.fine('[standby] warm-up failed: $e');
         try {
@@ -170,7 +188,17 @@ abstract final class GravixSignalStandby {
         _dead[key] = (openedAt: startedAt, closedAt: now());
         return null;
       }
-      final sb = _Standby(key, client, counter, now());
+      final warmRtt = warmWatch.elapsedMilliseconds ~/ 3;
+      final sb = _Standby(
+        key,
+        client,
+        counter,
+        now(),
+        url: url,
+        token: token,
+        networkOptions: networkOptions,
+        rttMs: rttHintMs ?? (warmRtt > 0 ? warmRtt : null),
+      );
       final previous = _open[key];
       _open[key] = sb;
       _dead.remove(key);
@@ -195,13 +223,18 @@ abstract final class GravixSignalStandby {
   /// call repeatedly (the lobby's liveness tick): an open one younger than
   /// [kGravixStandbyRotate] is kept as is, one being opened is joined, an older
   /// one is replaced (and stays usable until its replacement is open).
-  static Future<bool> open(String url, String token, {NetworkOptions? networkOptions}) async {
+  ///
+  /// [rttHintMs]: the round trip to that host if the app knows it (its region
+  /// probe); it sets how long the join's upgrade over this connection may take
+  /// before a fresh dial races it ([gravixStandbyUpgradeBound]).
+  static Future<bool> open(String url, String token, {NetworkOptions? networkOptions, int? rttHintMs}) async {
     try {
       final key = _key(url, token);
       _prune();
       final existing = _open[key];
       if (_usable(existing) && now().difference(existing!.openedAt) < kGravixStandbyRotate) return true;
-      final entry = _opening[key] ?? _start(url, key, networkOptions ?? const NetworkOptions());
+      final entry =
+          _opening[key] ?? _start(url, token, key, networkOptions ?? const NetworkOptions(), rttHintMs: rttHintMs);
       final sb = await entry.future;
       return sb != null || _usable(_open[key]);
     } catch (e) {
@@ -270,7 +303,36 @@ abstract final class GravixSignalStandby {
       ageMs: ageMs,
       waitedMs: waitedMs,
       connectsAtTake: sb.counter.connects,
+      upgradeBound: gravixStandbyUpgradeBound(sb.rttMs),
     );
+  }
+
+  /// Replaces every standby connection with a new one to the same url + token
+  /// (the app came back to the foreground). Never throws; resolves when the new
+  /// ones are open (or failed).
+  ///
+  /// Field 2026-09-30 (vivo, Android 15): the standby was opened while the app was
+  /// behind the microphone/camera permission dialog, i.e. not in the foreground.
+  /// Five seconds later the join's upgrade went out over it and nothing came back.
+  /// A connection opened while the app was paused is not trusted after a resume:
+  /// the old one is closed AT ONCE (unlike a rotation, where it serves until its
+  /// replacement is open), so a tap in between waits for the new one (bounded by
+  /// [kGravixStandbyJoinWait]) instead of taking the suspect one.
+  static Future<void> reopenAll() async {
+    try {
+      final old = _open.values.toList();
+      _open.clear();
+      final opens = <Future<bool>>[];
+      for (final sb in old) {
+        _close(sb);
+        if (!_usable(sb)) continue;
+        final entry = _opening[sb.key] ?? _start(sb.url, sb.token, sb.key, sb.networkOptions, rttHintMs: sb.rttMs);
+        opens.add(entry.future.then((s) => s != null, onError: (Object _) => false));
+      }
+      await Future.wait(opens);
+    } catch (e) {
+      logger.fine('[standby] reopenAll failed: $e');
+    }
   }
 
   /// New sockets [client] (a taken standby client) has opened so far.

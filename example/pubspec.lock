@@ -240,7 +240,7 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "0.4.3"
+    version: "0.4.5"
   hooks:
     dependency: transitive
     description:
