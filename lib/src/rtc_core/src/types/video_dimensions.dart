@@ -64,6 +64,8 @@ extension VideoDimensionsPresets on VideoDimensions {
   static const h180_169 = VideoDimensions(320, 180);
   static const h216_169 = VideoDimensions(384, 216);
   static const h360_169 = VideoDimensions(640, 360);
+  // Gravix: 480p for the 480 plan cap; 854 so both edges are even.
+  static const h480_169 = VideoDimensions(854, 480);
   static const h540_169 = VideoDimensions(960, 540);
   static const h720_169 = VideoDimensions(1280, 720);
   static const h1080_169 = VideoDimensions(1920, 1080);

@@ -19,6 +19,11 @@ import 'video_parameters.dart';
 ///
 /// All functions are pure; the publish path in `LocalParticipant` wires them in.
 abstract final class GravixVideoCap {
+  /// The caps the console accepts for an app (`max_video_height`, short edge
+  /// in px). Informational: the clamp works for any positive value. 480 was
+  /// added 2026-10-02 (capture 854x480, ladder [180, 480] at one fps).
+  static const allowedCaps = <int>[360, 480, 540, 720, 1080, 1440];
+
   /// Server-owned local-participant attribute carrying the plan cap.
   static const attributeKey = 'gravix.max_video_height';
 
@@ -41,13 +46,21 @@ abstract final class GravixVideoCap {
   static int effective(int cap, {required bool isScreenShare}) => isScreenShare ? math.max(cap, screenShareFloor) : cap;
 
   /// [d] scaled down (aspect kept) so its short edge is <= [cap]; unchanged
-  /// when it already fits. Both sides are rounded DOWN to even: encoders want
-  /// even sizes, and rounding down can never push the short edge over [cap].
+  /// when it already fits. Encoders want even sizes. The SHORT edge is rounded
+  /// DOWN to even, which can never push it over [cap] (the SFU checks it). The
+  /// LONG edge is rounded to the NEAREST even pixel: 960x540 at cap 480 is
+  /// 853.3 wide and becomes 854x480 (the 480p preset, same as the JS SDK), not
+  /// 852x480. The long edge is not checked against the cap.
   static VideoDimensions clampDimensions(VideoDimensions d, int cap) {
     if (d.width <= 0 || d.height <= 0 || d.min() <= cap) return d;
     final scale = d.min() / cap;
-    int even(double v) => math.max(2, (v.floor() ~/ 2) * 2);
-    return VideoDimensions(even(d.width / scale), even(d.height / scale));
+    int evenDown(double v) => math.max(2, (v.floor() ~/ 2) * 2);
+    int evenNearest(double v) => math.max(2, (v / 2).round() * 2);
+    final landscape = d.width >= d.height;
+    return VideoDimensions(
+      landscape ? evenNearest(d.width / scale) : evenDown(d.width / scale),
+      landscape ? evenDown(d.height / scale) : evenNearest(d.height / scale),
+    );
   }
 
   /// [p] with its dimensions clamped to [cap]. The encoding is kept: capture

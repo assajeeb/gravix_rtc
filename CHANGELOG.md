@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.7 — 2026-10-03
+
+### Added
+- **480p plan cap.** `gravix.max_video_height` may now be **480** (the console's caps
+  are 360/480/540/720/1080/1440, `GravixVideoCap.allowedCaps`). New
+  `VideoParametersPresets.h480_169` / `VideoDimensionsPresets.h480_169` = 854x480
+  (600 kbps, 25 fps), also in `all169`. At cap 480 the default 540p capture is asked
+  for 854x480 and the `GravixRoomService` ladder is two layers, 180p + 480p, both at
+  24 fps (the low rung declares 179 px high from an 854-wide frame: it is scaled on the
+  long edge).
+- **`gravixEffectiveQuality(server, {uplinkLossPct, downlinkLossPct, rttMs,
+  reconnecting})`** (+ `gravixLocalQuality`, `GravixQualityThresholds`): the
+  connection-quality label to SHOW -- the server's score, made worse when the
+  device's own stats are clearly bad (loss >= 3/10/30 % or RTT >= 400/1000/3000 ms
+  -> good/poor/lost; reconnecting -> at best poor). Field 2026-10-02 (doh1): the
+  label read "excellent" with 43 % downlink loss and 7.9 s RTT, because
+  `connectionQuality` is only the SFU's last ConnectionQualityUpdate, which cannot
+  arrive over a broken signalling path (and a muted track is not scored at all).
+  `Participant.connectionQuality` is unchanged (the audio-only fallback still
+  gates on the server's value).
+
+### Changed
+- `GravixVideoCap.clampDimensions` rounds the LONG edge to the nearest even pixel
+  (was: down to even): 960x540 at cap 480 is 854x480, not 852x480 — the same size the
+  JS SDK uses. The short edge (what the SFU checks) is still rounded down, so it never
+  exceeds the cap; the 360/540/720/1080/1440 sizes are unchanged.
+
+### Note (server side, no SDK change)
+- Gravix billing v2 rates each participant's minute by the aggregate resolution of the
+  video it RECEIVES (Agora-style: Audio / HD / Full HD / 2K / 2K+); a lower cap
+  therefore also caps the tier.
+
 ## 0.4.6 — 2026-10-02
 
 Region measurement on Android/iOS measured handshakes, not round trips. Field

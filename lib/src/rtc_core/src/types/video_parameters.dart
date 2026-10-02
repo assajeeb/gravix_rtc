@@ -79,6 +79,7 @@ extension VideoParametersPresets on VideoParameters {
     h180_169,
     h216_169,
     h360_169,
+    h480_169,
     h540_169,
     h720_169,
     h1080_169,
@@ -126,6 +127,12 @@ extension VideoParametersPresets on VideoParameters {
   static const h360_169 = VideoParameters(
     dimensions: VideoDimensionsPresets.h360_169,
     encoding: VideoEncoding(maxBitrate: 450 * 1000, maxFramerate: 20),
+  );
+
+  // Gravix: 480p for the 480 plan cap (854x480, between h360 and h540).
+  static const h480_169 = VideoParameters(
+    dimensions: VideoDimensionsPresets.h480_169,
+    encoding: VideoEncoding(maxBitrate: 600 * 1000, maxFramerate: 25),
   );
 
   static const h540_169 = VideoParameters(

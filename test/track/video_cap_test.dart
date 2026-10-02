@@ -8,7 +8,7 @@ import 'package:gravix_rtc/src/rtc_core/src/utils.dart' show Utils;
 int shortEdge(VideoDimensions d) => d.min();
 
 void main() {
-  const plans = [360, 540, 720, 1080, 1440];
+  const plans = [360, 480, 540, 720, 1080, 1440];
 
   group('attribute parsing', () {
     test('reads the server-owned key as a positive integer', () {
@@ -227,6 +227,52 @@ void main() {
       expect(o.params, VideoParametersPresets.h540_169);
       expect(o.params.dimensions, const VideoDimensions(960, 540));
       expect(const RoomOptions().defaultCameraCaptureOptions.params.dimensions, const VideoDimensions(960, 540));
+    });
+  });
+
+  group('480p cap (added 2026-10-02)', () {
+    test('480 is one of the console caps', () {
+      expect(GravixVideoCap.allowedCaps, [360, 480, 540, 720, 1080, 1440]);
+    });
+
+    test('480p preset is 854x480, listed with the 16:9 presets', () {
+      expect(VideoParametersPresets.h480_169.dimensions, const VideoDimensions(854, 480));
+      expect(VideoParametersPresets.all169, contains(VideoParametersPresets.h480_169));
+    });
+
+    test('capture: 960x540 / 1920x1080 / portrait clamp to 854x480 (even, long edge nearest)', () {
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(960, 540), 480), const VideoDimensions(854, 480));
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(1920, 1080), 480), const VideoDimensions(854, 480));
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(540, 960), 480), const VideoDimensions(480, 854));
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(1440, 1080), 480), const VideoDimensions(640, 480));
+      expect(
+        GravixVideoCap.clampParameters(VideoParametersPresets.h540_169, 480).dimensions,
+        const VideoDimensions(854, 480),
+      );
+    });
+
+    test('other caps keep their exact sizes', () {
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(1920, 1080), 540), const VideoDimensions(960, 540));
+      expect(GravixVideoCap.clampDimensions(const VideoDimensions(1280, 720), 360), const VideoDimensions(640, 360));
+    });
+
+    test('GravixRoomService ladder at cap 480: [180, 480], one fps', () {
+      const capture = VideoDimensions(854, 480); // the clamped 540p capture
+      final o = GravixVideoCap.clampPublishOptions(GravixRoomService.videoPublishOptionsFor(lowData: false), 480);
+      final enc = Utils.computeVideoEncodings(isScreenShare: false, dimensions: capture, options: o, maxShortEdge: 480)!;
+      final layers = Utils.computeVideoLayers(capture, enc, false);
+      final heights = layers.map((l) => l.height).toList();
+      // The q rung is scaled on the LONG edge (854 / 320 = 2.67), so its declared
+      // height floors to 179 at 854x480 (180 at 852x480): still the 180p rung.
+      expect(heights, hasLength(2));
+      expect(heights.first, inInclusiveRange(179, 180));
+      expect(heights.last, 480);
+      expect(enc.map((e) => e.maxFramerate).toSet(), {24});
+    });
+
+    test('an unlisted cap (400) is still enforced generically', () {
+      final d = GravixVideoCap.clampDimensions(const VideoDimensions(1920, 1080), 400);
+      expect(d.min(), lessThanOrEqualTo(400));
     });
   });
 }
