@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../rtc_core/src/support/http_client.dart';
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
@@ -12,6 +13,7 @@ import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
 // `on TimeoutException` in _race stop matching, with no analyzer warning.
 import '../rtc_core/src/exceptions.dart' show ConnectException, ConnectionErrorReason;
 import 'gravix_connection_report.dart';
+import 'gravix_region_probe_client.dart' show GravixRegionProbeClient;
 import 'gravix_region_report.dart';
 
 /// Probes one region URL. Completes normally if the region answered, throws
@@ -71,8 +73,14 @@ class GravixRegionProber {
   /// GET rather than HEAD because verifying the region needs the body. The
   /// objection to GET - that it measures transfer time on top of the round trip -
   /// is about an edge that returns a page; this endpoint returns ~45 bytes.
-  static Future<String?> defaultVerifiedProbe(String probeUrl) async {
-    final response = await sdkHttpGet(Uri.parse(probeUrl));
+  ///
+  /// [client]: send it on this client (and its keep-alive pool) instead of a
+  /// one-shot client. The region measurement passes one per region
+  /// ([GravixRegionProbeClient]) so its samples after the first measure one round
+  /// trip instead of DNS + TCP + TLS + HTTP again (field 2026-10-01).
+  static Future<String?> defaultVerifiedProbe(String probeUrl, {http.Client? client}) async {
+    final uri = Uri.parse(probeUrl);
+    final response = client != null ? await client.get(uri) : await sdkHttpGet(uri);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('region probe answered ${response.statusCode}');
     }
@@ -94,13 +102,15 @@ class GravixRegionProber {
   /// before 2026-09-19 an edge answering 503 (draining) or 404 (misrouted) WON
   /// the race simply by answering first, and the join went to the one region
   /// that had just said it could not take it. Same rule as JS `probeRegions.ts`.
-  static Future<void> defaultProbe(String url) async {
+  ///
+  /// [client]: as for [defaultVerifiedProbe].
+  static Future<void> defaultProbe(String url, {http.Client? client}) async {
     final uri = Uri.parse(toHttpUrl(url));
-    var status = (await sdkHttpHead(uri)).statusCode;
+    var status = (client != null ? await client.head(uri) : await sdkHttpHead(uri)).statusCode;
     if (_methodNotSupported.contains(status)) {
       // Some edges refuse HEAD outright. That is a statement about the method,
       // not the region, so ask once more the way every edge must support.
-      status = (await sdkHttpGet(uri)).statusCode;
+      status = (client != null ? await client.get(uri) : await sdkHttpGet(uri)).statusCode;
     }
     if (status < 200 || status >= 300) {
       throw StateError('region probe answered $status');

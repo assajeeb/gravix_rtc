@@ -18,7 +18,10 @@ import '../../support/platform.dart';
 /// toggling. With the track kept enabled the engine never sees a mute; the
 /// module zeroes the captured PCM on its record thread instead
 /// (`JavaAudioDeviceModule.setMicrophoneMute`, before any encoder or mixer), and
-/// the native side also holds the music mixer so nothing is sent while muted.
+/// the native side also holds the music mixer, so nothing AUDIBLE is sent while
+/// muted. The encoder keeps running on those zeros: packets still flow, at the
+/// rate MicUplinkPause caps the sender to (~7 kbps measured 2026-10-02, was the
+/// full 46-75 kbps before the cap).
 ///
 /// The state is engine-wide (one audio device module per process), so it is
 /// tracked here, released when the muted track stops, and cleared before any

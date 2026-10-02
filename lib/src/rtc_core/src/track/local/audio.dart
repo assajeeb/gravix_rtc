@@ -35,6 +35,7 @@ import '../audio_management.dart';
 import '../options.dart' as track_options;
 import 'engine_mic_mute.dart';
 import 'local.dart';
+import 'mic_uplink_pause.dart';
 
 class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMixin {
   // Options used for this track
@@ -91,6 +92,9 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   /// re-create it on unmute), which re-routes the voice path on OEM audio HALs
   /// and interrupts the OTHER participants' playout (field 2026-09-30). Falls
   /// back to the disable path when the module mute is unavailable.
+  ///
+  /// Once muted, the RTP sender's bitrate is capped as well ([MicUplinkPause]):
+  /// the zeroed audio costs ~7 kbps of uplink instead of the full publish rate.
   @override
   Future<bool> mute({bool stopOnMute = true}) async {
     if (muted) return false;
@@ -100,16 +104,26 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
       if (await GravixEngineMicMute.engage()) {
         _engineMuted = true;
         _engineMuteOwner = this;
+        // after the PCM is zeroed: a refused cap then only costs uplink
+        await _uplinkPause.pause(sender);
         updateMuted(true, shouldSendSignal: true);
         return true;
       }
     }
-    return super.mute(stopOnMute: stopOnMute);
+    final did = await super.mute(stopOnMute: stopOnMute);
+    if (did) await _uplinkPause.pause(sender);
+    return did;
   }
 
+  /// The sender's bitrate is restored BEFORE the microphone goes live again
+  /// (engine mute released / track enabled), so the first spoken word is not
+  /// squeezed through the muted cap.
   @override
   Future<bool> unmute({bool stopOnMute = true}) async {
     if (!muted) return false;
+    // A failed restore is logged (severe) and the unmute still goes ahead: the
+    // user asked to be heard, and low-rate audio beats none.
+    await _uplinkPause.resume(sender);
     if (_engineMuted) {
       _engineMuted = false;
       if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
@@ -119,6 +133,29 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
       return true;
     }
     return super.unmute(stopOnMute: stopOnMute);
+  }
+
+  final _uplinkPause = MicUplinkPause();
+
+  /// Whether the muted-uplink bitrate cap is applied.
+  @visibleForTesting
+  bool get uplinkCapped => _uplinkPause.capped;
+
+  /// A republish while muted (RED auto, full reconnect) creates a NEW sender,
+  /// which starts uncapped: `publication.mute()` on an already-muted track is a
+  /// no-op, so the cap is re-applied here. Not gated on super's result: a
+  /// full reconnect re-publishes without unpublishing first.
+  @override
+  Future<bool> onPublish() async {
+    final did = await super.onPublish();
+    if (muted) await _uplinkPause.pause(sender);
+    return did;
+  }
+
+  @override
+  Future<bool> onUnpublish() async {
+    _uplinkPause.forget();
+    return super.onUnpublish();
   }
 
   /// Converts an engine mute into a plain disabled track and releases the

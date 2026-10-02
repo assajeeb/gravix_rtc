@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.4.6 — 2026-10-02
+
+Region measurement on Android/iOS measured handshakes, not round trips. Field
+2026-10-01 (Bangladesh, one phone, one Wi-Fi): Gravix Tester Android 0.3.4 measured
+sgp1 190-265 / blr1 200-333 ms, flip-flopped between them and joined blr1, while the
+web tester on the same phone measured sgp1 61 / blr1 116-122 every time.
+
+### Fixed
+- **Warm samples are warm.** Every sample of `gravixMeasureRegions` went through
+  `sdkHttpGet`, which opened a new HTTP client per request and closed it, so all four
+  samples paid DNS + TCP + TLS + HTTP (3-4 round trips) and dropping the first one
+  dropped nothing. Each region is now sampled on ONE keep-alive connection
+  (`GravixRegionProbeClient`, idle timeout 30 s, closed when the region is done):
+  the first sample opens it and is dropped, samples 2..N measure one round trip.
+- **Regions are measured in parallel**, each on its own connection, samples
+  sequential within a region. The measurement took 13-15 s on Wi-Fi (5 regions x 4
+  cold samples, one after another); it now takes about the slowest region's cold
+  sample plus three round trips.
+- Unchanged: the verified probe (a region whose probe endpoint names another region
+  never wins), the 1.5 s per-sample timeout, stop-at-first-failure, the switch
+  margins (held region and pinned region: > 30 ms and > 20 %).
+
+### Added
+- `GravixRegionProbeClient` (`probe`, `verifiedProbe`, `connections`, `close`).
+- `gravixMeasureRegions(samplerFor:)` / `gravixStartRegionMeasurement(samplerFor:)`:
+  a `GravixRegionSamplerFactory` gets the region's client, so an app can change the
+  timeout or retries and keep the connection reuse. `gravixDefaultRegionSampler`.
+  The stateless `sampler:` hook still works as before (no reuse unless it keeps its
+  own connection).
+- `GravixRegionMeasurement.connections` (sockets the region's client opened; 1 =
+  every warm sample reused) and `GravixRegionMeasurementResult.elapsed`.
+- `GravixRegionProber.defaultProbe` / `defaultVerifiedProbe` take an optional
+  `client:`.
+
+### Region measurement that scales (owner 2026-10-02: 20-50 servers / 10-20 regions)
+Parity with React 0.6.4; both SDKs run the same fixture
+(`test/fixtures/region_shortlist_cases.json`) and must make the same choice.
+- **Which regions** (`gravixPlanRegionCandidates`): `GET /v1/regions` may now carry
+  `shortlist`, `probe_budget_ms`, `shortlist_ttl_s` and per-region `est_rtt_ms`
+  (`GravixRegionUrl.estRttMs`). Shortlist -> only it, plus the region in use when the
+  shortlist leaves it out. No shortlist (old gateways): <= 6 regions -> all, as before;
+  more -> the 3 lowest `est_rtt_ms`; else the 2 last-known-best for this network + 2
+  from a rotating cursor; else all.
+- **Bounded time**: at most 6 regions at a time; 1 cold + up to 2 warm samples (was 4
+  samples); early exit once every region has a warm sample and the best wins by the
+  keep-rule margin; a TOTAL budget (`probe_budget_ms`, default 1.5 s Wi-Fi / 3 s
+  cellular, or `budget:`). At the budget the best so far is the answer; regions that
+  had not answered are `unmeasured`, not failed. A failed first request is retried
+  once, budget permitting.
+- **Nothing measured**: `shortlist[0]`, else the lowest `est_rtt_ms`, else nothing --
+  a guess (`bestSource` shortlist/est) that never moves a join and never replaces a
+  fresh measured answer.
+- **Per-network cache**: answers kept per network key (connectivity type; add a hashed
+  SSID / carrier with `networkKey:` + `gravixRegionNetworkKey`) for `shortlist_ttl_s`
+  (default 10 min), in the list store (shared preferences by default). A start-up or
+  network change on a known network uses its answer at once.
+- **Reports**: `regions_measured` in the analytics join body and `regionsMeasured` on
+  `GravixRegionReport` (per probed region `samples_ms`, `conns`, `source`, `status`,
+  `budget_hit`; plus `mode`, `budget_ms`, `budget_hit`, `early_exit`, `measured_at`) --
+  `gravixRegionsMeasuredReport`.
+- New: `GravixRegionDirectory`, `gravixMeasureRegions(fetchDirectory:, shortlist:,
+  budget:, currentRegion:, networkKey:, networkType:)` (also on
+  `gravixStartRegionMeasurement`), `GravixRegionMeasurement.status/source/budgetHit/
+  retried`, `GravixRegionMeasurementResult.bestSource/mode/budget/budgetHit/earlyExit/
+  networkKey/ttl`.
+
+### Tests
+- **The mute reaches the server.** `test/track/mute_signal_test.dart` pins the hop the
+  SFU's "stop forwarding muted tracks" depends on: `setMicrophoneEnabled(false)` with
+  `stopAudioCaptureOnMute: false` (the room service's setting) takes the 0.4.4
+  engine-level mute (track enabled, PCM zeroed) AND writes `MuteTrackRequest{sid,
+  muted: true}` to the signal socket; unmute writes `muted: false`; one request per
+  transition over 10 toggles; the disable fallback sends the same request. Test only,
+  no code change (field review 2026-10-01, item 4).
+
+### Behaviour fix: participants across a full reconnect
+- A full restart (new peer connections; a resume that fails escalates to one) drops
+  every remote participant with a `ParticipantDisconnectedEvent` and re-creates the
+  ones still in the room from the new JoinResponse. The re-created participants were
+  never announced, so `GravixRoomService.onUserOffline` fired for everyone and
+  `onUserJoined` for no one: an app keeping its user list from the callbacks (or the
+  room events) was left empty while everyone was still there (tester proof
+  2026-10-02, airplane mode 4 s on the emulator).
+- **Room events:** every participant present after the restart now gets a
+  `ParticipantConnectedEvent` before `RoomReconnectedEvent` (symmetric to the
+  disconnects; they are NEW `RemoteParticipant` objects, so code holding the old ones
+  must take these).
+- **`GravixRoomService` identity callbacks** report only the real changes:
+  `onUserOffline` for who left during the outage (at `RoomReconnectedEvent`, or at a
+  disconnect if the restart fails), `onUserJoined` for who joined, nothing for the
+  identities still present. `test/room/full_restart_participants_test.dart`.
+
+### Muted microphone: uplink capped, recorder untouched (owner 2026-10-02)
+- **While muted the mic sender's bitrate is capped at 6 kbps** (`encodings[0].maxBitrate`
+  via `setParameters`, the audio-first cap's path) and restored on unmute, BEFORE the
+  engine mute is released. The 0.4.4 engine-level mute is unchanged (the Android
+  recorder keeps running, the module zeroes the PCM, `MuteTrackRequest` still goes
+  out), but the encoder kept sending those zeros at the publish rate: 46-75 kbps of
+  uplink for silence (DTX off + RED). Phone proof (Xiaomi 2201117TG, tester 0.3.7+11,
+  blr1): muted uplink **7 kbps** (tester outbound-rtp, was ~110 unmuted), downlink
+  steady through a 40 s mute and 10 rapid toggles, no AudioRecord stop/start, unmute
+  heard by the other side 121-187 ms after the touch (6 unmutes, 3 runs).
+- **Not `encodings[0].active = false`**, although it sends nothing at all: measured on
+  the same phone, an inactive encoding stops the audio send stream and the engine
+  then STOPS the AudioRecord on mute and re-creates it on unmute -- the 0.4.4 field
+  bug (re-opened voice input interrupting the others' playout) all over again.
+- A refused cap only costs uplink (the cached parameters are reverted, the mute still
+  happens); a refused restore is retried once and logged, and the unmute goes ahead.
+  A republish while muted (RED auto, full reconnect) caps the new sender. Applies to
+  every mute path, also the disable path (iOS, Android with the native mute refused);
+  iOS has no device proof yet.
+- The audio-first policy no longer caps a MUTED mic: it would have recorded the 6 kbps
+  as the rate to restore and left the unmuted mic there.
+- Toggles still coalesce (last wins, at most 2 transitions per burst); RED auto does
+  not count muted windows (too few or loss-free packets) as loss.
+  `test/track/mic_uplink_pause_test.dart`.
+
 ## 0.4.5 — 2026-09-30
 
 Includes 0.4.4, which was never published: the Android mute fix for "after mute +

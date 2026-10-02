@@ -31,7 +31,7 @@ import 'package:flutter/foundation.dart';
 /// One candidate region from the token response's `region_urls`.
 @immutable
 class GravixRegionUrl {
-  const GravixRegionUrl({required this.region, required this.url, this.probeUrl});
+  const GravixRegionUrl({required this.region, required this.url, this.probeUrl, this.estRttMs});
 
   /// Region slug, e.g. `sgp1`, `blr1`.
   final String region;
@@ -46,12 +46,22 @@ class GravixRegionUrl {
   /// when the gateway sent none; the entry is then probed the original way.
   final String? probeUrl;
 
-  @override
-  bool operator ==(Object other) =>
-      other is GravixRegionUrl && other.region == region && other.url == url && other.probeUrl == probeUrl;
+  /// The gateway's estimate of this client's RTT to the region (`est_rtt_ms` in
+  /// `GET /v1/regions`, 2026-10-02), from its latency map. Used only to choose WHICH
+  /// regions to measure when the list is long and has no shortlist; never as a
+  /// measurement. Null when the gateway sent none.
+  final double? estRttMs;
 
   @override
-  int get hashCode => Object.hash(region, url, probeUrl);
+  bool operator ==(Object other) =>
+      other is GravixRegionUrl &&
+      other.region == region &&
+      other.url == url &&
+      other.probeUrl == probeUrl &&
+      other.estRttMs == estRttMs;
+
+  @override
+  int get hashCode => Object.hash(region, url, probeUrl, estRttMs);
 
   @override
   String toString() => '$region=$url';
@@ -178,7 +188,14 @@ class GravixRegionReport {
     required this.probeStartedAt,
     required this.connectStartedAt,
     required this.connectedAt,
+    this.regionsMeasured,
   });
+
+  /// The start-up measurement behind this connect's region knowledge, when one is
+  /// fresh and sampled something (0.4.6, 2026-10-02): the analytics report's
+  /// `regions_measured` object ([gravixRegionsMeasuredReport]). Absent from
+  /// [toJson] otherwise, so existing consumers see no change.
+  final Map<String, Object?>? regionsMeasured;
 
   /// Correlates this report with the [GravixFirstAudioReport] for the same
   /// connect. Unique per `connect()`; opaque to consumers.
@@ -222,6 +239,7 @@ class GravixRegionReport {
     'probeStartedAt': gravixIsoMs(probeStartedAt),
     'connectStartedAt': gravixIsoMs(connectStartedAt),
     'connectedAt': gravixIsoMs(connectedAt),
+    if (regionsMeasured != null) 'regionsMeasured': regionsMeasured,
   };
 
   @override
@@ -320,6 +338,7 @@ GravixRegionReport buildGravixRegionReport({
   required DateTime connectStartedAt,
   required DateTime connectedAt,
   bool cached = false,
+  Map<String, Object?>? regionsMeasured,
 }) {
   String regionFor(String url) {
     for (final c in candidates) {
@@ -376,6 +395,7 @@ GravixRegionReport buildGravixRegionReport({
     probeStartedAt: probeStartedAt,
     connectStartedAt: connectStartedAt,
     connectedAt: connectedAt,
+    regionsMeasured: regionsMeasured,
   );
 }
 

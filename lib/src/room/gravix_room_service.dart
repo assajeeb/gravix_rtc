@@ -1058,6 +1058,7 @@ class GravixRoomService implements GravixAudioHost {
           participantSid: room.localParticipant?.sid,
           joinMs: joinMs,
           success: true,
+          regionsMeasured: _regionsMeasuredForReport(),
         ),
       );
       return true;
@@ -1086,6 +1087,7 @@ class GravixRoomService implements GravixAudioHost {
           joinMs: joinWatch.elapsedMilliseconds,
           success: false,
           error: gravixRedactError(e.toString(), token: token),
+          regionsMeasured: _regionsMeasuredForReport(),
         ),
       );
       _emitTimeline(GravixJoinTimelineEnd.disconnect);
@@ -1647,17 +1649,40 @@ class GravixRoomService implements GravixAudioHost {
   // ═══════════════════════════════════════════════════════════════════════════
   //  EVENTS  — replaces registerEventHandler(RtcEngineEventHandler(...))
   // ═══════════════════════════════════════════════════════════════════════════
+  /// Identities the core dropped during the full restart in progress that have
+  /// not come back yet (null: no full restart in progress).
+  Set<String>? _restartDropped;
+
+  void _flushRestartDropped() {
+    final gone = _restartDropped;
+    _restartDropped = null;
+    if (gone == null) return;
+    for (final uid in gone) {
+      debugPrint('Remote user $uid left (during the reconnect)');
+      onUserOffline?.call(uid);
+    }
+  }
+
   void _bindEvents(Room room, EventsListener<RoomEvent> listener) {
+    _restartDropped = null; // a new room never inherits a restart in progress
     listener
       ..on<ParticipantConnectedEvent>((e) {
         final uid = e.participant.identity;
+        // re-announced after a full restart and never really gone: no callback
+        if (_restartDropped?.remove(uid) ?? false) return;
         debugPrint('Remote user $uid joined');
         onUserJoined?.call(uid);
       })
       ..on<ParticipantDisconnectedEvent>((e) {
         final uid = e.participant.identity;
-        debugPrint('Remote user $uid left');
         activeSpeakers.value = {...activeSpeakers.value}..remove(uid);
+        final dropped = _restartDropped;
+        if (dropped != null) {
+          // a full restart drops everyone; who really left is known at the end
+          dropped.add(uid);
+          return;
+        }
+        debugPrint('Remote user $uid left');
         onUserOffline?.call(uid);
       })
       // ActiveSpeakers gives the full speaking set each change → replace
@@ -1711,11 +1736,24 @@ class GravixRoomService implements GravixAudioHost {
           return;
         }
         debugPrint('⚠️ Gravix disconnected: ${e.reason}');
+        _flushRestartDropped();
         isConnected.value = false;
         onDisconnected?.call();
       })
-      ..on<RoomReconnectingEvent>((_) => debugPrint('Gravix reconnecting…'))
-      ..on<RoomReconnectedEvent>((_) => debugPrint('Gravix reconnected'))
+      // RoomReconnectingEvent = a FULL restart (a resume is RoomResumingEvent): the
+      // core drops every remote participant and re-creates the ones still in the
+      // room, announcing them again before RoomReconnectedEvent (room.dart). The
+      // identity callbacks report only the real changes: onUserOffline for who
+      // left during the outage, onUserJoined for who joined, nothing for the rest
+      // (0.4.6; before, everyone got onUserOffline and nobody onUserJoined).
+      ..on<RoomReconnectingEvent>((_) {
+        debugPrint('Gravix reconnecting…');
+        _restartDropped ??= <String>{};
+      })
+      ..on<RoomReconnectedEvent>((_) {
+        debugPrint('Gravix reconnected');
+        _flushRestartDropped();
+      })
       ..on<ParticipantAttributesChanged>((e) {
         final uid = e.participant.identity;
         final facing = e.participant.attributes['cameraFacing'];
@@ -2076,6 +2114,7 @@ class GravixRoomService implements GravixAudioHost {
       connectStartedAt: startedAt,
       connectedAt: connectedAt,
       cached: cached,
+      regionsMeasured: _regionsMeasuredForReport(),
     );
     regionReport.value = report;
     onRegionReport?.call(report);
@@ -2655,6 +2694,16 @@ class GravixRoomService implements GravixAudioHost {
     for (final p in room.remoteParticipants.values) {
       if (p.identity == id) return p;
     }
+    return null;
+  }
+}
+
+/// The fresh start-up region measurement for a report; a broken metric must not
+/// break a join.
+Map<String, Object?>? _regionsMeasuredForReport() {
+  try {
+    return gravixRegionsMeasuredReport();
+  } catch (_) {
     return null;
   }
 }

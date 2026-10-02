@@ -23,3 +23,11 @@ http.Client createSdkHttpClient(NetworkOptions networkOptions) {
   }
   return http.Client();
 }
+
+/// Web: the browser's own keep-alive pool serves repeated requests; there is no
+/// socket hook, so [onConnect] is never called and [idleTimeout] is ignored.
+http.Client createSdkProbeHttpClient(
+  NetworkOptions networkOptions, {
+  void Function()? onConnect,
+  Duration? idleTimeout,
+}) => createSdkHttpClient(networkOptions);

@@ -1,0 +1,1480 @@
+{
+ "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: the same fixture must give the same choice. Generated; edit both copies together.",
+ "lists": {
+  "fifty": [
+   {
+    "region": "r00",
+    "url": "wss://r00.example.test",
+    "probe_url": "https://r00.example.test/v1/region-probe"
+   },
+   {
+    "region": "r01",
+    "url": "wss://r01.example.test",
+    "probe_url": "https://r01.example.test/v1/region-probe"
+   },
+   {
+    "region": "r02",
+    "url": "wss://r02.example.test",
+    "probe_url": "https://r02.example.test/v1/region-probe"
+   },
+   {
+    "region": "r03",
+    "url": "wss://r03.example.test",
+    "probe_url": "https://r03.example.test/v1/region-probe"
+   },
+   {
+    "region": "r04",
+    "url": "wss://r04.example.test",
+    "probe_url": "https://r04.example.test/v1/region-probe"
+   },
+   {
+    "region": "r05",
+    "url": "wss://r05.example.test",
+    "probe_url": "https://r05.example.test/v1/region-probe"
+   },
+   {
+    "region": "r06",
+    "url": "wss://r06.example.test",
+    "probe_url": "https://r06.example.test/v1/region-probe"
+   },
+   {
+    "region": "r07",
+    "url": "wss://r07.example.test",
+    "probe_url": "https://r07.example.test/v1/region-probe"
+   },
+   {
+    "region": "r08",
+    "url": "wss://r08.example.test",
+    "probe_url": "https://r08.example.test/v1/region-probe"
+   },
+   {
+    "region": "r09",
+    "url": "wss://r09.example.test",
+    "probe_url": "https://r09.example.test/v1/region-probe"
+   },
+   {
+    "region": "r10",
+    "url": "wss://r10.example.test",
+    "probe_url": "https://r10.example.test/v1/region-probe"
+   },
+   {
+    "region": "r11",
+    "url": "wss://r11.example.test",
+    "probe_url": "https://r11.example.test/v1/region-probe"
+   },
+   {
+    "region": "r12",
+    "url": "wss://r12.example.test",
+    "probe_url": "https://r12.example.test/v1/region-probe"
+   },
+   {
+    "region": "r13",
+    "url": "wss://r13.example.test",
+    "probe_url": "https://r13.example.test/v1/region-probe"
+   },
+   {
+    "region": "r14",
+    "url": "wss://r14.example.test",
+    "probe_url": "https://r14.example.test/v1/region-probe"
+   },
+   {
+    "region": "r15",
+    "url": "wss://r15.example.test",
+    "probe_url": "https://r15.example.test/v1/region-probe"
+   },
+   {
+    "region": "r16",
+    "url": "wss://r16.example.test",
+    "probe_url": "https://r16.example.test/v1/region-probe"
+   },
+   {
+    "region": "r17",
+    "url": "wss://r17.example.test",
+    "probe_url": "https://r17.example.test/v1/region-probe"
+   },
+   {
+    "region": "r18",
+    "url": "wss://r18.example.test",
+    "probe_url": "https://r18.example.test/v1/region-probe"
+   },
+   {
+    "region": "r19",
+    "url": "wss://r19.example.test",
+    "probe_url": "https://r19.example.test/v1/region-probe"
+   },
+   {
+    "region": "r20",
+    "url": "wss://r20.example.test",
+    "probe_url": "https://r20.example.test/v1/region-probe"
+   },
+   {
+    "region": "r21",
+    "url": "wss://r21.example.test",
+    "probe_url": "https://r21.example.test/v1/region-probe"
+   },
+   {
+    "region": "r22",
+    "url": "wss://r22.example.test",
+    "probe_url": "https://r22.example.test/v1/region-probe"
+   },
+   {
+    "region": "r23",
+    "url": "wss://r23.example.test",
+    "probe_url": "https://r23.example.test/v1/region-probe"
+   },
+   {
+    "region": "r24",
+    "url": "wss://r24.example.test",
+    "probe_url": "https://r24.example.test/v1/region-probe"
+   },
+   {
+    "region": "r25",
+    "url": "wss://r25.example.test",
+    "probe_url": "https://r25.example.test/v1/region-probe"
+   },
+   {
+    "region": "r26",
+    "url": "wss://r26.example.test",
+    "probe_url": "https://r26.example.test/v1/region-probe"
+   },
+   {
+    "region": "r27",
+    "url": "wss://r27.example.test",
+    "probe_url": "https://r27.example.test/v1/region-probe"
+   },
+   {
+    "region": "r28",
+    "url": "wss://r28.example.test",
+    "probe_url": "https://r28.example.test/v1/region-probe"
+   },
+   {
+    "region": "r29",
+    "url": "wss://r29.example.test",
+    "probe_url": "https://r29.example.test/v1/region-probe"
+   },
+   {
+    "region": "r30",
+    "url": "wss://r30.example.test",
+    "probe_url": "https://r30.example.test/v1/region-probe"
+   },
+   {
+    "region": "r31",
+    "url": "wss://r31.example.test",
+    "probe_url": "https://r31.example.test/v1/region-probe"
+   },
+   {
+    "region": "r32",
+    "url": "wss://r32.example.test",
+    "probe_url": "https://r32.example.test/v1/region-probe"
+   },
+   {
+    "region": "r33",
+    "url": "wss://r33.example.test",
+    "probe_url": "https://r33.example.test/v1/region-probe"
+   },
+   {
+    "region": "r34",
+    "url": "wss://r34.example.test",
+    "probe_url": "https://r34.example.test/v1/region-probe"
+   },
+   {
+    "region": "r35",
+    "url": "wss://r35.example.test",
+    "probe_url": "https://r35.example.test/v1/region-probe"
+   },
+   {
+    "region": "r36",
+    "url": "wss://r36.example.test",
+    "probe_url": "https://r36.example.test/v1/region-probe"
+   },
+   {
+    "region": "r37",
+    "url": "wss://r37.example.test",
+    "probe_url": "https://r37.example.test/v1/region-probe"
+   },
+   {
+    "region": "r38",
+    "url": "wss://r38.example.test",
+    "probe_url": "https://r38.example.test/v1/region-probe"
+   },
+   {
+    "region": "r39",
+    "url": "wss://r39.example.test",
+    "probe_url": "https://r39.example.test/v1/region-probe"
+   },
+   {
+    "region": "r40",
+    "url": "wss://r40.example.test",
+    "probe_url": "https://r40.example.test/v1/region-probe"
+   },
+   {
+    "region": "r41",
+    "url": "wss://r41.example.test",
+    "probe_url": "https://r41.example.test/v1/region-probe"
+   },
+   {
+    "region": "r42",
+    "url": "wss://r42.example.test",
+    "probe_url": "https://r42.example.test/v1/region-probe"
+   },
+   {
+    "region": "r43",
+    "url": "wss://r43.example.test",
+    "probe_url": "https://r43.example.test/v1/region-probe"
+   },
+   {
+    "region": "r44",
+    "url": "wss://r44.example.test",
+    "probe_url": "https://r44.example.test/v1/region-probe"
+   },
+   {
+    "region": "r45",
+    "url": "wss://r45.example.test",
+    "probe_url": "https://r45.example.test/v1/region-probe"
+   },
+   {
+    "region": "r46",
+    "url": "wss://r46.example.test",
+    "probe_url": "https://r46.example.test/v1/region-probe"
+   },
+   {
+    "region": "r47",
+    "url": "wss://r47.example.test",
+    "probe_url": "https://r47.example.test/v1/region-probe"
+   },
+   {
+    "region": "r48",
+    "url": "wss://r48.example.test",
+    "probe_url": "https://r48.example.test/v1/region-probe"
+   },
+   {
+    "region": "r49",
+    "url": "wss://r49.example.test",
+    "probe_url": "https://r49.example.test/v1/region-probe"
+   }
+  ],
+  "fiftyEst": [
+   {
+    "region": "r00",
+    "url": "wss://r00.example.test",
+    "probe_url": "https://r00.example.test/v1/region-probe",
+    "est_rtt_ms": 260
+   },
+   {
+    "region": "r01",
+    "url": "wss://r01.example.test",
+    "probe_url": "https://r01.example.test/v1/region-probe",
+    "est_rtt_ms": 252
+   },
+   {
+    "region": "r02",
+    "url": "wss://r02.example.test",
+    "probe_url": "https://r02.example.test/v1/region-probe",
+    "est_rtt_ms": 244
+   },
+   {
+    "region": "r03",
+    "url": "wss://r03.example.test",
+    "probe_url": "https://r03.example.test/v1/region-probe",
+    "est_rtt_ms": 236
+   },
+   {
+    "region": "r04",
+    "url": "wss://r04.example.test",
+    "probe_url": "https://r04.example.test/v1/region-probe",
+    "est_rtt_ms": 228
+   },
+   {
+    "region": "r05",
+    "url": "wss://r05.example.test",
+    "probe_url": "https://r05.example.test/v1/region-probe",
+    "est_rtt_ms": 220
+   },
+   {
+    "region": "r06",
+    "url": "wss://r06.example.test",
+    "probe_url": "https://r06.example.test/v1/region-probe",
+    "est_rtt_ms": 212
+   },
+   {
+    "region": "r07",
+    "url": "wss://r07.example.test",
+    "probe_url": "https://r07.example.test/v1/region-probe",
+    "est_rtt_ms": 204
+   },
+   {
+    "region": "r08",
+    "url": "wss://r08.example.test",
+    "probe_url": "https://r08.example.test/v1/region-probe",
+    "est_rtt_ms": 196
+   },
+   {
+    "region": "r09",
+    "url": "wss://r09.example.test",
+    "probe_url": "https://r09.example.test/v1/region-probe",
+    "est_rtt_ms": 188
+   },
+   {
+    "region": "r10",
+    "url": "wss://r10.example.test",
+    "probe_url": "https://r10.example.test/v1/region-probe",
+    "est_rtt_ms": 180
+   },
+   {
+    "region": "r11",
+    "url": "wss://r11.example.test",
+    "probe_url": "https://r11.example.test/v1/region-probe",
+    "est_rtt_ms": 172
+   },
+   {
+    "region": "r12",
+    "url": "wss://r12.example.test",
+    "probe_url": "https://r12.example.test/v1/region-probe",
+    "est_rtt_ms": 164
+   },
+   {
+    "region": "r13",
+    "url": "wss://r13.example.test",
+    "probe_url": "https://r13.example.test/v1/region-probe",
+    "est_rtt_ms": 156
+   },
+   {
+    "region": "r14",
+    "url": "wss://r14.example.test",
+    "probe_url": "https://r14.example.test/v1/region-probe",
+    "est_rtt_ms": 148
+   },
+   {
+    "region": "r15",
+    "url": "wss://r15.example.test",
+    "probe_url": "https://r15.example.test/v1/region-probe",
+    "est_rtt_ms": 140
+   },
+   {
+    "region": "r16",
+    "url": "wss://r16.example.test",
+    "probe_url": "https://r16.example.test/v1/region-probe",
+    "est_rtt_ms": 132
+   },
+   {
+    "region": "r17",
+    "url": "wss://r17.example.test",
+    "probe_url": "https://r17.example.test/v1/region-probe",
+    "est_rtt_ms": 124
+   },
+   {
+    "region": "r18",
+    "url": "wss://r18.example.test",
+    "probe_url": "https://r18.example.test/v1/region-probe",
+    "est_rtt_ms": 116
+   },
+   {
+    "region": "r19",
+    "url": "wss://r19.example.test",
+    "probe_url": "https://r19.example.test/v1/region-probe",
+    "est_rtt_ms": 108
+   },
+   {
+    "region": "r20",
+    "url": "wss://r20.example.test",
+    "probe_url": "https://r20.example.test/v1/region-probe",
+    "est_rtt_ms": 100
+   },
+   {
+    "region": "r21",
+    "url": "wss://r21.example.test",
+    "probe_url": "https://r21.example.test/v1/region-probe",
+    "est_rtt_ms": 92
+   },
+   {
+    "region": "r22",
+    "url": "wss://r22.example.test",
+    "probe_url": "https://r22.example.test/v1/region-probe",
+    "est_rtt_ms": 84
+   },
+   {
+    "region": "r23",
+    "url": "wss://r23.example.test",
+    "probe_url": "https://r23.example.test/v1/region-probe",
+    "est_rtt_ms": 76
+   },
+   {
+    "region": "r24",
+    "url": "wss://r24.example.test",
+    "probe_url": "https://r24.example.test/v1/region-probe",
+    "est_rtt_ms": 68
+   },
+   {
+    "region": "r25",
+    "url": "wss://r25.example.test",
+    "probe_url": "https://r25.example.test/v1/region-probe",
+    "est_rtt_ms": 60
+   },
+   {
+    "region": "r26",
+    "url": "wss://r26.example.test",
+    "probe_url": "https://r26.example.test/v1/region-probe",
+    "est_rtt_ms": 52
+   },
+   {
+    "region": "r27",
+    "url": "wss://r27.example.test",
+    "probe_url": "https://r27.example.test/v1/region-probe",
+    "est_rtt_ms": 44
+   },
+   {
+    "region": "r28",
+    "url": "wss://r28.example.test",
+    "probe_url": "https://r28.example.test/v1/region-probe",
+    "est_rtt_ms": 36
+   },
+   {
+    "region": "r29",
+    "url": "wss://r29.example.test",
+    "probe_url": "https://r29.example.test/v1/region-probe",
+    "est_rtt_ms": 28
+   },
+   {
+    "region": "r30",
+    "url": "wss://r30.example.test",
+    "probe_url": "https://r30.example.test/v1/region-probe",
+    "est_rtt_ms": 20
+   },
+   {
+    "region": "r31",
+    "url": "wss://r31.example.test",
+    "probe_url": "https://r31.example.test/v1/region-probe",
+    "est_rtt_ms": 12
+   },
+   {
+    "region": "r32",
+    "url": "wss://r32.example.test",
+    "probe_url": "https://r32.example.test/v1/region-probe",
+    "est_rtt_ms": 20
+   },
+   {
+    "region": "r33",
+    "url": "wss://r33.example.test",
+    "probe_url": "https://r33.example.test/v1/region-probe",
+    "est_rtt_ms": 28
+   },
+   {
+    "region": "r34",
+    "url": "wss://r34.example.test",
+    "probe_url": "https://r34.example.test/v1/region-probe",
+    "est_rtt_ms": 36
+   },
+   {
+    "region": "r35",
+    "url": "wss://r35.example.test",
+    "probe_url": "https://r35.example.test/v1/region-probe",
+    "est_rtt_ms": 44
+   },
+   {
+    "region": "r36",
+    "url": "wss://r36.example.test",
+    "probe_url": "https://r36.example.test/v1/region-probe",
+    "est_rtt_ms": 52
+   },
+   {
+    "region": "r37",
+    "url": "wss://r37.example.test",
+    "probe_url": "https://r37.example.test/v1/region-probe",
+    "est_rtt_ms": 60
+   },
+   {
+    "region": "r38",
+    "url": "wss://r38.example.test",
+    "probe_url": "https://r38.example.test/v1/region-probe",
+    "est_rtt_ms": 68
+   },
+   {
+    "region": "r39",
+    "url": "wss://r39.example.test",
+    "probe_url": "https://r39.example.test/v1/region-probe",
+    "est_rtt_ms": 76
+   },
+   {
+    "region": "r40",
+    "url": "wss://r40.example.test",
+    "probe_url": "https://r40.example.test/v1/region-probe",
+    "est_rtt_ms": 84
+   },
+   {
+    "region": "r41",
+    "url": "wss://r41.example.test",
+    "probe_url": "https://r41.example.test/v1/region-probe",
+    "est_rtt_ms": 92
+   },
+   {
+    "region": "r42",
+    "url": "wss://r42.example.test",
+    "probe_url": "https://r42.example.test/v1/region-probe",
+    "est_rtt_ms": 100
+   },
+   {
+    "region": "r43",
+    "url": "wss://r43.example.test",
+    "probe_url": "https://r43.example.test/v1/region-probe",
+    "est_rtt_ms": 108
+   },
+   {
+    "region": "r44",
+    "url": "wss://r44.example.test",
+    "probe_url": "https://r44.example.test/v1/region-probe",
+    "est_rtt_ms": 116
+   },
+   {
+    "region": "r45",
+    "url": "wss://r45.example.test",
+    "probe_url": "https://r45.example.test/v1/region-probe",
+    "est_rtt_ms": 124
+   },
+   {
+    "region": "r46",
+    "url": "wss://r46.example.test",
+    "probe_url": "https://r46.example.test/v1/region-probe",
+    "est_rtt_ms": 132
+   },
+   {
+    "region": "r47",
+    "url": "wss://r47.example.test",
+    "probe_url": "https://r47.example.test/v1/region-probe",
+    "est_rtt_ms": 140
+   },
+   {
+    "region": "r48",
+    "url": "wss://r48.example.test",
+    "probe_url": "https://r48.example.test/v1/region-probe",
+    "est_rtt_ms": 148
+   },
+   {
+    "region": "r49",
+    "url": "wss://r49.example.test",
+    "probe_url": "https://r49.example.test/v1/region-probe",
+    "est_rtt_ms": 156
+   }
+  ],
+  "five": [
+   {
+    "region": "sgp1",
+    "url": "wss://sgp1.example.test",
+    "probe_url": "https://sgp1.example.test/v1/region-probe"
+   },
+   {
+    "region": "blr1",
+    "url": "wss://blr1.example.test",
+    "probe_url": "https://blr1.example.test/v1/region-probe"
+   },
+   {
+    "region": "fra1",
+    "url": "wss://fra1.example.test",
+    "probe_url": "https://fra1.example.test/v1/region-probe"
+   },
+   {
+    "region": "nyc1",
+    "url": "wss://nyc1.example.test",
+    "probe_url": "https://nyc1.example.test/v1/region-probe"
+   },
+   {
+    "region": "ams3",
+    "url": "wss://ams3.example.test",
+    "probe_url": "https://ams3.example.test/v1/region-probe"
+   }
+  ],
+  "seven": [
+   {
+    "region": "r00",
+    "url": "wss://r00.example.test",
+    "probe_url": "https://r00.example.test/v1/region-probe"
+   },
+   {
+    "region": "r01",
+    "url": "wss://r01.example.test",
+    "probe_url": "https://r01.example.test/v1/region-probe"
+   },
+   {
+    "region": "r02",
+    "url": "wss://r02.example.test",
+    "probe_url": "https://r02.example.test/v1/region-probe"
+   },
+   {
+    "region": "r03",
+    "url": "wss://r03.example.test",
+    "probe_url": "https://r03.example.test/v1/region-probe"
+   },
+   {
+    "region": "r04",
+    "url": "wss://r04.example.test",
+    "probe_url": "https://r04.example.test/v1/region-probe"
+   },
+   {
+    "region": "r05",
+    "url": "wss://r05.example.test",
+    "probe_url": "https://r05.example.test/v1/region-probe"
+   },
+   {
+    "region": "r06",
+    "url": "wss://r06.example.test",
+    "probe_url": "https://r06.example.test/v1/region-probe"
+   }
+  ]
+ },
+ "cases": [
+  {
+   "name": "shortlist of 3 out of 50: only the shortlist is probed",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "r07",
+     "r03",
+     "r21"
+    ],
+    "probe_budget_ms": 1500,
+    "shortlist_ttl_s": 600
+   },
+   "cache": null,
+   "rtt": {
+    "r07": [
+     300,
+     90,
+     95
+    ],
+    "r03": [
+     250,
+     60,
+     62
+    ],
+    "r21": [
+     400,
+     150,
+     140
+    ]
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r07",
+      "shortlist"
+     ],
+     [
+      "r03",
+      "shortlist"
+     ],
+     [
+      "r21",
+      "shortlist"
+     ]
+    ],
+    "best": "r03",
+    "bestSource": "measured",
+    "known": [
+     "r03",
+     "r07"
+    ]
+   }
+  },
+  {
+   "name": "the cached region outside the shortlist is probed too, and kept on a small loss",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "r07",
+     "r03",
+     "r21"
+    ]
+   },
+   "cache": {
+    "known": [
+     "r40",
+     "r03"
+    ],
+    "cursor": 0,
+    "current": "r40"
+   },
+   "rtt": {
+    "r07": [
+     300,
+     90,
+     95
+    ],
+    "r03": [
+     250,
+     60,
+     62
+    ],
+    "r21": [
+     400,
+     150,
+     140
+    ],
+    "r40": [
+     200,
+     70,
+     72
+    ]
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r07",
+      "shortlist"
+     ],
+     [
+      "r03",
+      "shortlist"
+     ],
+     [
+      "r21",
+      "shortlist"
+     ],
+     [
+      "r40",
+      "cache"
+     ]
+    ],
+    "best": "r40",
+    "bestSource": "kept",
+    "known": [
+     "r03",
+     "r40"
+    ]
+   }
+  },
+  {
+   "name": "the cached region outside the shortlist, clearly slower: switch",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "r07",
+     "r03",
+     "r21"
+    ]
+   },
+   "cache": {
+    "known": [
+     "r40"
+    ],
+    "cursor": 0,
+    "current": "r40"
+   },
+   "rtt": {
+    "r07": [
+     300,
+     90,
+     95
+    ],
+    "r03": [
+     250,
+     60,
+     62
+    ],
+    "r21": [
+     400,
+     150,
+     140
+    ],
+    "r40": [
+     300,
+     150,
+     155
+    ]
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r07",
+      "shortlist"
+     ],
+     [
+      "r03",
+      "shortlist"
+     ],
+     [
+      "r21",
+      "shortlist"
+     ],
+     [
+      "r40",
+      "cache"
+     ]
+    ],
+    "best": "r03",
+    "bestSource": "measured",
+    "known": [
+     "r03",
+     "r07"
+    ]
+   }
+  },
+  {
+   "name": "shortlist names a region the list does not have: ignored",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "zz9",
+     "r03"
+    ]
+   },
+   "cache": null,
+   "rtt": {
+    "r03": [
+     250,
+     60,
+     62
+    ]
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r03",
+      "shortlist"
+     ]
+    ],
+    "best": "r03",
+    "bestSource": "measured",
+    "known": [
+     "r03"
+    ]
+   }
+  },
+  {
+   "name": "old server, 5 regions: all probed (unchanged)",
+   "response": {
+    "regions": "five"
+   },
+   "cache": {
+    "known": [
+     "blr1"
+    ],
+    "cursor": 0,
+    "current": "blr1"
+   },
+   "rtt": {
+    "sgp1": [
+     190,
+     61,
+     64
+    ],
+    "blr1": [
+     210,
+     118,
+     120
+    ],
+    "fra1": [
+     500,
+     180,
+     185
+    ],
+    "nyc1": [
+     780,
+     250,
+     255
+    ],
+    "ams3": [
+     520,
+     190,
+     192
+    ]
+   },
+   "expect": {
+    "mode": "all",
+    "probed": [
+     [
+      "sgp1",
+      "all"
+     ],
+     [
+      "blr1",
+      "all"
+     ],
+     [
+      "fra1",
+      "all"
+     ],
+     [
+      "nyc1",
+      "all"
+     ],
+     [
+      "ams3",
+      "all"
+     ]
+    ],
+    "best": "sgp1",
+    "bestSource": "measured",
+    "known": [
+     "sgp1",
+     "blr1"
+    ]
+   }
+  },
+  {
+   "name": "old server, 7 regions, no est, no cache: all, concurrency-capped",
+   "response": {
+    "regions": "seven"
+   },
+   "cache": null,
+   "rtt": {
+    "r00": [
+     100,
+     50,
+     50
+    ],
+    "r01": [
+     100,
+     40,
+     41
+    ],
+    "r02": [
+     100,
+     70,
+     70
+    ],
+    "r03": [
+     100,
+     80,
+     80
+    ],
+    "r04": [
+     100,
+     90,
+     90
+    ],
+    "r05": [
+     100,
+     95,
+     95
+    ],
+    "r06": [
+     100,
+     99,
+     99
+    ]
+   },
+   "expect": {
+    "mode": "all",
+    "probed": [
+     [
+      "r00",
+      "all"
+     ],
+     [
+      "r01",
+      "all"
+     ],
+     [
+      "r02",
+      "all"
+     ],
+     [
+      "r03",
+      "all"
+     ],
+     [
+      "r04",
+      "all"
+     ],
+     [
+      "r05",
+      "all"
+     ],
+     [
+      "r06",
+      "all"
+     ]
+    ],
+    "best": "r01",
+    "bestSource": "measured",
+    "known": [
+     "r01",
+     "r00"
+    ]
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions with est_rtt_ms: the 3 lowest",
+   "response": {
+    "regions": "fiftyEst"
+   },
+   "cache": null,
+   "rtt": {
+    "r31": [
+     200,
+     40,
+     41
+    ],
+    "r30": [
+     200,
+     35,
+     36
+    ],
+    "r32": [
+     200,
+     80,
+     80
+    ]
+   },
+   "expect": {
+    "mode": "est",
+    "probed": [
+     [
+      "r31",
+      "est"
+     ],
+     [
+      "r30",
+      "est"
+     ],
+     [
+      "r32",
+      "est"
+     ]
+    ],
+    "best": "r30",
+    "bestSource": "measured",
+    "known": [
+     "r30",
+     "r31"
+    ]
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions with est_rtt_ms, cached region elsewhere: added",
+   "response": {
+    "regions": "fiftyEst"
+   },
+   "cache": {
+    "known": [
+     "r02"
+    ],
+    "cursor": 0,
+    "current": "r02"
+   },
+   "rtt": {
+    "r31": [
+     200,
+     40,
+     41
+    ],
+    "r30": [
+     200,
+     35,
+     36
+    ],
+    "r32": [
+     200,
+     80,
+     80
+    ],
+    "r02": [
+     200,
+     90,
+     90
+    ]
+   },
+   "expect": {
+    "mode": "est",
+    "probed": [
+     [
+      "r31",
+      "est"
+     ],
+     [
+      "r30",
+      "est"
+     ],
+     [
+      "r32",
+      "est"
+     ],
+     [
+      "r02",
+      "cache"
+     ]
+    ],
+    "best": "r30",
+    "bestSource": "measured",
+    "known": [
+     "r30",
+     "r31"
+    ]
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions, no est, no cache: all (first run)",
+   "response": {
+    "regions": "fifty"
+   },
+   "cache": null,
+   "rtt": {},
+   "probedCount": 50,
+   "expect": {
+    "mode": "all",
+    "best": null,
+    "bestSource": null
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions, cache: best 2 + 2 explored from the cursor",
+   "response": {
+    "regions": "fifty"
+   },
+   "cache": {
+    "known": [
+     "r10",
+     "r20"
+    ],
+    "cursor": 0,
+    "current": "r10"
+   },
+   "rtt": {
+    "r10": [
+     200,
+     80,
+     82
+    ],
+    "r20": [
+     200,
+     100,
+     101
+    ],
+    "r00": [
+     200,
+     30,
+     31
+    ],
+    "r01": [
+     200,
+     120,
+     120
+    ]
+   },
+   "expect": {
+    "mode": "explore",
+    "probed": [
+     [
+      "r10",
+      "cache"
+     ],
+     [
+      "r20",
+      "cache"
+     ],
+     [
+      "r00",
+      "explore"
+     ],
+     [
+      "r01",
+      "explore"
+     ]
+    ],
+    "cursor": 2,
+    "best": "r00",
+    "bestSource": "measured",
+    "known": [
+     "r00",
+     "r10"
+    ]
+   }
+  },
+  {
+   "name": "exploration wraps around the end of the list",
+   "response": {
+    "regions": "fifty"
+   },
+   "cache": {
+    "known": [
+     "r10",
+     "r20"
+    ],
+    "cursor": 47,
+    "current": "r10"
+   },
+   "rtt": {
+    "r10": [
+     200,
+     80,
+     82
+    ],
+    "r20": [
+     200,
+     100,
+     101
+    ],
+    "r49": [
+     200,
+     85,
+     85
+    ],
+    "r00": [
+     200,
+     120,
+     120
+    ]
+   },
+   "expect": {
+    "mode": "explore",
+    "probed": [
+     [
+      "r10",
+      "cache"
+     ],
+     [
+      "r20",
+      "cache"
+     ],
+     [
+      "r49",
+      "explore"
+     ],
+     [
+      "r00",
+      "explore"
+     ]
+    ],
+    "cursor": 1,
+    "best": "r10",
+    "bestSource": "measured",
+    "known": [
+     "r10",
+     "r49"
+    ]
+   }
+  },
+  {
+   "name": "nothing answered, shortlist: fall back to shortlist[0]",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "r07",
+     "r03",
+     "r21"
+    ]
+   },
+   "cache": null,
+   "rtt": {
+    "r07": null,
+    "r03": null,
+    "r21": null
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r07",
+      "shortlist"
+     ],
+     [
+      "r03",
+      "shortlist"
+     ],
+     [
+      "r21",
+      "shortlist"
+     ]
+    ],
+    "best": "r07",
+    "bestSource": "shortlist",
+    "known": []
+   }
+  },
+  {
+   "name": "nothing answered, no shortlist: fall back to the lowest est_rtt_ms",
+   "response": {
+    "regions": "fiftyEst"
+   },
+   "cache": null,
+   "rtt": {
+    "r31": null,
+    "r30": null,
+    "r32": null
+   },
+   "expect": {
+    "mode": "est",
+    "probed": [
+     [
+      "r31",
+      "est"
+     ],
+     [
+      "r30",
+      "est"
+     ],
+     [
+      "r32",
+      "est"
+     ]
+    ],
+    "best": "r31",
+    "bestSource": "est",
+    "known": []
+   }
+  },
+  {
+   "name": "nothing answered, old server: no answer (the token region is used)",
+   "response": {
+    "regions": "five"
+   },
+   "cache": null,
+   "rtt": {
+    "sgp1": null,
+    "blr1": null,
+    "fra1": null,
+    "nyc1": null,
+    "ams3": null
+   },
+   "expect": {
+    "mode": "all",
+    "best": null,
+    "bestSource": null,
+    "known": []
+   }
+  }
+ ],
+ "earlyExit": [
+  {
+   "name": "clear winner",
+   "states": [
+    {
+     "warm": [
+      60
+     ],
+     "done": false
+    },
+    {
+     "warm": [
+      150
+     ],
+     "done": false
+    }
+   ],
+   "expect": true
+  },
+  {
+   "name": "within the margin",
+   "states": [
+    {
+     "warm": [
+      60
+     ],
+     "done": false
+    },
+    {
+     "warm": [
+      85
+     ],
+     "done": false
+    }
+   ],
+   "expect": false
+  },
+  {
+   "name": "margin is 20% of the slower region above 150 ms",
+   "states": [
+    {
+     "warm": [
+      200
+     ],
+     "done": false
+    },
+    {
+     "warm": [
+      245
+     ],
+     "done": false
+    }
+   ],
+   "expect": false
+  },
+  {
+   "name": "margin 20%: beaten",
+   "states": [
+    {
+     "warm": [
+      200
+     ],
+     "done": false
+    },
+    {
+     "warm": [
+      260
+     ],
+     "done": false
+    }
+   ],
+   "expect": true
+  },
+  {
+   "name": "a candidate without a warm sample yet",
+   "states": [
+    {
+     "warm": [
+      60
+     ],
+     "done": false
+    },
+    {
+     "warm": [],
+     "done": false
+    }
+   ],
+   "expect": false
+  },
+  {
+   "name": "a failed candidate does not hold the exit",
+   "states": [
+    {
+     "warm": [
+      60
+     ],
+     "done": false
+    },
+    {
+     "warm": [],
+     "done": true
+    }
+   ],
+   "expect": true
+  },
+  {
+   "name": "nothing measured",
+   "states": [
+    {
+     "warm": [],
+     "done": true
+    },
+    {
+     "warm": [],
+     "done": true
+    }
+   ],
+   "expect": false
+  },
+  {
+   "name": "minimum of the warm samples",
+   "states": [
+    {
+     "warm": [
+      90,
+      60
+     ],
+     "done": false
+    },
+    {
+     "warm": [
+      100,
+      95
+     ],
+     "done": false
+    }
+   ],
+   "expect": true
+  }
+ ]
+}

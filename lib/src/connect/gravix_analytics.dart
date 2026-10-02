@@ -65,6 +65,7 @@ class GravixJoinAnalyticsReport {
     this.participantSid,
     this.error = '',
     this.timeline,
+    this.regionsMeasured,
   });
 
   final String connectionId;
@@ -84,6 +85,12 @@ class GravixJoinAnalyticsReport {
   /// The `GravixJoinTimeline.toJson()` of this join, when the app recorded one.
   final Map<String, Object?>? timeline;
 
+  /// The fresh start-up region measurement (`gravixRegionsMeasuredReport`), when
+  /// there is one (2026-10-02): per probed region its samples, so the backend can
+  /// learn its latency map. Optional; dropped before the join facts when the body
+  /// is too big.
+  final Map<String, Object?>? regionsMeasured;
+
   GravixJoinAnalyticsReport withTimeline(Map<String, Object?>? t) => GravixJoinAnalyticsReport(
     connectionId: connectionId,
     url: url,
@@ -93,6 +100,19 @@ class GravixJoinAnalyticsReport {
     participantSid: participantSid,
     error: error,
     timeline: t,
+    regionsMeasured: regionsMeasured,
+  );
+
+  GravixJoinAnalyticsReport withRegionsMeasured(Map<String, Object?>? r) => GravixJoinAnalyticsReport(
+    connectionId: connectionId,
+    url: url,
+    joinMs: joinMs,
+    success: success,
+    region: region,
+    participantSid: participantSid,
+    error: error,
+    timeline: timeline,
+    regionsMeasured: r,
   );
 }
 
@@ -139,6 +159,7 @@ class GravixAnalytics {
     'error': report.error,
     if (report.timeline != null) 'timeline': report.timeline,
     'network': network,
+    if (report.regionsMeasured != null) 'regions_measured': report.regionsMeasured,
   };
 
   /// Sends [report], authenticated with [token] (the join token). Resolves true
@@ -147,10 +168,16 @@ class GravixAnalytics {
   Future<bool> reportJoin(GravixJoinAnalyticsReport report, {required String token}) async {
     try {
       final network = await _networkType().catchError((Object _) => 'unknown');
-      var body = jsonEncode(buildBody(report, network: network));
-      if (utf8.encode(body).length > kGravixAnalyticsMaxBody && report.timeline != null) {
+      var sent = report;
+      var body = jsonEncode(buildBody(sent, network: network));
+      if (utf8.encode(body).length > kGravixAnalyticsMaxBody && sent.timeline != null) {
         // The timeline is optional; the join facts are not.
-        body = jsonEncode(buildBody(report.withTimeline(null), network: network));
+        sent = sent.withTimeline(null);
+        body = jsonEncode(buildBody(sent, network: network));
+      }
+      if (utf8.encode(body).length > kGravixAnalyticsMaxBody && sent.regionsMeasured != null) {
+        // So is the region measurement.
+        body = jsonEncode(buildBody(sent.withRegionsMeasured(null), network: network));
       }
       final client = _client ?? http.Client();
       try {

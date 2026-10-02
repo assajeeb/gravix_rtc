@@ -20,6 +20,13 @@ import 'http_client/io.dart' if (dart.library.js_interop) 'http_client/web.dart'
 
 http.Client createSdkHttpClient(NetworkOptions networkOptions) => impl.createSdkHttpClient(networkOptions);
 
+/// A client to keep for several requests (keep-alive), see the io implementation.
+http.Client createSdkProbeHttpClient(
+  NetworkOptions networkOptions, {
+  void Function()? onConnect,
+  Duration? idleTimeout,
+}) => impl.createSdkProbeHttpClient(networkOptions, onConnect: onConnect, idleTimeout: idleTimeout);
+
 Future<http.Response> sdkHttpGet(
   Uri uri, {
   Map<String, String>? headers,

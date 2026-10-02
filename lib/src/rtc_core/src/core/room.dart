@@ -105,6 +105,15 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   E2EEManager? _e2eeManager;
   bool get isRecording => _isRecording;
   bool _isRecording = false;
+
+  /// GRAVIX 2026-10-02: identities announced with a [ParticipantConnectedEvent]
+  /// since the current full restart began; null outside one. A full restart
+  /// drops every remote participant (one [ParticipantDisconnectedEvent] each) and
+  /// re-creates them from the new JoinResponse, which used to announce nobody:
+  /// after a full reconnect an app that keeps its participant list from these
+  /// events ended up with an empty list while everyone was still in the room
+  /// (emulator proof 2026-10-02: participant_left for the observer, no join).
+  Set<String>? _restartAnnounced;
   bool _audioEnabled = true;
 
   // Whether the one-time RoomOptions speaker preference bridge has run.
@@ -593,6 +602,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       notifyListeners();
     })
     ..on<EngineFullRestartingEvent>((event) async {
+      _restartAnnounced = <String>{};
       events.emit(const RoomReconnectingEvent());
 
       // reset params
@@ -624,6 +634,18 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           }
         }
       }
+      // Every participant present now was dropped (or never announced) during the
+      // restart: announce the ones not announced yet, before RoomReconnectedEvent,
+      // so a list kept from the events is whole again when "reconnected" arrives.
+      // They are NEW objects; whoever held the old ones must take these.
+      final announced = _restartAnnounced;
+      _restartAnnounced = null;
+      if (announced != null) {
+        for (final participant in _remoteParticipants.toList()) {
+          if (announced.contains(participant.identity)) continue;
+          events.emit(ParticipantConnectedEvent(participant: participant));
+        }
+      }
       events.emit(const RoomReconnectedEvent());
       notifyListeners();
     })
@@ -646,6 +668,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     })
     ..on<EngineDisconnectedEvent>((event) async {
       if (!engine.fullReconnectOnNext || event.reason == DisconnectReason.clientInitiated) {
+        _restartAnnounced = null;
         await _cleanUp(disposeLocalParticipant: false);
         events.emit(RoomDisconnectedEvent(reason: event.reason));
         notifyListeners();
@@ -819,6 +842,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
       if (isNew) {
         hasChanged = true;
+        // announced now (connected) or at the end of a full restart (not yet)
+        if (connectionState == ConnectionState.connected) _restartAnnounced?.add(info.identity);
         // Emit connected event
         emitWhenConnected(ParticipantConnectedEvent(participant: result.participant));
         // Emit TrackPublishedEvent for each new track

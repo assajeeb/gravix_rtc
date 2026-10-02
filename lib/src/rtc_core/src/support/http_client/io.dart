@@ -25,6 +25,20 @@ import '../certificate_pinning.dart';
 http.Client createSdkHttpClient(NetworkOptions networkOptions) =>
     http_io.IOClient(createSdkIoHttpClient(networkOptions));
 
+/// A client meant to be KEPT for several requests to the same host (the region
+/// measurement): its keep-alive pool serves requests 2..N on the socket the first
+/// one opened. [onConnect] counts the sockets it opens; [idleTimeout] how long an
+/// idle socket stays pooled.
+http.Client createSdkProbeHttpClient(
+  NetworkOptions networkOptions, {
+  void Function()? onConnect,
+  Duration? idleTimeout,
+}) {
+  final client = createSdkIoHttpClient(networkOptions, onConnect: onConnect);
+  if (idleTimeout != null) client.idleTimeout = idleTimeout;
+  return http_io.IOClient(client);
+}
+
 /// [onConnect]: called for every NEW socket the client opens (not for a request
 /// served from its keep-alive pool). The standby pre-connect (standby_io.dart)
 /// uses it to tell whether the join's upgrade really reused its warm connection.

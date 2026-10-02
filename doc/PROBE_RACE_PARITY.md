@@ -248,3 +248,16 @@ better ordering is worth the wait is a phone measurement at N >= 3, not an
 argument — which is why it is an option and off. Cross-SDK: the JS option is
 `regionProbeStaggerMs`; both SDKs must use the same value for their region
 reports to be comparable.
+
+## Addendum 2026-10-02 — shortlist, budget, per-network cache (Flutter 0.4.6, React 0.6.4)
+
+The rules are written out once, in the React SDK's `docs/probe-race-contract.md`
+("Addendum 2026-10-02"); this SDK implements them in
+`lib/src/connect/gravix_region_shortlist.dart` (pure planner, early-exit rule,
+fallback, FNV-1a network-id hash) and `gravix_init_measure.dart` (the budgeted
+parallel measurement). Parity is tested, not asserted: both SDKs load the same
+`test/fixtures/region_shortlist_cases.json` and must produce the same plan (regions,
+order, sources), the same choice and source, the same last-known-best list and the
+same exploration cursor. Differences that remain: `conns` is the socket count here
+and `null` in browsers; the Dart default per-request ceiling is 1.5 s (React 3 s),
+both capped by the budget left.

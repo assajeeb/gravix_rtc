@@ -15,6 +15,7 @@
 import 'dart:async';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:meta/meta.dart';
 
 import '../rtc_core/src/core/room.dart';
 import '../rtc_core/src/publication/remote.dart';
@@ -150,15 +151,7 @@ class RoomAudioFirstOps implements AudioFirstOps {
             await track.mute(stopOnMute: false);
             _mutedCameras.add(track);
           } else if (pub.source == TrackSource.microphone) {
-            final sender = track.sender;
-            if (sender == null || _cappedMics.containsKey(sender)) continue;
-            final params = sender.parameters;
-            final enc = params.encodings;
-            if (enc == null || enc.isEmpty) continue;
-            final before = enc.first.maxBitrate;
-            enc.first.maxBitrate = audioMaxBitrate;
-            await sender.setParameters(params);
-            _cappedMics[sender] = before;
+            await capMic(track, audioMaxBitrate);
           }
         } catch (_) {
           // one track failing must not keep the others at full rate
@@ -176,6 +169,25 @@ class RoomAudioFirstOps implements AudioFirstOps {
         }
       }
     }
+  }
+
+  /// Caps one microphone sender, remembering its rate for [restore].
+  ///
+  /// A muted mic is skipped: it is already capped far below (MicUplinkPause)
+  /// and its unmute restores the publish rate, so recording that muted cap as
+  /// "before" would make [restore] put the UNMUTED mic back at the muted rate.
+  @visibleForTesting
+  Future<void> capMic(LocalTrack track, int audioMaxBitrate) async {
+    if (track.muted) return;
+    final sender = track.sender;
+    if (sender == null || _cappedMics.containsKey(sender)) return;
+    final params = sender.parameters;
+    final enc = params.encodings;
+    if (enc == null || enc.isEmpty) return;
+    final before = enc.first.maxBitrate;
+    enc.first.maxBitrate = audioMaxBitrate;
+    await sender.setParameters(params);
+    _cappedMics[sender] = before;
   }
 
   @override
