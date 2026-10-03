@@ -50,9 +50,21 @@ class GravixRtcClient {
   /// [AudioManager.setAudioSessionOptions]. A future SDK/WebRTC integration may
   /// make those Android playout attributes runtime-updatable; for now, pass them
   /// here before WebRTC initializes.
+  ///
+  /// GRAVIX (0.4.8) [enableWARP]: passed through to flutter_webrtc's
+  /// `initialize()` (Android and iOS). flutter_webrtc 1.6.2+ turns on libwebrtc's
+  /// `WebRTC-IceHandshakeDtls` field trial: the DTLS handshake rides on the ICE
+  /// connectivity checks, which saves the DTLS round trips of every peer
+  /// connection -- but only against an SFU that speaks it (Gravix server
+  /// `rtc.enable_warp: true`, off by default); otherwise the handshake falls back
+  /// to plain DTLS. flutter_webrtc 1.6.0/1.6.1 ignore the key. Like every
+  /// initialize() option it is latched by the FIRST initialize of the process:
+  /// an app that calls `WebRTC.initialize` itself must pass it there too.
+  /// Off by default.
   static Future<void> initialize({
     bool bypassVoiceProcessing = false,
     AudioSessionOptions? initialAudioSessionOptions,
+    bool enableWARP = false,
   }) async {
     if (lkPlatformIsMobile()) {
       // bypassVoiceProcessing controls only WebRTC voice processing. Android
@@ -64,6 +76,7 @@ class GravixRtcClient {
           bypassVoiceProcessing: bypassVoiceProcessing,
           initialAudioSessionOptions: initialAudioSessionOptions,
           includeAndroidAudioConfiguration: lkPlatformIs(PlatformType.android),
+          enableWARP: enableWARP,
         ),
       );
       if (lkPlatformIs(PlatformType.android) && initialAudioSessionOptions != null) {

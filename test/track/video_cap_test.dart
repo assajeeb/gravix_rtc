@@ -259,7 +259,12 @@ void main() {
     test('GravixRoomService ladder at cap 480: [180, 480], one fps', () {
       const capture = VideoDimensions(854, 480); // the clamped 540p capture
       final o = GravixVideoCap.clampPublishOptions(GravixRoomService.videoPublishOptionsFor(lowData: false), 480);
-      final enc = Utils.computeVideoEncodings(isScreenShare: false, dimensions: capture, options: o, maxShortEdge: 480)!;
+      final enc = Utils.computeVideoEncodings(
+        isScreenShare: false,
+        dimensions: capture,
+        options: o,
+        maxShortEdge: 480,
+      )!;
       final layers = Utils.computeVideoLayers(capture, enc, false);
       final heights = layers.map((l) => l.height).toList();
       // The q rung is scaled on the LONG edge (854 / 320 = 2.67), so its declared

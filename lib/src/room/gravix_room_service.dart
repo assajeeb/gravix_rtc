@@ -14,6 +14,8 @@ import '../beauty/gravix_beauty_filter.dart';
 import '../beauty/gravix_video_effect.dart';
 import '../connect/gravix_analytics.dart';
 import '../connect/gravix_connection_report.dart';
+import '../connect/gravix_fast_join.dart';
+import '../connect/gravix_join_phases.dart';
 import '../connect/gravix_join_timeline.dart';
 import '../connect/gravix_join_timeline_log.dart';
 import '../connect/gravix_prewarm.dart';
@@ -22,6 +24,7 @@ import '../connect/gravix_region_cache.dart';
 import '../connect/gravix_restart_strategy.dart';
 import '../connect/gravix_region_prober.dart';
 import '../connect/gravix_region_report.dart';
+import '../connect/gravix_standby.dart';
 import '../music/gravix_music_controller.dart';
 import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
@@ -30,7 +33,6 @@ import '../rtc_core/src/support/websocket/standby.dart';
 import 'gravix_red_mode.dart';
 import '../large_room/gravix_publish_presets.dart' show GravixPublishPresets;
 import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMute;
-import '../rtc_core/src/utils.dart' show Utils;
 import '../rtc_core/src/internal/events.dart'
     show
         EngineJoinResponseEvent,
@@ -338,6 +340,18 @@ class GravixRoomService implements GravixAudioHost {
   /// one-line form for a log.
   void Function(GravixJoinTimeline report)? onJoinTimeline;
 
+  /// 0.4.8: every [GravixJoinPhase] of each [connect] as it is reached (WS open,
+  /// JoinResponse, peer connections connected, first local publish and first
+  /// remote track per kind) -- the same hooks an app that drives `Room` itself
+  /// gets from `room.watchJoinPhases()`. `elapsed` counts from the
+  /// `joinTimeline.tapAt` when one is passed, else from connect(). Set before
+  /// connect(); null (default) attaches nothing.
+  void Function(GravixJoinPhaseEvent event)? onJoinPhase;
+
+  /// The join-phase hooks of the current / last room (with [onJoinPhase] set).
+  GravixJoinPhases? get joinPhases => _joinPhases;
+  GravixJoinPhases? _joinPhases;
+
   /// Write every join timeline to the device log (tag `GRAVIX_JOIN_TIMELINE`,
   /// one line of JSON, RELEASE builds included) — see [gravixLogJoinTimeline].
   /// The one switch a production app flips to be measurable by a
@@ -597,6 +611,8 @@ class GravixRoomService implements GravixAudioHost {
     bool earlyMicTrack = false,
   }) async {
     final joinWatch = Stopwatch()..start();
+    // latched for this join: flipping the switch mid-join changes nothing
+    final fastJoin = GravixFastJoin.enabled;
     final analyticsSink = analyticsUrl != null ? GravixAnalytics(url: analyticsUrl) : analytics;
     var attemptedUrl = url;
     // a new room: nothing applied to its mic yet, and the join's mic step is ahead
@@ -866,6 +882,11 @@ class GravixRoomService implements GravixAudioHost {
         _earlyCallAudioCancel = cancel;
       }
       // </candidate:earlyCallAudio>
+      final phaseSink = onJoinPhase;
+      if (phaseSink != null) {
+        unawaited(_joinPhases?.dispose());
+        _joinPhases = room.watchJoinPhases(startedAt: joinTimeline?.tapAt ?? _connectStartedAt, onPhase: phaseSink);
+      }
       _listener = room.createListener();
       _bindEvents(room, _listener!);
       if (timeline != null) _attachTimeline(room, timeline);
@@ -996,14 +1017,26 @@ class GravixRoomService implements GravixAudioHost {
         // _wantedMic already and wins over [publishMic].
         _wantedMic ??= publishMic;
         if (!micGate.isCompleted) micGate.complete();
-        await (_micWorker ??= _runMicWorker());
-        if (publishMic) timeline?.mark(GravixJoinStep.micPermissionEnd);
-        if (publishMic) timeline?.mark(GravixJoinStep.micPublished);
-        timeline?.notePath('svc:setMicDone');
-        if (enableVideo) {
-          // The RTC core opens the camera; the video effect (if any) is attached
-          // to the new track inside setCameraEnabled.
-          await _setCameraEnabledNow(true);
+        Future<void> micStep() async {
+          await (_micWorker ??= _runMicWorker());
+          if (publishMic) timeline?.mark(GravixJoinStep.micPermissionEnd);
+          if (publishMic) timeline?.mark(GravixJoinStep.micPublished);
+          timeline?.notePath('svc:setMicDone');
+        }
+
+        // The RTC core opens the camera; the video effect (if any) is attached
+        // to the new track inside setCameraEnabled.
+        if (enableVideo && fastJoin) {
+          // 0.4.8 (GravixFastJoin): mic and camera side by side. They are
+          // independent captures, and the core no longer serialises a camera
+          // publish behind a microphone one. Up to 0.4.7 the camera waited for
+          // the whole mic step (capture start + AddTrack round trip), 0.2-0.55 s
+          // on a phone. eagerError false: both steps finish before an error of
+          // either one surfaces (the camera step reports its own errors).
+          await Future.wait([micStep(), _setCameraEnabledNow(true)]);
+        } else {
+          await micStep();
+          if (enableVideo) await _setCameraEnabledNow(true);
         }
 
         if (_v2Active) {
@@ -1122,24 +1155,23 @@ class GravixRoomService implements GravixAudioHost {
   /// The join's upgrade over the standby connection gets 3 x RTT (0.5-1.5 s;
   /// 1.5 s unknown) before a fresh dial races it, and the connection that did
   /// not answer is closed (timeline `standby.outcome: stalled_redialed`).
-  Future<bool> standby(String url, String token, {int? rttMs}) async {
-    unawaited(Utils.warmClientInfo());
-    return GravixSignalStandby.open(url, token, rttHintMs: rttMs);
-  }
+  ///
+  /// Same as [GravixStandby.open] (0.4.8), which needs no service.
+  Future<bool> standby(String url, String token, {int? rttMs}) => GravixStandby.open(url, token, rttMs: rttMs);
 
   /// Call when the app comes back to the foreground: every standby connection is
   /// closed and opened again. One opened while the app was paused (behind a
   /// permission dialog, field 2026-09-30) is not trusted -- the join's upgrade
   /// over such a connection went unanswered. Never throws.
-  Future<void> reopenStandby() => GravixSignalStandby.reopenAll();
+  Future<void> reopenStandby() => GravixStandby.reopenAll();
 
   /// Closes every standby connection (the app goes to the background; reopen by
   /// calling [standby] again, or [reopenStandby]).
-  Future<void> closeStandby() => GravixSignalStandby.closeAll();
+  Future<void> closeStandby() => GravixStandby.closeAll();
 
   /// The standby connection for (url, token): `open` (with its age), `opening`,
   /// `dead` or `none`.
-  GravixStandbyState standbyState(String url, String token) => GravixSignalStandby.state(url, token);
+  GravixStandbyState standbyState(String url, String token) => GravixStandby.state(url, token);
 
   // ══ CALL STATS ═════════════════════════════════════════════════════════════
   /// Round-trip time of the selected ICE candidate pair of each peer connection,
@@ -2661,6 +2693,7 @@ class GravixRoomService implements GravixAudioHost {
     // the audio session, and an app being disposed may not live that long
     _room?.engine.gravixLeaveBestEffort();
     await disconnect();
+    await _joinPhases?.dispose();
     await _effect.dispose();
     music.dispose();
     lowDataActive.dispose();

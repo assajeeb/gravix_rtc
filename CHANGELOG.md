@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.8 — 2026-10-03
+
+### Added
+- **`GravixStandby`** (static `open(url, token)`, `state`, `reopenAll`, `closeAll`)
+  and the `Room` extension **`room.standby(url, token)`** / `room.standbyState(...)`:
+  the standby signalling pre-connect without a `GravixRoomService`. `Room.connect`
+  takes the standby for the same url + token, as before. `GravixRoomService.standby`
+  now delegates here (unchanged behaviour).
+- **Public join-phase hooks** for apps that drive `Room` directly:
+  `GravixJoinPhases.attach(room, onPhase:)` / **`room.watchJoinPhases()`** (attach
+  before `connect`) report, once per join, `wsConnecting`, `wsOpen` (+ standby
+  outcome), `joinResponse` (+ server region, fastPublish, subscriberPrimary),
+  `peerConnected` (ICE + DTLS of the primary PC), `publisherConnected`,
+  `subscriberConnected`, first local audio / video published and first remote
+  audio / video subscribed, as a stream and a callback; `cameraLiveAt` /
+  `micLiveAt`. `room.signalRttMs` replaces reading `@internal`
+  `engine.signalClient.rtt`. `GravixRoomService.onJoinPhase` attaches the same hooks
+  to the room it creates. Observation only.
+- **`GravixRtcClient.initialize(enableWARP:)`**: passed to flutter_webrtc's
+  `initialize` options (read by flutter_webrtc 1.6.2+, ignored by 1.6.0 / 1.6.1);
+  the key is only sent when `true`. Default `false`.
+- **`GravixFastJoin.enabled`** (default **`false`**, opt in) — turns on the faster
+  publish order below; `false` keeps exactly the 0.4.7 order. Off by default because
+  one device join stalled once with it on (cause not yet known).
+
+### Changed
+- **Camera publishes beside the microphone** (only with `GravixFastJoin.enabled = true`;
+  off by default). The camera has its own publish lock in
+  `LocalParticipant`; up to 0.4.7 one serial runner made
+  `Future.wait([setMicrophoneEnabled(true), setCameraEnabled(true)])` still run mic,
+  then camera. `FastConnectOptions` publishes run side by side and no longer hold the
+  JoinResponse handling (remote participants, `RoomConnectedEvent`), and
+  `GravixRoomService.connect` runs its initial mic and camera steps side by side.
+- **audio_session `>=0.1.21 <0.3.0`** (was `^0.1.21`). 0.2's
+  `getCommunicationDevice()` returns a nullable device, which 0.4.7's
+  `device.type.name` did not compile against; it is now read null-safely, and works
+  on both 0.1.x and 0.2.x.
+- **flutter_webrtc `>=1.6.0 <1.7.0`** (was exactly `1.6.0`), so apps can take
+  1.6.2+hotfix.3 (the SIGABRT-on-room-entry fix) without a `dependency_overrides`.
+- CI: a `test (lower bounds)` job pins audio_session 0.1.25 + flutter_webrtc 1.6.0.
+
+### Migration (apps on 0.4.7)
+- Remove any `dependency_overrides` for `audio_session` (0.2.x now resolves) and for
+  `flutter_webrtc` (1.6.2+hotfix.3 now resolves).
+- Replace a throwaway `GravixRoomService` used only for `standby()` with
+  `GravixStandby.open(url, token)` or `room.standby(url, token)`.
+- Replace `@internal` `room.engine.signalClient` listeners with
+  `room.watchJoinPhases(onPhase: ...)` and `room.signalRttMs`.
+
 ## 0.4.7 — 2026-10-03
 
 ### Added

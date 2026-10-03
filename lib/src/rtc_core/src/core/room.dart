@@ -56,6 +56,7 @@ import '../types/other.dart';
 import '../types/rpc.dart';
 import '../types/transcription_segment.dart';
 import '../utils.dart' show isSVCCodec, unpackStreamId;
+import '../participant/gravix_publish_runners.dart'; // GRAVIX (0.4.8)
 import 'engine.dart';
 import 'participant_collection.dart';
 import 'pending_track_queue.dart';
@@ -527,6 +528,13 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           engine.fastConnectOptions != null &&
           !engine.fullReconnectOnNext) {
         final options = engine.fastConnectOptions!;
+        final local = _localParticipant!;
+        // GRAVIX (0.4.8): collected as steps and run by gravixRunJoinPublishes --
+        // side by side and without holding the rest of this handler under
+        // GravixFastJoin (default), one after another and awaited here when it is
+        // off (upstream). Upstream awaited mic, then camera, then screen, and only
+        // then created the remote participants and emitted RoomConnectedEvent.
+        final steps = <Future<void> Function()>[];
 
         final audio = options.microphone;
         final bool audioEnabled = audio.enabled == true || audio.track != null;
@@ -534,14 +542,15 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         // Only enable microphone if preconnect buffer is not active
         if (audioEnabled && !preConnectAudioBuffer.isRecording) {
           if (audio.track != null) {
-            await _localParticipant!.publishAudioTrack(
-              audio.track as LocalAudioTrack,
-              publishOptions: roomOptions.defaultAudioPublishOptions,
+            steps.add(
+              () => local.publishAudioTrack(
+                audio.track as LocalAudioTrack,
+                publishOptions: roomOptions.defaultAudioPublishOptions,
+              ),
             );
           } else {
-            await _localParticipant!.setMicrophoneEnabled(
-              true,
-              audioCaptureOptions: roomOptions.defaultAudioCaptureOptions,
+            steps.add(
+              () => local.setMicrophoneEnabled(true, audioCaptureOptions: roomOptions.defaultAudioCaptureOptions),
             );
           }
         }
@@ -550,14 +559,15 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         final bool videoEnabled = video.enabled == true || video.track != null;
         if (videoEnabled) {
           if (video.track != null) {
-            await _localParticipant!.publishVideoTrack(
-              video.track as LocalVideoTrack,
-              publishOptions: roomOptions.defaultVideoPublishOptions,
+            steps.add(
+              () => local.publishVideoTrack(
+                video.track as LocalVideoTrack,
+                publishOptions: roomOptions.defaultVideoPublishOptions,
+              ),
             );
           } else {
-            await _localParticipant!.setCameraEnabled(
-              true,
-              cameraCaptureOptions: roomOptions.defaultCameraCaptureOptions,
+            steps.add(
+              () => local.setCameraEnabled(true, cameraCaptureOptions: roomOptions.defaultCameraCaptureOptions),
             );
           }
         }
@@ -566,17 +576,27 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         final bool screenEnabled = screen.enabled == true || screen.track != null;
         if (screenEnabled) {
           if (screen.track != null) {
-            await _localParticipant!.publishVideoTrack(
-              screen.track as LocalVideoTrack,
-              publishOptions: roomOptions.defaultVideoPublishOptions,
+            steps.add(
+              () => local.publishVideoTrack(
+                screen.track as LocalVideoTrack,
+                publishOptions: roomOptions.defaultVideoPublishOptions,
+              ),
             );
           } else {
-            await _localParticipant!.setScreenShareEnabled(
-              true,
-              screenShareCaptureOptions: roomOptions.defaultScreenShareCaptureOptions,
+            steps.add(
+              () => local.setScreenShareEnabled(
+                true,
+                screenShareCaptureOptions: roomOptions.defaultScreenShareCaptureOptions,
+              ),
             );
           }
         }
+
+        final sequential = gravixRunJoinPublishes(
+          steps,
+          onError: (e) => logger.warning('FastConnectOptions publish failed: $e'),
+        );
+        if (sequential != null) await sequential;
       }
 
       for (final info in event.response.otherParticipants) {

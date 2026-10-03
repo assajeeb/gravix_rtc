@@ -20,53 +20,42 @@ const _channel = MethodChannel('gravix_client');
 
 Future<AndroidAudioHardwareMode> _mode() => AndroidAudioManager().getMode();
 
+String? _typeName(Object? device) => device is AndroidAudioDeviceInfo ? device.type.name : null;
+
 Future<String?> _commDevice() async {
   try {
-    return (await AndroidAudioManager().getCommunicationDevice()).type.name;
+    // nullable in audio_session 0.2, non-null in 0.1.x: clean against both
+    return _typeName(await AndroidAudioManager().getCommunicationDevice());
   } catch (_) {
     return null;
   }
 }
 
-Future<void> _settle() =>
-    Future<void>.delayed(const Duration(milliseconds: 800));
+Future<void> _settle() => Future<void>.delayed(const Duration(milliseconds: 800));
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('osVersionString answers', (tester) async {
-    final version = await _channel.invokeMethod<String>(
-      'osVersionString',
-      <String, dynamic>{},
-    );
+    final version = await _channel.invokeMethod<String>('osVersionString', <String, dynamic>{});
     expect(version, isNotEmpty);
   });
 
-  testWidgets('Android audio session + speaker/earpiece routing', (
-    tester,
-  ) async {
+  testWidgets('Android audio session + speaker/earpiece routing', (tester) async {
     if (!Platform.isAndroid) return;
 
-    await _channel
-        .invokeMethod<void>('configureAndroidAudioSession', <String, dynamic>{
-          'manageAudioFocus': true,
-          'androidAudioMode': 'inCommunication',
-          'androidAudioFocusMode': 'gain',
-          'androidAudioStreamType': 'voiceCall',
-          'androidAudioAttributesUsageType': 'voiceCommunication',
-          'androidAudioAttributesContentType': 'speech',
-        });
+    await _channel.invokeMethod<void>('configureAndroidAudioSession', <String, dynamic>{
+      'manageAudioFocus': true,
+      'androidAudioMode': 'inCommunication',
+      'androidAudioFocusMode': 'gain',
+      'androidAudioStreamType': 'voiceCall',
+      'androidAudioAttributesUsageType': 'voiceCommunication',
+      'androidAudioAttributesContentType': 'speech',
+    });
     await _settle();
-    expect(
-      await _mode(),
-      AndroidAudioHardwareMode.inCommunication,
-      reason: 'session start sets MODE_IN_COMMUNICATION',
-    );
+    expect(await _mode(), AndroidAudioHardwareMode.inCommunication, reason: 'session start sets MODE_IN_COMMUNICATION');
 
-    await _channel.invokeMethod<void>(
-      'setAndroidSpeakerphoneOn',
-      <String, dynamic>{'enable': true, 'force': false},
-    );
+    await _channel.invokeMethod<void>('setAndroidSpeakerphoneOn', <String, dynamic>{'enable': true, 'force': false});
     await _settle();
     final speakerDevice = await _commDevice();
     debugPrint('communication device after speaker=true: $speakerDevice');
@@ -75,17 +64,11 @@ void main() {
     // The stock emulator has no earpiece ("getAvailableCommunicationDevices:
     // no EARPIECE!" in dumpsys audio). There the earpiece request must fall
     // back to the speaker and the explicit selection must say it failed.
-    final available =
-        (await AndroidAudioManager().getAvailableCommunicationDevices())
-            .map((d) => d.type.name)
-            .toList();
+    final available = (await AndroidAudioManager().getAvailableCommunicationDevices()).map((d) => d.type.name).toList();
     final hasEarpiece = available.contains('builtInEarpiece');
     debugPrint('available communication devices: $available');
 
-    await _channel.invokeMethod<void>(
-      'setAndroidSpeakerphoneOn',
-      <String, dynamic>{'enable': false, 'force': false},
-    );
+    await _channel.invokeMethod<void>('setAndroidSpeakerphoneOn', <String, dynamic>{'enable': false, 'force': false});
     await _settle();
     final earpieceDevice = await _commDevice();
     debugPrint('communication device after speaker=false: $earpieceDevice');
@@ -93,29 +76,17 @@ void main() {
 
     // The routing stack's explicit selection (setCommunicationDevice) on top.
     final platform = GravixNativeAudioPlatform();
-    expect(
-      await platform.setDirectAudioOutput(GravixAudioOutput.earpiece),
-      hasEarpiece,
-    );
-    expect(
-      await platform.setDirectAudioOutput(GravixAudioOutput.speaker),
-      isTrue,
-    );
+    expect(await platform.setDirectAudioOutput(GravixAudioOutput.earpiece), hasEarpiece);
+    expect(await platform.setDirectAudioOutput(GravixAudioOutput.speaker), isTrue);
     await _settle();
     expect(await _commDevice(), 'builtInSpeaker');
 
     await _channel.invokeMethod<void>('stopAndroidAudioSession');
     await _settle();
-    expect(
-      await _mode(),
-      AndroidAudioHardwareMode.normal,
-      reason: 'session stop restores the previous mode',
-    );
+    expect(await _mode(), AndroidAudioHardwareMode.normal, reason: 'session stop restores the previous mode');
   });
 
-  testWidgets('Apple-only methods are honestly unimplemented on Android', (
-    tester,
-  ) async {
+  testWidgets('Apple-only methods are honestly unimplemented on Android', (tester) async {
     if (!Platform.isAndroid) return;
     for (final method in [
       'setAppleAudioOutput',
@@ -131,29 +102,18 @@ void main() {
     }
   });
 
-  testWidgets(
-    'screen-capture service is refused without consent (API 34+ device)',
-    (tester) async {
-      if (!Platform.isAndroid) return;
-      // The test AVD is API 36. On API < 34 Android accepts the service without
-      // consent, so this expectation only holds on 34+.
-      try {
-        await _channel.invokeMethod<void>(
-          'startScreenCaptureService',
-          <String, dynamic>{},
-        );
-        fail(
-          'a mediaProjection foreground service started without user consent',
-        );
-      } on PlatformException catch (e) {
-        debugPrint('startScreenCaptureService refused: ${e.code} ${e.message}');
-        expect(e.code, 'screenCaptureServiceFailed');
-      } finally {
-        await _channel.invokeMethod<void>(
-          'stopScreenCaptureService',
-          <String, dynamic>{},
-        );
-      }
-    },
-  );
+  testWidgets('screen-capture service is refused without consent (API 34+ device)', (tester) async {
+    if (!Platform.isAndroid) return;
+    // The test AVD is API 36. On API < 34 Android accepts the service without
+    // consent, so this expectation only holds on 34+.
+    try {
+      await _channel.invokeMethod<void>('startScreenCaptureService', <String, dynamic>{});
+      fail('a mediaProjection foreground service started without user consent');
+    } on PlatformException catch (e) {
+      debugPrint('startScreenCaptureService refused: ${e.code} ${e.message}');
+      expect(e.code, 'screenCaptureServiceFailed');
+    } finally {
+      await _channel.invokeMethod<void>('stopScreenCaptureService', <String, dynamic>{});
+    }
+  });
 }

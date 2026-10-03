@@ -142,6 +142,13 @@ abstract interface class GravixAudioPlatform {
 
 /// Production [GravixAudioPlatform]: `audio_session` for observation,
 /// the RTC core's [AudioManager] for control.
+/// The type name of an audio_session `AndroidAudioDeviceInfo`, or null for
+/// null / anything else. Takes `Object?` on purpose: audio_session 0.2 returns a
+/// nullable device where 0.1.x returns a non-null one, and this is the one shape
+/// that is clean against both.
+@visibleForTesting
+String? gravixAudioDeviceTypeName(Object? device) => device is AndroidAudioDeviceInfo ? device.type.name : null;
+
 class GravixNativeAudioPlatform implements GravixAudioPlatform {
   GravixNativeAudioPlatform();
 
@@ -185,8 +192,16 @@ class GravixNativeAudioPlatform implements GravixAudioPlatform {
       // setCommunicationDevice / getCommunicationDevice landed in API 31.
       // Older devices throw, and that is not an error worth reporting — the
       // concept simply does not exist there.
-      final device = await _audio.getCommunicationDevice();
-      return device.type.name;
+      //
+      // audio_session 0.2 returns `AndroidAudioDeviceInfo?` (null = no
+      // communication device set); 0.1.x returns it non-null and throws on the
+      // same null inside its decoder. Handed to an `Object?` parameter so this
+      // compiles, and analyzes clean, against both lines the pubspec allows: a
+      // nullable local trips `unnecessary_nullable_for_final_variable_declarations`
+      // on 0.1.x, and `device?.type` `invalid_null_aware_operator`. 0.4.7 read
+      // `device.type.name` directly, which does not compile against 0.2 (apps had to
+      // pin audio_session 0.1.x for it).
+      return gravixAudioDeviceTypeName(await _audio.getCommunicationDevice());
     } catch (_) {
       return null;
     }

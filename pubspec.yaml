@@ -3,7 +3,7 @@ description: >-
   Real-time video and audio rooms for Flutter on Gravix Cloud: one room
   service, region-aware connect, token providers, join analytics and a
   video-effect hook.
-version: 0.4.7
+version: 0.4.8
 homepage: https://gravitycompile.com
 repository: https://github.com/assajeeb/gravix_rtc
 issue_tracker: https://github.com/assajeeb/gravix_rtc/issues
@@ -26,10 +26,13 @@ dependencies:
 
   # Vendored RTC core (lib/src/rtc_core) — do NOT add a separate
   # third-party RTC client package here; that code ships in-tree.
-  # Exact pin on purpose: the vendored core and this package's native code are
-  # built and tested against 1.6.0 only (pub's "allow more than one version"
-  # hint is accepted until a newer flutter_webrtc has been validated).
-  flutter_webrtc: 1.6.0
+  # 1.6.x: tested at both ends -- 1.6.0 (CI job "test (lower bounds)") and
+  # 1.6.2+hotfix.3 (what a fresh `pub get` resolves; libwebrtc 150, WARP); the
+  # Android example APK is built against 1.6.2+hotfix.3. Exact 1.6.0 pin up to 0.4.7,
+  # which forced apps onto 1.6.0 or into a dependency_overrides. <1.7.0: the
+  # vendored core and the native plugin code reach into flutter_webrtc internals,
+  # so a minor bump needs its own validation first.
+  flutter_webrtc: '>=1.6.0 <1.7.0'
   dart_webrtc: ^1.8.0
   asn1lib: ^1.6.5
   async: ^2.13.0
@@ -52,7 +55,9 @@ dependencies:
   json_annotation: ^4.12.0
 
   # App-facing layers (room service)
-  audio_session: ^0.1.21
+  # 0.1.21+ and 0.2.x: the SDK reads getCommunicationDevice() null-safely, the one
+  # API whose type changed in 0.2 (CI runs the tests against both lines).
+  audio_session: '>=0.1.21 <0.3.0'
   # Persists the start-up region list across launches (GravixSharedPrefsRegionListStore).
   shared_preferences: ^2.5.3
 

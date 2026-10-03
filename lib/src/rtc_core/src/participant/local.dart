@@ -47,7 +47,6 @@ import '../proto/gravixcloud_models.pb.dart' as lk_models;
 import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 import '../publication/local.dart';
 import '../support/platform.dart';
-import '../support/serial_runner.dart';
 import '../track/local/audio.dart';
 import '../track/local/local.dart';
 import '../track/local/video.dart';
@@ -59,6 +58,7 @@ import '../types/participant_permissions.dart';
 import '../types/video_cap.dart';
 import '../types/video_dimensions.dart';
 import '../utils.dart' show buildStreamId, mimeTypeToVideoCodecString, Utils, isSVCCodec, isVideoCodec;
+import 'gravix_publish_runners.dart';
 import 'participant.dart';
 
 /// Represents the current participant in the room. Instance of [LocalParticipant] is automatically
@@ -68,7 +68,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   final Map<int, Completer<void>> _pendingSignalRequests = {};
 
   // Serializes publish operations to prevent duplicate tracks from concurrent calls
-  final _publishRunner = SerialRunner<LocalTrackPublication?>();
+  // GRAVIX (0.4.8): one runner per source group instead of one for all (camera
+  // beside microphone); see gravix_publish_runners.dart. GravixFastJoin off =
+  // the single upstream runner.
+  final _publishRunners = GravixPublishRunners<LocalTrackPublication?>();
 
   LocalParticipant._({required Room room, required String sid, required String identity, required String name})
     : super(room: room, sid: sid, identity: identity, name: name);
@@ -194,7 +197,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     LocalAudioTrack track, {
     AudioPublishOptions? publishOptions,
   }) async {
-    final result = await _publishRunner.run(() => _publishAudioTrack(track, publishOptions: publishOptions));
+    final result = await _publishRunners
+        .forSource(track.source)
+        .run(() => _publishAudioTrack(track, publishOptions: publishOptions));
     return result! as LocalTrackPublication<LocalAudioTrack>;
   }
 
@@ -301,7 +306,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     LocalVideoTrack track, {
     VideoPublishOptions? publishOptions,
   }) async {
-    final result = await _publishRunner.run(() => _publishVideoTrack(track, publishOptions: publishOptions));
+    final result = await _publishRunners
+        .forSource(track.source)
+        .run(() => _publishVideoTrack(track, publishOptions: publishOptions));
     return result! as LocalTrackPublication<LocalVideoTrack>;
   }
 
@@ -827,7 +834,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     CameraCaptureOptions? cameraCaptureOptions,
     ScreenShareCaptureOptions? screenShareCaptureOptions,
   }) {
-    return _publishRunner.run(() async {
+    return _publishRunners.forSource(source).run(() async {
       if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
         throw TrackCreateException('Screen sharing is not supported on mobile devices');
       }

@@ -23,8 +23,12 @@ Map<String, dynamic> gravixWebRTCInitializeOptions({
   required bool bypassVoiceProcessing,
   required AudioSessionOptions? initialAudioSessionOptions,
   required bool includeAndroidAudioConfiguration,
+  // GRAVIX (0.4.8): flutter_webrtc >= 1.6.2 reads `enableWARP`; older versions
+  // ignore the key. Only sent when true, so the default map is unchanged.
+  bool enableWARP = false,
 }) => {
   if (bypassVoiceProcessing) 'bypassVoiceProcessing': bypassVoiceProcessing,
   if (includeAndroidAudioConfiguration && initialAudioSessionOptions != null)
     'androidAudioConfiguration': androidAudioSessionConfigurationToMap(initialAudioSessionOptions.android),
+  if (enableWARP) 'enableWARP': true,
 };

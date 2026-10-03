@@ -33,7 +33,7 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   # integration_test/native_audio_test.dart reads the route back through it.
-  audio_session: ^0.1.21
+  audio_session: '>=0.1.21 <0.3.0'
   flutter_test:
     sdk: flutter
 

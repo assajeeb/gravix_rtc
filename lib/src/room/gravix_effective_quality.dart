@@ -42,12 +42,12 @@ class GravixQualityThresholds {
 
 /// Ordered worst -> best; `unknown` is "no evidence", not a rank.
 int _rank(ConnectionQuality q) => switch (q) {
-      ConnectionQuality.lost => 0,
-      ConnectionQuality.poor => 1,
-      ConnectionQuality.good => 2,
-      ConnectionQuality.excellent => 3,
-      ConnectionQuality.unknown => 4,
-    };
+  ConnectionQuality.lost => 0,
+  ConnectionQuality.poor => 1,
+  ConnectionQuality.good => 2,
+  ConnectionQuality.excellent => 3,
+  ConnectionQuality.unknown => 4,
+};
 
 ConnectionQuality _worse(ConnectionQuality a, ConnectionQuality b) => _rank(a) <= _rank(b) ? a : b;
 

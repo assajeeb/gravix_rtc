@@ -85,3 +85,26 @@ jobs:
 
       - run: flutter pub get
       - run: flutter test --reporter expanded
+
+  # The pubspec allows audio_session 0.1.21+ and 0.2.x, and flutter_webrtc
+  # 1.6.0-1.6.x. The job above resolves fresh (no lockfile), i.e. the NEWEST of
+  # each; this one pins the OLDEST the SDK claims to support, so an API that only
+  # exists on one side (0.4.7: audio_session 0.2's nullable
+  # getCommunicationDevice) fails here instead of in an app.
+  test-lower-bounds:
+    name: flutter test (lower bounds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.3
+          channel: stable
+          cache: true
+      - name: Pin the lower bounds
+        run: |
+          printf '\ndependency_overrides:\n  audio_session: 0.1.25\n  flutter_webrtc: 1.6.0\n' >> pubspec.yaml
+          flutter pub get
+          flutter pub deps --style=compact | grep -E '^- (audio_session|flutter_webrtc) '
+      - run: ./tool/check_analyze.sh
+      - run: flutter test --reporter expanded
