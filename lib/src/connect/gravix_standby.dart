@@ -11,7 +11,11 @@ import '../rtc_core/src/utils.dart';
 /// Opens the signalling connection's TCP + TLS for a later join to `url` with
 /// `token`, ahead of the user's tap; the join's WebSocket upgrade then goes over
 /// it (one round trip instead of TCP + TLS + upgrade). [Room.connect] takes it by
-/// itself for the exact same url + token -- nothing to pass. Same contract as
+/// itself for the exact same url + token -- nothing to pass; failing that, a
+/// host standby (empty token) or any other standby to the same host (the
+/// connection is protocol-independent; timeline outcomes `usedHost`,
+/// `usedSameHost`, `awaitedSameHost`). Over the limit of 4, a second connection
+/// to one host is closed before the only one to another. Same contract as
 /// `GravixRoomService.standby` (which now delegates here) and the JS SDK's
 /// `room.standby(url, token)`: used for at most 110 s, a call on one older than
 /// 45 s opens a replacement, at most 4 kept, a join waits up to 1.5 s for one

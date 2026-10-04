@@ -555,6 +555,11 @@ class GravixRoomService implements GravixAudioHost {
     bool lowDataMode = false,
     List<String> regionUrls = const <String>[],
     List<GravixRegionUrl> regionEntries = const <GravixRegionUrl>[],
+    // The room's home region (a viewer / guest in someone else's room; the
+    // token's `home_region`): the start-up measurement's pick moves to it when it
+    // is within max(25 ms, 30 %) of the fastest region, so the join skips the
+    // relay hop to the host's region. Hosts pass none. See gravixPickMeasuredRegion.
+    String? homeRegion,
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
@@ -733,7 +738,7 @@ class GravixRoomService implements GravixAudioHost {
       // minted by the app's own backend carries no region list: the measured
       // regions are the list then (only when [url] is one of them).
       final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url);
-      final measuredPick = gravixPickMeasuredRegion(url, measuredList);
+      final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion);
       if (measuredPick != null) {
         if (_regionEntries.isEmpty) _regionEntries = measuredList;
         _probeStartedAt = DateTime.now();
@@ -1420,6 +1425,7 @@ class GravixRoomService implements GravixAudioHost {
       enableVideo: enableVideo,
       lowDataMode: lowDataMode,
       regionEntries: credentials.regionEntries,
+      homeRegion: credentials.homeRegion,
       regionProbe: regionProbe,
       regionDecisionCache: regionDecisionCache,
       regionReprobeOnRestart: regionReprobeOnRestart,
@@ -1635,6 +1641,7 @@ class GravixRoomService implements GravixAudioHost {
     bool lowDataMode = false,
     List<String> regionUrls = const <String>[],
     List<GravixRegionUrl> regionEntries = const <GravixRegionUrl>[],
+    String? homeRegion,
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
@@ -1651,6 +1658,7 @@ class GravixRoomService implements GravixAudioHost {
       lowDataMode: lowDataMode,
       regionUrls: regionUrls,
       regionEntries: regionEntries,
+      homeRegion: homeRegion,
       regionProbe: regionProbe,
       regionDecisionCache: regionDecisionCache,
       regionReprobeOnRestart: regionReprobeOnRestart,

@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.4.9 — 2026-10-05
+
+Viewer first frame, standby per server, region hysteresis and the viewer's home
+region. Of the three viewer fast-start switches only passive subscriber DTLS is
+on by default; the other two are opt-in (see Migration).
+
+### Region selection
+
+Field test 2026-10-04: the owner's phone in Bangladesh moved between sgp1 and
+blr1 (a few ms apart) across four sessions in 15 minutes, and one audio room
+went cross-region (host sgp1, viewer blr1, 2.9-3.4 % loss on the relay leg).
+
+#### Changed
+- **Region hysteresis** (`gravixSelectRegion`, gravix_region_selection.dart): the
+  last good region is an anchor kept per network for 12 h (it used to be
+  forgotten when the 10-minute answer went stale), and a rival must beat it by
+  max(30 ms, 20 %) in two consecutive measurements before joins move (a second
+  measurement follows 20 s after a first win). A failed anchor moves at once.
+  `GravixRegionMeasurementResult.selectReason` / `.challenger`; reports carry
+  `select_reason`.
+- **Cached answer at start-up** carries every region the last run measured, not
+  only the best, so the join lookup's keep-pinned and home-region rules can
+  compare.
+- **Cellular budget**: 3 s is now a floor under the gateway's `probe_budget_ms`
+  (the console sends 1500 for everyone, which replaced the cellular default).
+- **Per-network cache key** adds `+vpn` while a VPN is up
+  (`gravixRegionNetworkKeyFrom`): a Saudi tester's VPN (exit in Canada) made
+  nyc1 the right answer through the VPN, and that answer stayed cached for the
+  plain cellular network afterwards.
+
+#### Added
+- **Home region for viewers**: `gravixPickMeasuredRegion(..., homeRegion:)` /
+  `gravixPickRegion` (with a `GravixRegionPickReason`), `connect(homeRegion:)`,
+  `reconnectWithToken(homeRegion:)`, `GravixJoinCredentials.homeRegion` and
+  `gravixHomeRegionFrom` (the token response's `home_region`). The room's home
+  region wins when it is measured within max(25 ms, 30 %) of the fastest region;
+  further away the viewer's own region stands (relayed). Hosts pass none.
+
+### Viewer first frame (`GravixViewerFastStart`)
+
+Measured on a 2201117TG (Android 13, Wi-Fi, ~60 ms RTT, web publisher), all
+three switches on, 5 joins each: subscriber ICE+DTLS 518-569 -> 384-446 ms
+median, warm tap -> first frame 941-1029 -> 814 ms.
+
+- `passiveSubscriberDtls` (**default on**): subscriber answers carry
+  `a=setup:passive`, so the SFU sends the DTLS ClientHello when its own ICE is
+  up instead of the phone sending hellos the SFU is not ready for (116/232/464 ms
+  retransmits; one that just missed cost +464 ms). Native log: `role=server`
+  in every join; the phone's own server flight can still be retransmitted once
+  (2 of 10 viewer joins on 2026-10-05, DTLS 270-301 ms, no +464 ms tail). On its own it removes the retransmit tail, not the
+  median (DTLS writable -> complete 384 ms before, 383/407 ms after, n=2): the
+  SFU's hello then still waits for its nomination tick. Works against stock
+  LiveKit servers as well: a pion client answering `a=setup:passive` connected
+  and received media from stock livekit-server 1.4.5, 1.6.2, 1.7.2, 1.8.4 and
+  1.13.7 (pion v3.2.16 to v4.2.18), renegotiation answers included.
+- `subscriberConnectPingIntervalMs` (**default off**, `null`; 0.4.9 opt-in, the
+  branch had 100): libwebrtc's stable-writable / strong-connectivity ping
+  intervals while the subscriber connects (restored once connected), so the SFU
+  nominates on the phone's next check instead of its 200 ms tick -- this is
+  where the median gain is (DTLS writable -> complete 202/295 ms, n=2). Off
+  because the pub.dev flutter_webrtc (1.6.0, 1.6.2+hotfix.3) maps neither key
+  (a no-op there), and a plugin that maps only the first gets a configuration
+  libwebrtc refuses -- which flutter_webrtc's Android `createPeerConnection`
+  does not report (the join hangs). The SDK always sends both keys.
+- `noDisableBeforeFirstView` (**default off**; the branch had it on): no
+  `disabled: true` track setting at the subscription when the app's view is one
+  frame away. No measurable gain in the traces (both messages landed before the
+  SFU bound the track); off is exactly the 0.4.8 path.
+
+### Standby
+- **Per server**: a join whose token has no standby of its own takes any open
+  standby to the same signalling host (`standby=usedSameHost`; one still opening
+  is waited for within the join's standby wait, `awaitedSameHost`). Over the
+  limit of 4, the oldest SECOND connection to a host is closed before the only
+  one to another host. Field 2026-10-04: a live list mixing two servers kept two
+  connections to one server while the tapped card's own server had none; the
+  tap dialled cold (965 ms WebSocket open).
+- **Host standby**: a join with no standby for its exact url + token takes one
+  opened for the same host with an empty token (`GravixStandby.open(url, '')`;
+  outcome `usedHost`).
+
+### Other
+- A refused subscriber answer is marked `answerFailed` on the timeline hook.
+
+### Migration (apps on 0.4.8)
+- Nothing is required. Joins now answer the subscriber connection with
+  `a=setup:passive`; to go back to the 0.4.8 handshake set
+  `GravixViewerFastStart.passiveSubscriberDtls = false` before connecting.
+- Viewers: pass the room's home region to keep host and viewer on one SFU --
+  `connect(homeRegion: credentials.homeRegion)` (the token response's
+  `home_region`, `gravixHomeRegionFrom(response)` with your own backend). Hosts
+  pass none.
+- Optional, only with a flutter_webrtc that maps BOTH
+  `stableWritableConnectionPingIntervalMs` and
+  `iceCheckIntervalStrongConnectivityMs`:
+  `GravixViewerFastStart.subscriberConnectPingIntervalMs = 100`.
+- Optional: `GravixViewerFastStart.noDisableBeforeFirstView = true`.
+
 ## 0.4.8 — 2026-10-03
 
 ### Added

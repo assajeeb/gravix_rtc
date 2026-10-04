@@ -123,6 +123,13 @@ abstract final class GravixSignalStandby {
     return '${secure ? 'wss' : 'ws'}://${u.host}:$port/$path\u0000$token';
   }
 
+  /// The `wss://host:port/base` part of a [_key]: what decides which joins a
+  /// connection can serve (the token only travels in the upgrade).
+  static String _hostOf(String key) {
+    final i = key.indexOf('\u0000');
+    return i < 0 ? key : key.substring(0, i);
+  }
+
   static Uri _warmUri(String url) {
     final u = Uri.parse(url.trim());
     final secure = u.scheme == 'wss' || u.scheme == 'https';
@@ -152,9 +159,18 @@ abstract final class GravixSignalStandby {
         _close(e.value);
       }
     }
+    // Over the limit: the oldest connection to a host that has another one goes
+    // first (a second warm connection to the same host is redundant: any join to
+    // that host can take either, see [take]); only then the oldest overall. Two
+    // live cards on one server must not evict the only connection to another.
     final byAge = _open.values.toList()..sort((a, b) => a.openedAt.compareTo(b.openedAt));
     while (byAge.length > kGravixStandbyMaxOpen) {
-      final sb = byAge.removeAt(0);
+      final perHost = <String, int>{};
+      for (final sb in byAge) {
+        perHost[_hostOf(sb.key)] = (perHost[_hostOf(sb.key)] ?? 0) + 1;
+      }
+      final i = byAge.indexWhere((sb) => perHost[_hostOf(sb.key)]! > 1);
+      final sb = byAge.removeAt(i < 0 ? 0 : i);
       _open.remove(sb.key);
       _close(sb);
     }
@@ -262,7 +278,80 @@ abstract final class GravixSignalStandby {
   /// Takes (and removes) the standby connection for this join. An open one is used
   /// at once; one still opening is waited for up to [wait] -- it started earlier
   /// than any socket the join could open now, so it is never slower.
+  ///
+  /// GRAVIX(viewer-fast-start): when there is none for this exact url + token, a
+  /// HOST standby (opened with an empty token: `open(url, '')`) for the same host
+  /// is taken instead (outcome `usedHost`). The connection is protocol-independent
+  /// (a pooled TCP + TLS connection; the token only travels in the upgrade), so
+  /// one warm connection per region serves a join with any token -- e.g. a live
+  /// card whose token was prefetched but that got no standby of its own.
+  ///
+  /// GRAVIX(standby-per-server, 2026-10-05): failing both, ANY open standby to the
+  /// same host is taken (outcome `usedSameHost`) -- one opened for another live
+  /// card's token on that server. Field 2026-10-04: the tapped card's token had
+  /// been prefetched without a standby of its own while the cards next to it (on
+  /// the same and on another server) had theirs; the join dialled cold (965 ms
+  /// WebSocket open) with a warm connection to its host sitting in the pool.
+  /// Order: the exact one open; one open to the same host (host standby first);
+  /// the exact one still opening (waited for, within [wait]); one to the same
+  /// host still opening (`awaitedSameHost`, within [wait]).
   static Future<GravixStandbyTaken> take(String url, String token, {Duration wait = kGravixStandbyWait}) async {
+    final String exactKey;
+    try {
+      exactKey = _key(url, token);
+    } catch (_) {
+      return GravixStandbyTaken.none;
+    }
+    // 1. the exact one, if open now
+    final exact = await _takeExact(url, token, wait: Duration.zero);
+    if (exact.usable) return exact;
+    final host = _hostOf(exactKey);
+    // 2. one open now to the same host: the host standby, else any other token's.
+    // Taken before waiting for an exact one still opening (a tap-down warm-up
+    // 100 ms before the tap): an open connection beats one that may take 1.5 s.
+    final now_ = _takeOpenSameHost(url, token, host);
+    if (now_ != null) return now_;
+    if (wait <= Duration.zero) return exact;
+    // 3. the exact one still opening, waited for
+    if (_opening.containsKey(exactKey)) {
+      final waited = await _takeExact(url, token, wait: wait);
+      if (waited.usable) return waited;
+      return _takeOpenSameHost(url, token, host) ?? waited;
+    }
+    // 4. one to the same host still opening, waited for
+    final t = now();
+    final pending = _opening.entries.where((e) => _hostOf(e.key) == host).toList();
+    if (pending.isEmpty) return exact;
+    final got = await pending.first.value.future.timeout(wait, onTimeout: () => null);
+    final waitedMs = now().difference(t).inMilliseconds;
+    if (got != null && identical(_open[got.key], got) && _usable(got)) {
+      _open.remove(got.key);
+      return _hand(got, 'awaitedSameHost', 0, waitedMs);
+    }
+    return exact;
+  }
+
+  static GravixStandbyTaken? _takeOpenSameHost(String url, String token, String host) {
+    final t = now();
+    if (token.isNotEmpty) {
+      final hostKey = _key(url, '');
+      final sb = _open[hostKey];
+      if (sb != null && _usable(sb, t)) {
+        _open.remove(hostKey);
+        return _hand(sb, 'usedHost', t.difference(sb.openedAt).inMilliseconds, null);
+      }
+    }
+    _Standby? best;
+    for (final sb in _open.values) {
+      if (_hostOf(sb.key) != host || !_usable(sb, t)) continue;
+      if (best == null || sb.openedAt.isAfter(best.openedAt)) best = sb;
+    }
+    if (best == null) return null;
+    _open.remove(best.key);
+    return _hand(best, 'usedSameHost', t.difference(best.openedAt).inMilliseconds, null);
+  }
+
+  static Future<GravixStandbyTaken> _takeExact(String url, String token, {required Duration wait}) async {
     final String key;
     try {
       key = _key(url, token);

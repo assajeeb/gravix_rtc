@@ -320,6 +320,15 @@ List<GravixRegionUrl> gravixRegionEntriesFrom(Map<String, dynamic>? tokenRespons
   return List<GravixRegionUrl>.unmodifiable(entries);
 }
 
+/// The room's home region from a token response's `home_region` (a region slug),
+/// when the app's backend sends one: the region the room's host is on. Pass it
+/// to `connect(homeRegion:)` / `gravixPickMeasuredRegion` for a viewer or guest;
+/// a host's own token carries none. Null when absent or not a slug.
+String? gravixHomeRegionFrom(Map<String, dynamic>? tokenResponse) {
+  final v = tokenResponse?['home_region'];
+  return v is String && RegExp(r'^[a-z0-9][a-z0-9-]{0,31}$').hasMatch(v) ? v : null;
+}
+
 /// Builds the region event from a race outcome.
 ///
 /// A pure function on purpose: it is the half of the contract that has to

@@ -49,6 +49,7 @@ import '../types/other.dart';
 import '../utils/data_packet_buffer.dart';
 import '../utils/ttl_map.dart';
 import '../../../connect/gravix_answer_order.dart'; // GRAVIX: subscriber answer ordering (fastAnswer)
+import '../../../connect/gravix_viewer_fast_start.dart'; // GRAVIX: viewer fast start (passive subscriber DTLS)
 import 'add_track_rejection.dart';
 import 'reconnect_policy.dart';
 import 'signal_client.dart';
@@ -161,6 +162,10 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   /// of after setLocalDescription resolves. NOT upstream. Default false = the
   /// upstream order. See `gravixAnswerSubscriberOffer` for why and for the risk.
   bool gravixFastAnswer = false;
+
+  /// GRAVIX(viewer-fast-start): the subscriber's configuration to re-apply (without
+  /// the connect-time ping interval) once it is connected; null = nothing to restore.
+  RTCConfiguration? _gravixConnectPingRestore;
 
   void _gravixMark(String step, [Object? detail]) {
     final hook = gravixTimelineHook;
@@ -694,11 +699,20 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       rtcConfig: rtcConfiguration,
       connectOptions: connectOptions,
     );
+    // GRAVIX(viewer-fast-start): the subscriber connection checks its pair
+    // again soon after it is writable, so the SFU nominates at once; restored to
+    // the libwebrtc default when it is connected. See
+    // GravixViewerFastStart.subscriberConnectPingIntervalMs.
+    final connectPing = GravixViewerFastStart.subscriberConnectPingIntervalMs;
     subscriber = await Transport.create(
-      _peerConnectionCreate,
+      connectPing == null
+          ? _peerConnectionCreate
+          : (config, [constraints = const {}]) =>
+                _peerConnectionCreate(gravixWithSubscriberConnectPing(config, connectPing), constraints),
       rtcConfig: rtcConfiguration,
       connectOptions: connectOptions,
     );
+    _gravixConnectPingRestore = connectPing == null ? null : rtcConfiguration;
 
     publisher?.pc.onIceCandidate = (rtc.RTCIceCandidate candidate) {
       logger.fine('publisher onIceCandidate');
@@ -738,6 +752,16 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     subscriber?.pc.onConnectionState = (state) async {
       _gravixMark('sub:pc', state.name); // GRAVIX: Dart receipt, for the join timeline
+      final restore = _gravixConnectPingRestore; // GRAVIX(viewer-fast-start)
+      if (restore != null && state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _gravixConnectPingRestore = null;
+        unawaited(
+          subscriber?.pc
+              .setConfiguration(restore.toMap())
+              .then((_) => _gravixMark('sub:connectPingRestored'))
+              .catchError((Object e) => logger.warning('restoring the subscriber ping interval failed: $e')),
+        );
+      }
       events.emit(EngineSubscriberPeerStateUpdatedEvent(state: state, isPrimary: _subscriberPrimary));
       logger.fine('subscriber connectionState: $state');
       if (state.isDisconnected() || state.isFailed()) {
@@ -1491,7 +1515,13 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         await gravixAnswerSubscriberOffer<rtc.RTCSessionDescription>(
           fastAnswer: gravixFastAnswer,
           createAnswer: () async {
-            final answer = await subscriber!.pc.createAnswer();
+            var answer = await subscriber!.pc.createAnswer();
+            // GRAVIX(viewer-fast-start): the phone is the DTLS server of the
+            // subscriber connection; see GravixViewerFastStart.passiveSubscriberDtls.
+            final sdp = answer.sdp;
+            if (GravixViewerFastStart.passiveSubscriberDtls && sdp != null) {
+              answer = rtc.RTCSessionDescription(gravixPassiveDtlsAnswer(sdp), answer.type);
+            }
             logger.fine('Created answer');
             logger.finer('sdp: ${answer.sdp}');
             return answer;
@@ -1500,8 +1530,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
           sendAnswer: signalClient.sendAnswer,
           mark: _gravixMark,
         );
-      } catch (_) {
-        logger.severe('[$objectId] Failed to createAnswer()');
+      } catch (e) {
+        _gravixMark('answerFailed', e.toString()); // GRAVIX: a refused answer shows in the join timeline
+        logger.severe('[$objectId] Failed to createAnswer(): $e');
       }
     })
     ..on<SignalAnswerEvent>((event) async {

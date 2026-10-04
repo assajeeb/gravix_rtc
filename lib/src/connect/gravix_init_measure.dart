@@ -49,6 +49,7 @@ import 'gravix_analytics.dart' show gravixNetworkTypeFrom;
 import 'gravix_region_cache.dart';
 import 'gravix_region_probe_client.dart';
 import 'gravix_region_report.dart';
+import 'gravix_region_selection.dart';
 import 'gravix_region_shortlist.dart';
 
 /// Requests per region: one cold (dropped) + up to two warm. Was 4 until the
@@ -130,8 +131,18 @@ class GravixRegionMeasurementResult {
     this.earlyExit = false,
     this.networkKey,
     this.ttl = kGravixRegionMeasurementTtl,
+    this.selectReason,
+    this.challenger,
   });
   final DateTime measuredAt;
+
+  /// How the hysteresis chose [best] (gravix_region_selection.dart). Null when
+  /// nothing was measured `ok`, or for an answer seeded from the cache.
+  final GravixRegionSelectReason? selectReason;
+
+  /// A rival that beat the held region in this measurement but is not yet
+  /// confirmed (with [selectReason] `confirming`).
+  final GravixRegionChallenger? challenger;
 
   /// How long sampling took (the list fetch excluded). Null when nothing was sampled.
   final Duration? elapsed;
@@ -254,30 +265,71 @@ Future<GravixRegionListStore> _persistentStore() =>
 void gravixResetDefaultRegionListStore() => _defaultPersistentStore = null;
 GravixRegionMeasurementResult? _held;
 
+typedef _RegionRtt = ({String region, String url, int rttMs});
+
+Map<String, Object?> _rttJson(_RegionRtt r) => {'region': r.region, 'url': r.url, 'rttMs': r.rttMs};
+
+_RegionRtt? _rttFrom(Object? b) => b is Map && b['region'] is String && b['url'] is String && b['rttMs'] is int
+    ? (region: b['region'] as String, url: b['url'] as String, rttMs: b['rttMs'] as int)
+    : null;
+
 /// Per-network state (in memory, and in the store when there is one).
 class _NetworkState {
-  _NetworkState({required this.known, required this.cursor, required this.measuredAt, required this.ttl, this.best});
+  _NetworkState({
+    required this.known,
+    required this.cursor,
+    required this.measuredAt,
+    required this.ttl,
+    this.best,
+    this.regions = const [],
+    this.anchor,
+    this.anchorAt,
+    this.challenger,
+  });
   final List<String> known;
   final int cursor;
   final DateTime measuredAt;
   final Duration ttl;
-  final ({String region, String url, int rttMs})? best;
+  final _RegionRtt? best;
+
+  /// Every region the last measuring run measured `ok`, fastest first: a start-up
+  /// seeded from this cache has the whole picture, so the join's keep-pinned and
+  /// home-region rules can compare (with only [best] they could not, and the
+  /// lookup moved to [best] whatever the pinned / home region measured).
+  final List<_RegionRtt> regions;
+
+  /// The last good region, kept for [kGravixRegionAnchorLife] (see
+  /// gravix_region_selection.dart), and when it was last confirmed.
+  final _RegionRtt? anchor;
+  final DateTime? anchorAt;
+
+  /// A rival that beat the anchor in the previous measurement(s).
+  final GravixRegionChallenger? challenger;
 
   bool freshAt(DateTime now) => now.difference(measuredAt) <= ttl;
+
+  /// The anchor, while it is within its life.
+  _RegionRtt? liveAnchor(DateTime now) =>
+      anchor != null && anchorAt != null && now.difference(anchorAt!) <= kGravixRegionAnchorLife ? anchor : null;
 
   String encode() => json.encode({
     'known': known,
     'cursor': cursor,
     'measuredAtMs': measuredAt.millisecondsSinceEpoch,
     'ttlMs': ttl.inMilliseconds,
-    if (best != null) 'best': {'region': best!.region, 'url': best!.url, 'rttMs': best!.rttMs},
+    if (best != null) 'best': _rttJson(best!),
+    if (regions.isNotEmpty) 'regions': [for (final r in regions) _rttJson(r)],
+    if (anchor != null && anchorAt != null) 'anchor': {..._rttJson(anchor!), 'atMs': anchorAt!.millisecondsSinceEpoch},
+    if (challenger != null) 'challenger': challenger!.toJson(),
   });
 
   static _NetworkState? decode(String raw) {
     try {
       final m = json.decode(raw);
       if (m is! Map || m['measuredAtMs'] is! int || m['known'] is! List) return null;
-      final b = m['best'];
+      final a = m['anchor'];
+      final anchor = _rttFrom(a);
+      final regs = m['regions'];
       return _NetworkState(
         known: [
           for (final k in m['known'] as List)
@@ -286,9 +338,17 @@ class _NetworkState {
         cursor: m['cursor'] is int ? m['cursor'] as int : 0,
         measuredAt: DateTime.fromMillisecondsSinceEpoch(m['measuredAtMs'] as int),
         ttl: Duration(milliseconds: m['ttlMs'] is int ? m['ttlMs'] as int : kGravixRegionMeasurementTtl.inMilliseconds),
-        best: b is Map && b['region'] is String && b['url'] is String && b['rttMs'] is int
-            ? (region: b['region'] as String, url: b['url'] as String, rttMs: b['rttMs'] as int)
+        best: _rttFrom(m['best']),
+        regions: [
+          if (regs is List)
+            for (final r in regs)
+              if (_rttFrom(r) != null) _rttFrom(r)!,
+        ],
+        anchor: anchor != null && a is Map && a['atMs'] is int ? anchor : null,
+        anchorAt: anchor != null && a is Map && a['atMs'] is int
+            ? DateTime.fromMillisecondsSinceEpoch(a['atMs'] as int)
             : null,
+        challenger: GravixRegionChallenger.fromJson(m['challenger']),
       );
     } catch (_) {
       return null;
@@ -349,43 +409,50 @@ GravixRegionSampler gravixDefaultRegionSampler(
 /// `ethernet` or `unknown`.
 typedef GravixRegionNetworkReader = Future<String?> Function();
 
-Future<String?> _defaultNetworkType() async {
+Future<List<ConnectivityResult>?> _connectivity() async {
   try {
-    return gravixNetworkTypeFrom(await Connectivity().checkConnectivity().timeout(const Duration(seconds: 1)));
+    return await Connectivity().checkConnectivity().timeout(const Duration(seconds: 1));
   } catch (_) {
-    return 'unknown';
+    return null;
   }
 }
 
-({GravixRegionMeasurement best, bool kept})? _chooseBest(List<GravixRegionMeasurement> regions, String? current) {
-  final fastest = regions.where((r) => r.ok).firstOrNull;
-  if (fastest == null) return null;
-  if (current != null && current != fastest.region) {
-    final now = regions.where((r) => r.region == current).firstOrNull;
-    if (now != null && now.ok) {
-      final needed = [
-        GravixRegionDecisionCache.switchMinGain.inMilliseconds.toDouble(),
-        now.rttMs! * GravixRegionDecisionCache.switchMinGainRatio,
-      ].reduce((a, b) => a > b ? a : b);
-      if (now.rttMs! - fastest.rttMs! <= needed) return (best: now, kept: true);
-    }
-  }
-  return (best: fastest, kept: false);
+/// The per-network cache key for a connectivity reading: the network type, plus
+/// `+vpn` while a VPN is up.
+///
+/// Field 2026-10-04: a tester in Saudi Arabia on mobile data measured doh1 for
+/// five sessions, then turned a VPN on (exit: a hosting network in Canada). The
+/// measurement through the VPN correctly picked nyc1 -- the packets left from
+/// Canada -- but VPN on and VPN off were both `cellular`, so after the VPN went
+/// off the nyc1 answer (~300 ms from Saudi) was still this network's cached
+/// answer for up to 10 minutes and the anchor the next measurement had to beat.
+/// Android reports a VPN as its own transport next to the underlying one
+/// (connectivity_plus: `[mobile, vpn]`), so the two now cache apart.
+String gravixRegionNetworkKeyFrom(List<ConnectivityResult> results) {
+  final type = gravixNetworkTypeFrom(results);
+  return results.contains(ConnectivityResult.vpn) ? '$type+vpn' : type;
 }
 
 GravixRegionMeasurementResult? _resultFromState(_NetworkState s, String networkKey) {
   final b = s.best;
   if (b == null) return null;
-  final m = GravixRegionMeasurement(
-    entry: GravixRegionUrl(region: b.region, url: b.url),
-    rttMs: b.rttMs,
+  GravixRegionMeasurement toM(_RegionRtt r) => GravixRegionMeasurement(
+    entry: GravixRegionUrl(region: r.region, url: r.url),
+    rttMs: r.rttMs,
     samplesMs: const [],
     status: GravixRegionMeasurementStatus.ok,
     source: GravixRegionCandidateSource.cache,
   );
+  final m = toM(b);
+  // Every region measured last time (fastest first), [best] first: the join's
+  // keep-pinned and home-region rules need the others' numbers too.
+  final others = [
+    for (final r in s.regions)
+      if (r.region != b.region) toM(r),
+  ];
   return GravixRegionMeasurementResult(
     measuredAt: s.measuredAt,
-    regions: [m],
+    regions: [m, ...others],
     best: m,
     bestSource: GravixRegionBestSource.cache,
     networkKey: networkKey,
@@ -436,8 +503,17 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
   GravixRegionNetworkReader? networkKey,
   GravixRegionNetworkReader? networkType,
 }) async {
-  final netTypeF = (networkType ?? _defaultNetworkType)().then((v) => v, onError: (Object _) => null);
-  final netKeyF = networkKey == null ? netTypeF : networkKey().then((v) => v, onError: (Object _) => null);
+  // One connectivity reading serves both the type (budget) and the cache key,
+  // unless the app supplied either.
+  final connF = networkType != null && networkKey != null ? Future.value(null) : _connectivity();
+  final netTypeF = networkType != null
+      ? networkType().then((v) => v, onError: (Object _) => null)
+      : connF.then((c) => c == null ? 'unknown' : gravixNetworkTypeFrom(c));
+  final netKeyF = networkKey != null
+      ? networkKey().then((v) => v, onError: (Object _) => null)
+      : networkType != null
+      ? netTypeF // an app that names the type keys by it (pre-VPN behaviour)
+      : connF.then((c) => c == null ? 'unknown' : gravixRegionNetworkKeyFrom(c));
 
   GravixRegionDirectory dir;
   try {
@@ -491,18 +567,35 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     if (seeded != null) _held = seeded;
   }
   final heldSame = gravixRegionMeasurement();
+  // The anchor: the region joins use now on this network. Kept for hours, not
+  // just while the answer is fresh (gravix_region_selection.dart).
+  final nowAtStart = DateTime.now();
+  final liveAnchor = state?.liveAnchor(nowAtStart);
   final current =
       currentRegion ??
+      liveAnchor?.region ??
       (stateFresh ? state.best?.region : null) ??
-      (heldSame?.networkKey == netKey ? heldSame?.best?.region : null);
+      (heldSame?.networkKey == netKey && (heldSame?.best?.ok ?? false) ? heldSame?.best?.region : null);
 
   final plan = gravixPlanRegionCandidates(
     dir,
     state: state == null ? null : GravixRegionPlanState(known: state.known, cursor: state.cursor),
     currentRegion: current,
   );
-  final runBudget =
-      budget ?? dir.probeBudget ?? (netType == 'cellular' ? kGravixMeasureBudgetCellular : kGravixMeasureBudget);
+  // On cellular the SDK's own 3 s is a FLOOR under the gateway's budget: the
+  // console answers `probe_budget_ms: 1500` for every caller (a Wi-Fi-sized
+  // number), which used to replace the cellular default outright, so a cellular
+  // start-up never had more than 1.5 s for a cold TLS handshake plus two samples.
+  // An app's explicit [budget] still wins.
+  final Duration runBudget;
+  if (budget != null) {
+    runBudget = budget;
+  } else if (netType == 'cellular') {
+    final b = dir.probeBudget;
+    runBudget = b != null && b > kGravixMeasureBudgetCellular ? b : kGravixMeasureBudgetCellular;
+  } else {
+    runBudget = dir.probeBudget ?? kGravixMeasureBudget;
+  }
 
   final tracks = [for (final c in plan.candidates) _Track(c.entry, c.source)];
   final sw = Stopwatch()..start();
@@ -598,14 +691,45 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     return a.rttMs!.compareTo(b.rttMs!);
   });
 
-  final choice = _chooseBest(measured, current);
-  GravixRegionMeasurement? best = choice?.best;
-  GravixRegionBestSource? bestSource = choice == null
-      ? null
-      : choice.kept
-      ? GravixRegionBestSource.kept
-      : GravixRegionBestSource.measured;
-  if (choice == null) {
+  // The last-known RTT of the anchor, for keeping it through a run in which it
+  // got no answer within the budget (`unmeasured`, not failed).
+  _RegionRtt? lastKnown(String region) =>
+      (liveAnchor?.region == region ? liveAnchor : null) ??
+      state?.regions.where((r) => r.region == region).firstOrNull ??
+      (state?.best?.region == region ? state?.best : null);
+  final anchorLast = current == null ? null : lastKnown(current);
+  final selection = gravixSelectRegion(
+    [for (final m in measured) GravixRegionSample(region: m.region, status: m.state.name, rttMs: m.rttMs)],
+    anchor: current,
+    // The votes belong to the anchor they were cast against.
+    challenger: current != null && (liveAnchor == null || current == liveAnchor.region) ? state?.challenger : null,
+    anchorKnown: anchorLast != null,
+  );
+  GravixRegionMeasurement? best;
+  GravixRegionBestSource? bestSource;
+  if (selection != null) {
+    final m = measured.where((m) => m.region == selection.region).first;
+    if (m.ok) {
+      best = m;
+    } else {
+      // `confirming` with an unmeasured anchor: its last-known number stands in.
+      best = GravixRegionMeasurement(
+        entry: m.entry,
+        rttMs: anchorLast!.rttMs,
+        samplesMs: m.samplesMs,
+        connections: m.connections,
+        status: GravixRegionMeasurementStatus.ok,
+        source: GravixRegionCandidateSource.cache,
+        budgetHit: m.budgetHit,
+        retried: m.retried,
+      );
+    }
+    bestSource =
+        selection.reason == GravixRegionSelectReason.kept || selection.reason == GravixRegionSelectReason.confirming
+        ? GravixRegionBestSource.kept
+        : GravixRegionBestSource.measured;
+  }
+  if (selection == null) {
     final fb = gravixFallbackRegion(dir);
     if (fb != null) {
       best =
@@ -635,6 +759,8 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     earlyExit: why == 'early',
     networkKey: netKey,
     ttl: ttl,
+    selectReason: selection?.reason,
+    challenger: selection?.challenger,
   );
 
   final measuredBest = best != null && best.ok ? best : null;
@@ -653,6 +779,18 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     best: measuredBest != null
         ? (region: measuredBest.region, url: measuredBest.url, rttMs: measuredBest.rttMs!)
         : (stateFresh ? state.best : null),
+    regions: measuredBest != null
+        ? [
+            for (final m in measured)
+              if (m.ok) (region: m.region, url: m.url, rttMs: m.rttMs!),
+          ]
+        : (stateFresh ? state.regions : const []),
+    // A run with no measured region keeps the anchor (and its age) as it was.
+    anchor: measuredBest != null
+        ? (region: measuredBest.region, url: measuredBest.url, rttMs: measuredBest.rttMs!)
+        : liveAnchor,
+    anchorAt: measuredBest != null ? DateTime.now() : (liveAnchor != null ? state?.anchorAt : null),
+    challenger: selection != null ? selection.challenger : state?.challenger,
   );
   _memoryStates[sKey] = newState;
   try {
@@ -690,6 +828,7 @@ Map<String, Object?>? gravixRegionsMeasuredReport([GravixRegionMeasurementResult
     'elapsed_ms': r.elapsed?.inMilliseconds ?? 0,
     'best': r.best?.region,
     'best_source': r.bestSource?.name,
+    if (r.selectReason != null) 'select_reason': r.selectReason!.name,
     'regions': [
       for (final m in r.regions)
         {
@@ -705,6 +844,13 @@ Map<String, Object?>? gravixRegionsMeasuredReport([GravixRegionMeasurementResult
   };
 }
 
+/// Why [gravixPickRegion] chose its region. Wire names = [name].
+///
+/// - `measured`: the measured best region (or the fastest the room offers);
+/// - `pinned`: the pinned url, kept because the pick was not clearly faster;
+/// - `home`: the room's home region, within the home margin of the fastest.
+enum GravixRegionPickReason { measured, pinned, home }
+
 /// The join path's choice: the measured best region if [candidates] offers it,
 /// else the fastest measured region it does offer. A lookup, never a probe.
 /// Null -- and `connect()` does what it did before -- when nothing fresh is
@@ -718,17 +864,40 @@ Map<String, Object?>? gravixRegionsMeasuredReport([GravixRegionMeasurementResult
 /// standby for sgp1, and this lookup moved the join to blr1 anyway: a cold dial
 /// (wsOpen 200-1300 ms instead of ~80) to another region than the token named,
 /// and the region flip-flop the app was avoiding.
-GravixRegionUrl? gravixPickMeasuredRegion(String pinnedUrl, List<GravixRegionUrl> candidates, {DateTime? now}) {
+///
+/// [homeRegion] (a viewer / guest joining someone else's room): the region the
+/// room lives on, when the app's backend knows it (e.g. the token response's
+/// `home_region`, [gravixHomeRegionFrom]). It wins when it is offered, measured
+/// `ok`, and within [gravixHomeRegionMargin] (max(25 ms, 30 %)) of the fastest
+/// offered region: joining it saves the relay hop between the viewer's region and
+/// the host's (field 2026-10-04: host sgp1, viewer blr1 a few ms apart, 2.9-3.4 %
+/// loss on the relay leg). Further away, the viewer's own pick stands (the room
+/// is relayed to it) and the pinned rule is skipped, so a pinned home url cannot
+/// keep it either. Home not measured: as if none were given. Hosts pass none.
+GravixRegionUrl? gravixPickMeasuredRegion(
+  String pinnedUrl,
+  List<GravixRegionUrl> candidates, {
+  DateTime? now,
+  String? homeRegion,
+}) => gravixPickRegion(pinnedUrl, candidates, now: now, homeRegion: homeRegion)?.entry;
+
+/// [gravixPickMeasuredRegion], with why it chose that region.
+({GravixRegionUrl entry, GravixRegionPickReason reason})? gravixPickRegion(
+  String pinnedUrl,
+  List<GravixRegionUrl> candidates, {
+  DateTime? now,
+  String? homeRegion,
+}) {
   final m = gravixRegionMeasurement(now: now);
   if (m == null || m.best == null || candidates.isEmpty) return null;
+  GravixRegionUrl? offeredFor(GravixRegionMeasurement r) =>
+      candidates.where((c) => c.url == r.url).firstOrNull ?? candidates.where((c) => c.region == r.region).firstOrNull;
   final order = [m.best!, ...m.regions.where((r) => r.region != m.best!.region)];
   GravixRegionMeasurement? pickedM;
   GravixRegionUrl? picked;
   for (final r in order) {
     if (!r.ok) continue;
-    final offered =
-        candidates.where((c) => c.url == r.url).firstOrNull ??
-        candidates.where((c) => c.region == r.region).firstOrNull;
+    final offered = offeredFor(r);
     if (offered != null) {
       pickedM = r;
       picked = offered;
@@ -736,17 +905,35 @@ GravixRegionUrl? gravixPickMeasuredRegion(String pinnedUrl, List<GravixRegionUrl
     }
   }
   if (picked == null || pickedM == null) return null;
+
+  if (homeRegion != null && homeRegion.isNotEmpty) {
+    final homeM = order.where((r) => r.ok && r.region == homeRegion).firstOrNull;
+    final homeOffered = homeM == null ? null : offeredFor(homeM);
+    if (homeM != null && homeOffered != null) {
+      var fastest = homeM;
+      for (final r in order) {
+        if (r.ok && offeredFor(r) != null && r.rttMs! < fastest.rttMs!) fastest = r;
+      }
+      if (gravixHomeRegionWithinMargin(homeMs: homeM.rttMs!, fastestMs: fastest.rttMs!)) {
+        return (entry: homeOffered, reason: GravixRegionPickReason.home);
+      }
+      return (entry: picked, reason: GravixRegionPickReason.measured);
+    }
+  }
+
   String norm(String u) => u.replaceAll(RegExp(r'/+$'), '');
-  if (norm(picked.url) == norm(pinnedUrl)) return picked;
+  if (norm(picked.url) == norm(pinnedUrl)) return (entry: picked, reason: GravixRegionPickReason.measured);
   final pinnedM = m.regions.where((r) => r.ok && norm(r.url) == norm(pinnedUrl)).firstOrNull;
   final pinned = candidates.where((c) => norm(c.url) == norm(pinnedUrl)).firstOrNull;
-  if (pinnedM == null || pinned == null) return picked;
+  if (pinnedM == null || pinned == null) return (entry: picked, reason: GravixRegionPickReason.measured);
   final gain = pinnedM.rttMs! - pickedM.rttMs!;
   final needed = [
     GravixRegionDecisionCache.switchMinGain.inMilliseconds.toDouble(),
     pinnedM.rttMs! * GravixRegionDecisionCache.switchMinGainRatio,
   ].reduce((a, b) => a > b ? a : b);
-  return gain > needed ? picked : pinned;
+  return gain > needed
+      ? (entry: picked, reason: GravixRegionPickReason.measured)
+      : (entry: pinned, reason: GravixRegionPickReason.pinned);
 }
 
 /// The measured regions as join candidates, for a connect whose token came with
@@ -762,10 +949,11 @@ List<GravixRegionUrl> gravixMeasuredCandidates(String connectUrl, {DateTime? now
 /// Measure now, then every [refresh] and whenever the network changes. Call once
 /// when the app starts, e.g. with `https://<console host>/v1/regions`. Never throws.
 class GravixRegionMeasurementHandle {
-  GravixRegionMeasurementHandle._(this._run, this._timer, this._sub);
+  GravixRegionMeasurementHandle._(this._run, this._timer, this._sub, this._onStop);
   final Future<GravixRegionMeasurementResult> Function() _run;
   final Timer? _timer;
   final StreamSubscription<Object?>? _sub;
+  final void Function() _onStop;
   late final Future<GravixRegionMeasurementResult> ready;
 
   /// Measure again now.
@@ -775,6 +963,7 @@ class GravixRegionMeasurementHandle {
   void stop() {
     _timer?.cancel();
     _sub?.cancel();
+    _onStop();
   }
 }
 
@@ -823,16 +1012,33 @@ GravixRegionMeasurementHandle gravixStartRegionMeasurement({
         ),
       )
       .whenComplete(() => running = null);
-  final timer = refresh > Duration.zero ? Timer.periodic(refresh, (_) => run()) : null;
+  // A rival that won once (`confirming`) is measured again soon instead of at
+  // the next refresh: joins move only after a second win, and that second run
+  // should not be 5 minutes away when the held region really got worse.
+  Timer? confirm;
+  var stopped = false;
+  Future<GravixRegionMeasurementResult> runAndConfirm() => run().then((r) {
+    if (!stopped && r.selectReason == GravixRegionSelectReason.confirming && confirm == null) {
+      confirm = Timer(kGravixRegionConfirmDelay, () {
+        confirm = null;
+        if (!stopped) runAndConfirm();
+      });
+    }
+    return r;
+  });
+  final timer = refresh > Duration.zero ? Timer.periodic(refresh, (_) => runAndConfirm()) : null;
   StreamSubscription<Object?>? sub;
   if (watchNetwork) {
     try {
-      sub = Connectivity().onConnectivityChanged.listen((_) => run());
+      sub = Connectivity().onConnectivityChanged.listen((_) => runAndConfirm());
     } catch (_) {
       // no connectivity plugin on this platform: the periodic refresh still runs
     }
   }
-  final handle = GravixRegionMeasurementHandle._(run, timer, sub);
-  handle.ready = run();
+  final handle = GravixRegionMeasurementHandle._(runAndConfirm, timer, sub, () {
+    stopped = true;
+    confirm?.cancel();
+  });
+  handle.ready = runAndConfirm();
   return handle;
 }

@@ -134,6 +134,7 @@ class GravixJoinCredentials {
     required this.token,
     required this.url,
     this.regionEntries = const <GravixRegionUrl>[],
+    this.homeRegion,
     this.expiresAt,
     required this.fetchedAt,
     this.fromCache = false,
@@ -150,6 +151,11 @@ class GravixJoinCredentials {
   /// gateway's `probe_url` — exactly what `connect(regionEntries: …)` takes.
   /// Empty when the backend sent none, which makes `connect` skip the race.
   final List<GravixRegionUrl> regionEntries;
+
+  /// The room's home region (`home_region`, [gravixHomeRegionFrom]): the region
+  /// the room's host is on, when the backend knows it. Joins prefer it within the
+  /// home margin (see `gravixPickMeasuredRegion`). Null for a host's own token.
+  final String? homeRegion;
 
   /// When the token stops being usable, as far as the client can tell: the
   /// JWT's `exp`, else `fetchedAt + expires_in`, else `fetchedAt +
@@ -174,6 +180,7 @@ class GravixJoinCredentials {
     token: token,
     url: url,
     regionEntries: regionEntries,
+    homeRegion: homeRegion,
     expiresAt: expiresAt,
     fetchedAt: fetchedAt,
     fromCache: true,
@@ -242,6 +249,7 @@ class GravixJoinCredentials {
       token: token,
       url: url,
       regionEntries: gravixRegionEntriesFrom(body),
+      homeRegion: gravixHomeRegionFrom(body),
       expiresAt: expiresAt,
       fetchedAt: fetchedAt,
       raw: Map<String, dynamic>.unmodifiable(body),

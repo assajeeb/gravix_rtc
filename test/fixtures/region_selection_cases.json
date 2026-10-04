@@ -1,0 +1,412 @@
+{
+ "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: region selection with hysteresis (gravixSelectRegion / selectRegion) and the home-region margin. Edit both copies together. 2026-10-05.",
+ "select": [
+  {
+   "name": "no anchor: the fastest",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "ok",
+     "rtt_ms": 58
+    }
+   ],
+   "anchor": null,
+   "challenger": null,
+   "expect": {
+    "region": "sgp1",
+    "reason": "fastest",
+    "challenger": null
+   }
+  },
+  {
+   "name": "the anchor is the fastest: kept as fastest, challenger cleared",
+   "samples": [
+    {
+     "region": "blr1",
+     "status": "ok",
+     "rtt_ms": 55
+    },
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 58
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": {
+    "region": "sgp1",
+    "wins": 1
+   },
+   "expect": {
+    "region": "blr1",
+    "reason": "fastest",
+    "challenger": null
+   }
+  },
+  {
+   "name": "field 2026-10-04 BD: sgp1 2 ms faster than the anchor blr1: kept",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "ok",
+     "rtt_ms": 58
+    },
+    {
+     "region": "fra1",
+     "status": "ok",
+     "rtt_ms": 186
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": null,
+   "expect": {
+    "region": "blr1",
+    "reason": "kept",
+    "challenger": null
+   }
+  },
+  {
+   "name": "within the margin (30 ms floor) clears an earlier vote",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 40
+    },
+    {
+     "region": "blr1",
+     "status": "ok",
+     "rtt_ms": 69
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": {
+    "region": "sgp1",
+    "wins": 1
+   },
+   "expect": {
+    "region": "blr1",
+    "reason": "kept",
+    "challenger": null
+   }
+  },
+  {
+   "name": "20 % above the floor: 249 vs 200 is within max(30, 49.8)",
+   "samples": [
+    {
+     "region": "fra1",
+     "status": "ok",
+     "rtt_ms": 200
+    },
+    {
+     "region": "doh1",
+     "status": "ok",
+     "rtt_ms": 249
+    }
+   ],
+   "anchor": "doh1",
+   "challenger": null,
+   "expect": {
+    "region": "doh1",
+    "reason": "kept",
+    "challenger": null
+   }
+  },
+  {
+   "name": "just past 20 %: 251 vs 200 is a vote",
+   "samples": [
+    {
+     "region": "fra1",
+     "status": "ok",
+     "rtt_ms": 200
+    },
+    {
+     "region": "doh1",
+     "status": "ok",
+     "rtt_ms": 251
+    }
+   ],
+   "anchor": "doh1",
+   "challenger": null,
+   "expect": {
+    "region": "doh1",
+    "reason": "confirming",
+    "challenger": {
+     "region": "fra1",
+     "wins": 1
+    }
+   }
+  },
+  {
+   "name": "first clear win: anchor kept, rival on probation",
+   "samples": [
+    {
+     "region": "doh1",
+     "status": "ok",
+     "rtt_ms": 45
+    },
+    {
+     "region": "nyc1",
+     "status": "ok",
+     "rtt_ms": 187
+    }
+   ],
+   "anchor": "nyc1",
+   "challenger": null,
+   "expect": {
+    "region": "nyc1",
+    "reason": "confirming",
+    "challenger": {
+     "region": "doh1",
+     "wins": 1
+    }
+   }
+  },
+  {
+   "name": "second consecutive clear win by the same rival: switched",
+   "samples": [
+    {
+     "region": "doh1",
+     "status": "ok",
+     "rtt_ms": 50
+    },
+    {
+     "region": "nyc1",
+     "status": "ok",
+     "rtt_ms": 190
+    }
+   ],
+   "anchor": "nyc1",
+   "challenger": {
+    "region": "doh1",
+    "wins": 1
+   },
+   "expect": {
+    "region": "doh1",
+    "reason": "switched",
+    "challenger": null
+   }
+  },
+  {
+   "name": "a different rival wins: its first vote, not the old rival's second",
+   "samples": [
+    {
+     "region": "fra1",
+     "status": "ok",
+     "rtt_ms": 99
+    },
+    {
+     "region": "nyc1",
+     "status": "ok",
+     "rtt_ms": 190
+    },
+    {
+     "region": "doh1",
+     "status": "ok",
+     "rtt_ms": 140
+    }
+   ],
+   "anchor": "nyc1",
+   "challenger": {
+    "region": "doh1",
+    "wins": 1
+   },
+   "expect": {
+    "region": "nyc1",
+    "reason": "confirming",
+    "challenger": {
+     "region": "fra1",
+     "wins": 1
+    }
+   }
+  },
+  {
+   "name": "the anchor failed: the fastest at once",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "failed"
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": null,
+   "expect": {
+    "region": "sgp1",
+    "reason": "anchorFailed",
+    "challenger": null
+   }
+  },
+  {
+   "name": "the anchor unmeasured (cut by the budget), last RTT known: a vote, anchor kept",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "unmeasured"
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": null,
+   "anchorKnown": true,
+   "expect": {
+    "region": "blr1",
+    "reason": "confirming",
+    "challenger": {
+     "region": "sgp1",
+     "wins": 1
+    }
+   }
+  },
+  {
+   "name": "the anchor unmeasured twice in a row: switched",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "unmeasured"
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": {
+    "region": "sgp1",
+    "wins": 1
+   },
+   "anchorKnown": true,
+   "expect": {
+    "region": "sgp1",
+    "reason": "switched",
+    "challenger": null
+   }
+  },
+  {
+   "name": "the anchor unmeasured with no last-known RTT: the fastest",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "status": "unmeasured"
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": null,
+   "anchorKnown": false,
+   "expect": {
+    "region": "sgp1",
+    "reason": "anchorFailed",
+    "challenger": null
+   }
+  },
+  {
+   "name": "the anchor not measured at all (no longer listed): the fastest",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "ok",
+     "rtt_ms": 56
+    },
+    {
+     "region": "fra1",
+     "status": "ok",
+     "rtt_ms": 186
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": null,
+   "expect": {
+    "region": "sgp1",
+    "reason": "anchorGone",
+    "challenger": null
+   }
+  },
+  {
+   "name": "nothing measured ok: no answer, challenger left alone",
+   "samples": [
+    {
+     "region": "sgp1",
+     "status": "failed"
+    },
+    {
+     "region": "blr1",
+     "status": "unmeasured"
+    }
+   ],
+   "anchor": "blr1",
+   "challenger": {
+    "region": "sgp1",
+    "wins": 1
+   },
+   "expect": null
+  }
+ ],
+ "home": [
+  {
+   "name": "BD viewer, host on blr1 2 ms slower than sgp1: home",
+   "homeMs": 58,
+   "fastestMs": 56,
+   "expect": true
+  },
+  {
+   "name": "25 ms floor: 81 vs 56 is home",
+   "homeMs": 81,
+   "fastestMs": 56,
+   "expect": true
+  },
+  {
+   "name": "26 ms over a 56 ms best: own region",
+   "homeMs": 82,
+   "fastestMs": 56,
+   "expect": false
+  },
+  {
+   "name": "30 % above the floor: 260 vs 200 is home",
+   "homeMs": 260,
+   "fastestMs": 200,
+   "expect": true
+  },
+  {
+   "name": "61 ms over a 200 ms best: own region",
+   "homeMs": 261,
+   "fastestMs": 200,
+   "expect": false
+  },
+  {
+   "name": "Gulf viewer on doh1 45, host on fra1 99: own region (relayed)",
+   "homeMs": 99,
+   "fastestMs": 45,
+   "expect": false
+  },
+  {
+   "name": "home is the fastest",
+   "homeMs": 40,
+   "fastestMs": 40,
+   "expect": true
+  }
+ ]
+}

@@ -95,18 +95,135 @@ void main() {
     expect(GravixSignalStandby.state(server.url, 'tok').state, 'none');
   });
 
-  test('exact url + token: another token, or no standby, is outcome none and dials cold', () async {
+  test('a HOST standby (empty token) serves a join with any token: usedHost, one TCP accept', () async {
+    expect(await GravixSignalStandby.open(server.url, ''), isTrue);
+    expect(server.accepts, 1);
+    final taken = await GravixSignalStandby.take(server.url, 'any-token');
+    expect(taken.outcome, 'usedHost');
+    expect(taken.usable, isTrue);
+    final ws = await _dial(server.url, taken.client);
+    expect(server.accepts, 1, reason: 'the upgrade goes over the host standby');
+    GravixSignalStandby.release(taken.client);
+    await ws.dispose();
+    expect(GravixSignalStandby.state(server.url, '').state, 'none', reason: 'taken');
+    // nothing left: the next join dials cold
+    expect((await GravixSignalStandby.take(server.url, 'another')).outcome, 'none');
+  });
+
+  test('the exact standby wins over the host one, which stays for the next join', () async {
+    await GravixSignalStandby.open(server.url, '');
     await GravixSignalStandby.open(server.url, 'tok');
-    final other = await GravixSignalStandby.take(server.url, 'another');
+    final taken = await GravixSignalStandby.take(server.url, 'tok');
+    expect(taken.outcome, 'used');
+    GravixSignalStandby.release(taken.client);
+    expect(GravixSignalStandby.state(server.url, '').state, 'open');
+  });
+
+  test('an expired host standby is not used', () async {
+    await GravixSignalStandby.open(server.url, '');
+    clock = clock.add(const Duration(seconds: 111));
+    final taken = await GravixSignalStandby.take(server.url, 'tok');
+    expect(taken.usable, isFalse);
+  });
+
+  test('exact url + token: no standby for the host is outcome none and dials cold', () async {
+    await GravixSignalStandby.open(server.url, 'tok');
+    final other = await GravixSignalStandby.take('ws://127.0.0.1:1', 'another');
     expect(other.outcome, 'none');
     expect(other.usable, isFalse);
     final ws = await _dial(server.url, other.client);
     expect(server.accepts, 2);
     await ws.dispose();
-    // the standby for 'tok' is untouched
+    // the standby for 'tok' (another host) is untouched
     expect(GravixSignalStandby.state(server.url, 'tok').state, 'open');
     // ws/http and wss/https name the same host; a trailing slash does not matter
     expect(GravixSignalStandby.state('${server.url.replaceFirst('ws:', 'http:')}/', 'tok').state, 'open');
+  });
+
+  test('per server: a token with no standby of its own takes another card\'s standby to the same host', () async {
+    await GravixSignalStandby.open(server.url, 'card-a');
+    clock = clock.add(const Duration(seconds: 2));
+    await GravixSignalStandby.open(server.url, 'card-b');
+    expect(server.accepts, 2);
+    final taken = await GravixSignalStandby.take(server.url, 'tapped-card');
+    expect(taken.outcome, 'usedSameHost');
+    expect(taken.ageMs, 0, reason: 'the youngest one is taken');
+    final ws = await _dial(server.url, taken.client);
+    expect(server.accepts, 2, reason: 'the upgrade went over a warm connection');
+    GravixSignalStandby.release(taken.client);
+    await ws.dispose();
+    expect(GravixSignalStandby.state(server.url, 'card-a').state, 'open', reason: 'the other one stays');
+    expect(GravixSignalStandby.state(server.url, 'card-b').state, 'none', reason: 'taken');
+  });
+
+  test('per server: a standby to ANOTHER host is never taken (other server)', () async {
+    final other = _Server();
+    await other.start();
+    addTearDown(other.stop);
+    await GravixSignalStandby.open(other.url, 'old-server-card');
+    final taken = await GravixSignalStandby.take(server.url, 'tapped');
+    expect(taken.outcome, 'none');
+    expect(GravixSignalStandby.state(other.url, 'old-server-card').state, 'open');
+  });
+
+  test('per server: one still opening to the same host is waited for (awaitedSameHost)', () async {
+    final gate = Completer<void>();
+    GravixSignalStandby.warm = (client, uri) async {
+      await gate.future;
+      final r = await (await client.openUrl('HEAD', uri)).close();
+      await r.drain<void>();
+      return r.persistentConnection;
+    };
+    addTearDown(
+      () => GravixSignalStandby.warm = (c, u) async {
+        final r = await (await c.openUrl('HEAD', u)).close();
+        await r.drain<void>();
+        return r.persistentConnection;
+      },
+    );
+    unawaited(GravixSignalStandby.open(server.url, 'neighbour'));
+    final taking = GravixSignalStandby.take(server.url, 'tapped', wait: const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    gate.complete();
+    final taken = await taking;
+    expect(taken.outcome, 'awaitedSameHost');
+    expect(taken.usable, isTrue);
+    GravixSignalStandby.release(taken.client);
+  });
+
+  test('per server: an open neighbour beats waiting for the exact one still opening (tap-down warm-up)', () async {
+    await GravixSignalStandby.open(server.url, 'neighbour');
+    GravixSignalStandby.warm = (client, uri) => Completer<bool>().future; // never lands
+    addTearDown(
+      () => GravixSignalStandby.warm = (c, u) async {
+        final r = await (await c.openUrl('HEAD', u)).close();
+        await r.drain<void>();
+        return r.persistentConnection;
+      },
+    );
+    unawaited(GravixSignalStandby.open(server.url, 'tapped'));
+    expect(GravixSignalStandby.state(server.url, 'tapped').state, 'opening');
+    final watch = Stopwatch()..start();
+    final taken = await GravixSignalStandby.take(server.url, 'tapped', wait: const Duration(seconds: 2));
+    expect(taken.outcome, 'usedSameHost');
+    expect(watch.elapsedMilliseconds, lessThan(500), reason: 'no wait for the one still opening');
+    GravixSignalStandby.release(taken.client);
+  });
+
+  test('over the limit: a second connection to one host goes before the only one to another', () async {
+    final other = _Server();
+    await other.start();
+    addTearDown(other.stop);
+    await GravixSignalStandby.open(other.url, 'blr1-card'); // the oldest
+    for (var i = 0; i < 4; i++) {
+      clock = clock.add(const Duration(seconds: 1));
+      await GravixSignalStandby.open(server.url, 'old$i');
+    }
+    expect(GravixSignalStandby.state(other.url, 'blr1-card').state, 'open', reason: 'only one to its host');
+    expect(GravixSignalStandby.state(server.url, 'old0').state, 'none', reason: 'oldest duplicate');
+    for (var i = 1; i < 4; i++) {
+      expect(GravixSignalStandby.state(server.url, 'old$i').state, 'open', reason: 'old$i');
+    }
   });
 
   test('idempotent: a call while one is opening joins it; a young one is kept', () async {

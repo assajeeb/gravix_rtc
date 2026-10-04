@@ -35,6 +35,7 @@ import '../types/video_dimensions.dart';
 import '../utils.dart';
 import 'track_publication.dart';
 import 'track_settings.dart';
+import '../../../connect/gravix_viewer_fast_start.dart'; // GRAVIX
 
 /// Represents a track publication from a RemoteParticipant. Provides methods to
 /// control if we should subscribe to the track, and its quality (for video).
@@ -232,14 +233,28 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
 
         newValue.onVideoViewBuild = () {
           logger.finer('[Visibility] VideoView did build');
-          if (_lastSentTrackSettings?.disabled == true) {
+          // GRAVIX(viewer-fast-start): also when nothing was sent yet (the
+          // subscription skipped its report, below), so the view's size reaches
+          // the server now instead of after the periodic check's debounce. Only
+          // with the switch on: off is the 0.4.8 path exactly.
+          if ((GravixViewerFastStart.noDisableBeforeFirstView && _lastSentTrackSettings == null) ||
+              _lastSentTrackSettings?.disabled == true) {
             // quick enable
             _cancelPendingTrackSettingsUpdateRequest?.call();
             _computeVideoViewVisibility(quick: true);
           }
         };
 
-        _computeVideoViewVisibility(quick: true);
+        // GRAVIX(viewer-fast-start): no view yet at the subscription (the app
+        // builds it a frame later) -> report nothing now rather than
+        // `disabled: true`; the periodic check reports a track that stays
+        // unviewed. See GravixViewerFastStart.noDisableBeforeFirstView.
+        if (!gravixSkipFirstVisibilityReport(
+          enabled: GravixViewerFastStart.noDisableBeforeFirstView,
+          viewCount: newValue.viewRegistrations.length,
+        )) {
+          _computeVideoViewVisibility(quick: true);
+        }
       } else {
         _adaptiveStreamActive = false;
       }

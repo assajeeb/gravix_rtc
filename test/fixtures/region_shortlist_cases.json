@@ -1,5 +1,5 @@
 {
- "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: the same fixture must give the same choice. Generated; edit both copies together.",
+ "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: the same fixture must give the same choice. Generated; edit both copies together. 2026-10-05: a rival must win by the keep margin in 2 consecutive runs (cache.challenger = the previous run's vote).",
  "lists": {
   "fifty": [
    {
@@ -744,7 +744,79 @@
    }
   },
   {
-   "name": "the cached region outside the shortlist, clearly slower: switch",
+   "name": "the cached region outside the shortlist, clearly slower: switch (second consecutive win)",
+   "response": {
+    "regions": "fifty",
+    "shortlist": [
+     "r07",
+     "r03",
+     "r21"
+    ]
+   },
+   "cache": {
+    "known": [
+     "r40"
+    ],
+    "cursor": 0,
+    "current": "r40",
+    "challenger": {
+     "region": "r03",
+     "wins": 1
+    }
+   },
+   "rtt": {
+    "r07": [
+     300,
+     90,
+     95
+    ],
+    "r03": [
+     250,
+     60,
+     62
+    ],
+    "r21": [
+     400,
+     150,
+     140
+    ],
+    "r40": [
+     300,
+     150,
+     155
+    ]
+   },
+   "expect": {
+    "mode": "shortlist",
+    "probed": [
+     [
+      "r07",
+      "shortlist"
+     ],
+     [
+      "r03",
+      "shortlist"
+     ],
+     [
+      "r21",
+      "shortlist"
+     ],
+     [
+      "r40",
+      "cache"
+     ]
+    ],
+    "best": "r03",
+    "bestSource": "measured",
+    "known": [
+     "r03",
+     "r07"
+    ],
+    "selectReason": "switched"
+   }
+  },
+  {
+   "name": "the cached region outside the shortlist, clearly slower -- first clear win: kept, confirming",
    "response": {
     "regions": "fifty",
     "shortlist": [
@@ -802,12 +874,17 @@
       "cache"
      ]
     ],
-    "best": "r03",
-    "bestSource": "measured",
+    "best": "r40",
+    "bestSource": "kept",
     "known": [
      "r03",
      "r07"
-    ]
+    ],
+    "selectReason": "confirming",
+    "challenger": {
+     "region": "r03",
+     "wins": 1
+    }
    }
   },
   {
@@ -843,7 +920,83 @@
    }
   },
   {
-   "name": "old server, 5 regions: all probed (unchanged)",
+   "name": "old server, 5 regions: all probed (unchanged) (second consecutive win)",
+   "response": {
+    "regions": "five"
+   },
+   "cache": {
+    "known": [
+     "blr1"
+    ],
+    "cursor": 0,
+    "current": "blr1",
+    "challenger": {
+     "region": "sgp1",
+     "wins": 1
+    }
+   },
+   "rtt": {
+    "sgp1": [
+     190,
+     61,
+     64
+    ],
+    "blr1": [
+     210,
+     118,
+     120
+    ],
+    "fra1": [
+     500,
+     180,
+     185
+    ],
+    "nyc1": [
+     780,
+     250,
+     255
+    ],
+    "ams3": [
+     520,
+     190,
+     192
+    ]
+   },
+   "expect": {
+    "mode": "all",
+    "probed": [
+     [
+      "sgp1",
+      "all"
+     ],
+     [
+      "blr1",
+      "all"
+     ],
+     [
+      "fra1",
+      "all"
+     ],
+     [
+      "nyc1",
+      "all"
+     ],
+     [
+      "ams3",
+      "all"
+     ]
+    ],
+    "best": "sgp1",
+    "bestSource": "measured",
+    "known": [
+     "sgp1",
+     "blr1"
+    ],
+    "selectReason": "switched"
+   }
+  },
+  {
+   "name": "old server, 5 regions: all probed (unchanged) -- first clear win: kept, confirming",
    "response": {
     "regions": "five"
    },
@@ -905,12 +1058,17 @@
       "all"
      ]
     ],
-    "best": "sgp1",
-    "bestSource": "measured",
+    "best": "blr1",
+    "bestSource": "kept",
     "known": [
      "sgp1",
      "blr1"
-    ]
+    ],
+    "selectReason": "confirming",
+    "challenger": {
+     "region": "sgp1",
+     "wins": 1
+    }
    }
   },
   {
@@ -1044,7 +1202,74 @@
    }
   },
   {
-   "name": "no shortlist, 50 regions with est_rtt_ms, cached region elsewhere: added",
+   "name": "no shortlist, 50 regions with est_rtt_ms, cached region elsewhere: added (second consecutive win)",
+   "response": {
+    "regions": "fiftyEst"
+   },
+   "cache": {
+    "known": [
+     "r02"
+    ],
+    "cursor": 0,
+    "current": "r02",
+    "challenger": {
+     "region": "r30",
+     "wins": 1
+    }
+   },
+   "rtt": {
+    "r31": [
+     200,
+     40,
+     41
+    ],
+    "r30": [
+     200,
+     35,
+     36
+    ],
+    "r32": [
+     200,
+     80,
+     80
+    ],
+    "r02": [
+     200,
+     90,
+     90
+    ]
+   },
+   "expect": {
+    "mode": "est",
+    "probed": [
+     [
+      "r31",
+      "est"
+     ],
+     [
+      "r30",
+      "est"
+     ],
+     [
+      "r32",
+      "est"
+     ],
+     [
+      "r02",
+      "cache"
+     ]
+    ],
+    "best": "r30",
+    "bestSource": "measured",
+    "known": [
+     "r30",
+     "r31"
+    ],
+    "selectReason": "switched"
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions with est_rtt_ms, cached region elsewhere: added -- first clear win: kept, confirming",
    "response": {
     "regions": "fiftyEst"
    },
@@ -1097,12 +1322,17 @@
       "cache"
      ]
     ],
-    "best": "r30",
-    "bestSource": "measured",
+    "best": "r02",
+    "bestSource": "kept",
     "known": [
      "r30",
      "r31"
-    ]
+    ],
+    "selectReason": "confirming",
+    "challenger": {
+     "region": "r30",
+     "wins": 1
+    }
    }
   },
   {
@@ -1120,7 +1350,76 @@
    }
   },
   {
-   "name": "no shortlist, 50 regions, cache: best 2 + 2 explored from the cursor",
+   "name": "no shortlist, 50 regions, cache: best 2 + 2 explored from the cursor (second consecutive win)",
+   "response": {
+    "regions": "fifty"
+   },
+   "cache": {
+    "known": [
+     "r10",
+     "r20"
+    ],
+    "cursor": 0,
+    "current": "r10",
+    "challenger": {
+     "region": "r00",
+     "wins": 1
+    }
+   },
+   "rtt": {
+    "r10": [
+     200,
+     80,
+     82
+    ],
+    "r20": [
+     200,
+     100,
+     101
+    ],
+    "r00": [
+     200,
+     30,
+     31
+    ],
+    "r01": [
+     200,
+     120,
+     120
+    ]
+   },
+   "expect": {
+    "mode": "explore",
+    "probed": [
+     [
+      "r10",
+      "cache"
+     ],
+     [
+      "r20",
+      "cache"
+     ],
+     [
+      "r00",
+      "explore"
+     ],
+     [
+      "r01",
+      "explore"
+     ]
+    ],
+    "cursor": 2,
+    "best": "r00",
+    "bestSource": "measured",
+    "known": [
+     "r00",
+     "r10"
+    ],
+    "selectReason": "switched"
+   }
+  },
+  {
+   "name": "no shortlist, 50 regions, cache: best 2 + 2 explored from the cursor -- first clear win: kept, confirming",
    "response": {
     "regions": "fifty"
    },
@@ -1175,12 +1474,17 @@
      ]
     ],
     "cursor": 2,
-    "best": "r00",
-    "bestSource": "measured",
+    "best": "r10",
+    "bestSource": "kept",
     "known": [
      "r00",
      "r10"
-    ]
+    ],
+    "selectReason": "confirming",
+    "challenger": {
+     "region": "r00",
+     "wins": 1
+    }
    }
   },
   {

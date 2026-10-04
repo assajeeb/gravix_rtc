@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gravix_rtc/src/connect/gravix_analytics.dart';
 import 'package:gravix_rtc/src/connect/gravix_init_measure.dart';
 import 'package:gravix_rtc/src/connect/gravix_region_report.dart';
+import 'package:gravix_rtc/src/connect/gravix_region_selection.dart';
 import 'package:gravix_rtc/src/connect/gravix_region_shortlist.dart';
 
 const _regionsUrl = 'https://gw.example.test/v1/regions';
@@ -64,7 +65,13 @@ void main() {
         if (cache != null) {
           store.write(
             _stateKey('unknown'),
-            json.encode({'known': cache['known'], 'cursor': cache['cursor'], 'measuredAtMs': 0, 'ttlMs': 1}),
+            json.encode({
+              'known': cache['known'],
+              'cursor': cache['cursor'],
+              'measuredAtMs': 0,
+              'ttlMs': 1,
+              if (cache['challenger'] != null) 'challenger': cache['challenger'],
+            }),
           );
         }
         final response = Map<String, Object?>.from(c['response'] as Map);
@@ -109,6 +116,8 @@ void main() {
         if (c['probedCount'] != null) expect(t.calls.toSet(), hasLength(c['probedCount']));
         expect(result.best?.region, ex['best']);
         expect(result.bestSource?.name, ex['bestSource']);
+        if (ex.containsKey('selectReason')) expect(result.selectReason?.name, ex['selectReason']);
+        if (ex.containsKey('challenger')) expect(result.challenger?.toJson(), ex['challenger']);
         final saved = json.decode(store.read(_stateKey('unknown'))!) as Map;
         if (ex['known'] != null) expect(saved['known'], ex['known']);
         if (ex['cursor'] != null) expect(saved['cursor'], ex['cursor']);
@@ -154,7 +163,11 @@ void main() {
       expect(t.calls.toSet(), {'r07', 'r03', 'r21', 'r40'});
       expect(result.budget, const Duration(milliseconds: 1500));
       expect(sw.elapsed, lessThan(const Duration(milliseconds: 1500)));
-      expect(result.best?.region, 'r03');
+      // r03 (43 ms) beats the held r40 (80 ms) by more than the keep margin, but
+      // one win only puts it on probation: joins move after a second one.
+      expect(result.best?.region, 'r40');
+      expect(result.selectReason, GravixRegionSelectReason.confirming);
+      expect(result.challenger?.toJson(), {'region': 'r03', 'wins': 1});
     });
 
     test(
