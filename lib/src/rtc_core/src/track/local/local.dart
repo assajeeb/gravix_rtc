@@ -166,6 +166,10 @@ abstract class LocalTrack extends Track {
 
   bool _stopped = false;
 
+  /// The mute state the server should see (an audio track muted for room
+  /// music stays live on the wire, see LocalAudioTrack.mute).
+  bool get wireMuted => muted;
+
   TrackProcessor? _processor;
 
   TrackProcessor? get processor => _processor;

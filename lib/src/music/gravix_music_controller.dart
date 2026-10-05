@@ -3,9 +3,19 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'gravix_music_channel.dart';
+
 /// Snapshot of the native music mixer's state.
 class MusicState {
-  const MusicState({required this.active, required this.paused, required this.positionMs, required this.durationMs});
+  const MusicState({
+    required this.active,
+    required this.paused,
+    required this.positionMs,
+    required this.durationMs,
+    this.captureReady = false,
+    this.captureLive = false,
+    this.captureSampleRate = 0,
+  });
 
   /// A decoded session is running (playing or paused).
   final bool active;
@@ -20,19 +30,35 @@ class MusicState {
   /// Total decoded duration in milliseconds, or -1 while unknown.
   final int durationMs;
 
+  /// The capture callback has run at least once (the mix format is known).
+  final bool captureReady;
+
+  /// The capture callback ran within the last 500 ms (the recorder is live).
+  final bool captureLive;
+
+  /// The live capture rate the music is resampled to (0 while unknown).
+  final int captureSampleRate;
+
   factory MusicState.fromMap(Map<dynamic, dynamic> map) {
     return MusicState(
       active: map['active'] == true,
       paused: map['paused'] == true,
       positionMs: (map['positionMs'] as num?)?.toInt() ?? 0,
       durationMs: (map['durationMs'] as num?)?.toInt() ?? -1,
+      captureReady: map['captureReady'] == true,
+      captureLive: map['captureLive'] == true,
+      captureSampleRate: (map['captureSampleRate'] as num?)?.toInt() ?? 0,
     );
   }
 }
 
-/// Dart bridge for the background-music mixer (Android and iOS).
+/// Low-level Dart bridge for the background-music mixer (Android and iOS).
 ///
-/// Native side: the `gravity.music_mixer` method channel.
+/// Apps: use [GravixRoomMusic] (state machine, mute integration, publish
+/// settings, room lifecycle). This bridge only forwards calls.
+///
+/// Native side: the `com.gravitycompile.gravix_rtc/music` method channel
+/// (`gravity.music_mixer` up to 0.4.9; see [kGravixMusicChannel]).
 ///  - Android: `com.gravitycompile.gravix_cloud.music.MusicMixerPlugin` decodes
 ///    a local audio file and mixes the PCM into the WebRTC microphone capture
 ///    buffer. Gain 0.0–2.0.
@@ -49,12 +75,13 @@ class MusicState {
 /// music.onCompleted.listen((_) => debugPrint('track finished'));
 /// ```
 class GravixMusicController {
-  GravixMusicController({MethodChannel? channel}) : _channel = channel ?? const MethodChannel('gravity.music_mixer') {
+  GravixMusicController({MethodChannel? channel}) : _channel = channel ?? const MethodChannel(kGravixMusicChannel) {
     // Native -> Dart: `onCompleted` fires when a track finishes on its own.
-    _channel.setMethodCallHandler(_handleNativeEvent);
+    _hub = GravixMusicEventHub.of(_channel)..add(_handleNativeEvent);
   }
 
   final MethodChannel _channel;
+  late final GravixMusicEventHub _hub;
   final StreamController<void> _onCompleted = StreamController.broadcast();
 
   bool _installed = false;
@@ -141,14 +168,14 @@ class GravixMusicController {
     } on MissingPluginException {
       if (kDebugMode) {
         debugPrint(
-          'gravity.music_mixer unavailable — the gravix_rtc native plugin '
+          '$kGravixMusicChannel unavailable — the gravix_rtc native plugin '
           'is not registered on this platform (music mixing runs on Android and iOS)',
         );
       }
       return null;
     } on PlatformException catch (e) {
       if (kDebugMode) {
-        debugPrint('gravity.music_mixer $method failed: ${e.message}');
+        debugPrint('$kGravixMusicChannel $method failed: ${e.message}');
       }
       rethrow;
     }
@@ -159,7 +186,7 @@ class GravixMusicController {
   /// stop music deterministically.
   void dispose() {
     _disposed = true;
-    _channel.setMethodCallHandler(null);
+    _hub.remove(_handleNativeEvent);
     unawaited(_onCompleted.close());
   }
 }

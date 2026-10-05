@@ -1,5 +1,176 @@
 # Changelog
 
+## 0.4.10 — 2026-10-06
+
+Reconnect fixes from the 2026-10-05 field test, the gravix_rtc version on the
+server, an opt-in DTX switch for the microphone, and room music in the SDK.
+
+### Room music (`GravixRoomMusic`)
+Field 2026-10-05: room music stopped working in two apps after their move to
+gravix_rtc. Cause: gravix_rtc <= 0.4.9 registered the method channel
+`gravity.music_mixer`, the name the apps' own audio kit uses; plugins register
+alphabetically and the last handler wins, so the SDK took every kit call (no
+`captureReady` in its answer) and the kit fell back to the paid server bot.
+- **The SDK's channel is now `com.gravitycompile.gravix_rtc/music`**; it never
+  registers `gravity.music_mixer` again (a test pins it). A capture callback
+  installed before the SDK's (an app kit) is chained, not refused.
+- **`GravixRoomMusic(room)`** (also `GravixRoomService.roomMusic`): `start`
+  (`GravixMusicSource.file / contentUri / asset`), `pause`, `resume`, `stop`,
+  `seek`, `setMusicVolume`, `setMicVolume`, `setDucking`, `setLoop`; `state`
+  (`ValueListenable<GravixMusicState>`: idle/loading/playing/paused/error,
+  position, duration, interrupted), `completed`, `errors`
+  (`GravixMusicException` with a stable `code`). The music is mixed into the
+  published microphone at the capture level: one stream, no second track, no bot.
+- **Android engine:** the file is opened and its codec created at `start()` (a
+  bad file is `openFailed` at once, no silent success); the mix waits for the
+  live capture format (`captureNotReady`, no guessed 48 kHz mono); `content://`
+  URIs; seamless loop; 20 ms fades on start/pause/resume/stop/switch and smoothed
+  volume (no clicks); voice level and ducking; the host monitor follows the
+  audio mode (voice-communication vs media stream). The hook is installed right
+  before every microphone capture start once music is used. The mixer can no
+  longer throw on WebRTC's record thread (a fault passes the capture through).
+- **Mute while music plays (Android):** a voice-only mute: the voice is zeroed in
+  the audio device module, the music keeps going out, the publication stays live
+  on the wire (the SFU stops forwarding a track signalled muted), whatever
+  `stopAudioCaptureOnMute` says. The app sees `muted`; remote participants see
+  the mic as on while music plays. When the music ends the mute becomes a normal
+  one (signalled, uplink capped). `start()` while muted plays the music with the
+  voice still muted. `continueWhileMicMuted: false` keeps the old behaviour.
+- **Publish settings while music plays:** mic maxBitrate 96 kbps through RTP
+  sender parameters (no republish), restored after unless something else moved
+  it; software noise suppression and AGC off (they run after the mixer and
+  flattened a steady tone within ~8 s on the phone), echo cancellation kept;
+  a mic published with DTX is republished once on a new track with DTX off, and
+  back at stop (the default DTX-off mic is never republished). RED is left as
+  published (switching needs a republish): music costs ~170-185 kbps on the wire
+  with RED, measured.
+- **Interruptions:** a phone call (audio mode RINGTONE / IN_CALL, no permission
+  needed) or a transient audio-focus loss pauses the music and resumes it after;
+  a user pause is never auto-resumed. Room disconnect, `stop()` and `dispose()`
+  release the decoder and the monitor.
+- iOS: the same API on the existing AVAudioEngine mixer (loop added); mic volume
+  and ducking throw `unsupported`; a mic mute also silences the music. Still
+  device-unverified.
+- Phone (Redmi 2201117TG, test fleet, web listener in Playwright's Chromium,
+  2026-10-06; 440 + 1000 Hz test tone; levels are the listener's FFT peak):
+  - music on a mic that was already live (apps' order), audio-room seat with
+    DTX: the mic was republished on a new track with DTX off, stayed published,
+    music at -42 dB, 191-196 kbps up with RED; stop: DTX back on, 118 kbps;
+  - the tone stayed flat for 20 s (-42.0 dB first to last: NS/AGC off), both
+    back on after stop;
+  - voice-only mute: no mute signal, music unchanged (-42 dB), the Mac's speech
+    gone from the voice band (-101 dB vs -59 dB unmuted); no crash;
+    `start()` while muted: unmute signal, music out, voice silent; at the end of
+    the track a mute signal and the 6 kbps cap;
+  - ducking: music -50.8 dB while speech vs -42 dB without; mic volume 0 removed
+    the voice; volume 0.3: -52.5 dB; pause / resume, seek, loop and
+    `completed` (loop off) as expected; a missing file: `openFailed`;
+  - a transient audio-focus grab by another requester paused the music
+    (`interrupted`), its release resumed it; a real phone call was not tested;
+  - 12 s in the background (HOME, no foreground service in the test app): the
+    music kept reaching the listener;
+  - RED auto during music (`GravixRoomService`, threshold 0): the mic was
+    republished on a new track with RED, the music never stopped, 96 kbps
+    re-applied to the new sender (~195 kbps with RED), voice-only mute after it;
+  - leave: the decoder and monitor released.
+
+### Fixed (also)
+- `addTrack` answered `QUEUED` (the SFU queues a cid that is still published)
+  is no longer taken for a refusal; the publish waits for TrackPublished.
+- **RED auto could leave the host without a microphone.** It unpublished the mic
+  and published the SAME track again, but `removePublishedTrack` disposes the
+  track it unpublishes. RED auto (and the room-music DTX swap) now publish a new
+  track on the same capture (`gravixRepublishMic`): the mute is carried over
+  before the publish, a refused publish is retried with the original options,
+  and a new track that could not be published is stopped.
+- **iOS with flutter_webrtc 1.6.1+:** `ios/gravix_rtc/Package.swift` pointed at
+  the `flutter_webrtc-1.6.0` symlink and the podspec pinned `WebRTC-SDK
+  144.7559.09`; a fresh `pub get` resolves 1.6.2+hotfix.3 (WebRTC-SDK
+  150.7871.01) and both builds failed. SwiftPM now uses `../flutter_webrtc` (the
+  Flutter tool maps it to the resolved version) and the podspec takes WebRTC-SDK
+  from flutter_webrtc. Simulator builds with 1.6.2+hotfix.3: SwiftPM (an app
+  outside the package) and CocoaPods (the example, which now opts out of SwiftPM:
+  the tool would copy the package root, the example's build/ included, into
+  itself on every build).
+
+### Fixed
+- **Full rejoin on the first refused resume.** A resume that reaches a
+  participant the server already closed is answered `Leave{RECONNECT}` ("could
+  not restart participant") and its socket is closed. The engine then waited out
+  the 10 s ReconnectResponse timeout (the Leave's own reconnect was dropped by the
+  reconnect-in-progress guard) and resumed again: field 2026-10-05, 3-4 resumes
+  and 10-17 s of extra outage each time. Now a Leave during the resume, or the
+  resume's socket closing before the ReconnectResponse, fails that resume at once
+  and the full rejoin (new join, tracks republished) starts with no delay. The
+  Leave's action is respected: `RESUME` resumes again (at once), `DISCONNECT`
+  disconnects. A resume socket that opens but never answers within the connect
+  timeout also counts as refused. Phone (Android, test fleet, server-side
+  `nodeFailure`, 3 runs each): reconnected after 11.9 / 12.1 / 12.7 s on 0.4.9,
+  1.6 / 3.3 / 9.4 s on 0.4.10 (the last one on a slow network); one resume and
+  one rejoin per run, the rejoin ~0.5 s after the server's refusal.
+- A Leave{RECONNECT} on a connected session reconnects at once (it went through
+  the back-off's delay).
+- The reconnect attempt counter is no longer reset by a resume socket that opens
+  and is then refused, so `maxAttempts` can be reached.
+- Two resumes in a row that failed without an answer (dial timeouts, ~10 s each)
+  now lead to a full reconnect for every session; it was three, and only with
+  `regionReprobeOnRestart`. Two of them outlast the server's 15 s disconnect grace,
+  so a third resume could only be refused. (A refused or dead socket already went
+  to the full reconnect at once.)
+
+### One session per identity
+Field 2026-10-05: a resume on one node raced a fresh join on another node for
+the same identity; the server's duplicate-identity eviction moved the room's
+origin and the host had ~2.5 min of instability.
+- The engine never runs a resume and a fresh connect at once: a fresh
+  `connect()` or a `disconnect()` cancels a pending or in-flight resume first, and
+  a socket dialled for a superseded connect is closed when it lands and delivers
+  nothing (SignalClient connect generations).
+- A full reconnect sends the leave on the old socket before it rejoins (JS SDK
+  parity), so the old session ends as CLIENT_REQUEST_LEAVE instead of a
+  duplicate-identity eviction.
+- `GravixRoomService.connect()` runs one session per room + identity (read from
+  the token): the same room, identity and token while a connect is in flight
+  returns that connect's result; while connected or reconnecting it keeps the
+  session (returns true); anything else waits for the connect in flight and then
+  tears the previous session down before joining. `disconnect()` then `connect()`
+  still forces a new session; `reconnectWithToken` (another token) reconnects as
+  before. `standby()` is a no-op (false) while that session is joining or live.
+
+### Added
+- **The gravix_rtc version on the server.** The join and resume URLs carry
+  `version=0.4.10` (was the vendored core's 2.11.0, so every client looked the
+  same in the server's logs and join analytics) and `other_sdks=gravix_rtc/0.4.10`
+  (ClientInfo.other_sdks; the server needs to read it). The server gates nothing
+  on a Flutter client's version. Verified on the test fleet: the SFU logs
+  `"sdk": "FLUTTER", "version": "0.4.10"`. Participant attributes are not used:
+  `gravix.*` is reserved for the server and join-time attributes need
+  CanUpdateOwnMetadata.
+- **`dtx`** on `connect`, `connectWithTokenProvider` and `reconnectWithToken`
+  (default **off**, as before; `GravixRoomService.dtx` reads it). Opus DTX for the
+  microphone; kept by the RED-auto republish. Phone (Android, 64 kbps cap): a
+  silent room 2-10 kbps with DTX (RED on or off) vs ~51-58 (Opus) / ~109-117
+  (RED) kbps without; a muted mic (6 kbps cap) 7.2 -> 0.2 kbps; speech unchanged
+  (~64 kbps Opus, ~130 kbps RED). With audible room noise Opus counts the noise as
+  activity and DTX saves little (one run: 110-118 kbps either way). The 64 kbps
+  cap holds (outbound-rtp targetBitrate 64000, Opus alone 51-64 kbps); RED
+  doubles it, and the outbound-rtp `codecId` still names audio/opus (PT 111) while
+  RED is sent, so stats read alone look like "Opus at ~125 kbps". The recorder is
+  not stopped on mute with DTX on (the 0.4.4 mute design holds). Not for music:
+  Opus can treat quiet music as silence.
+
+### Migration (apps on 0.4.9): room music
+- Use `GravixRoomMusic(room)` (or `roomService.roomMusic`) instead of an app
+  mixer. Create it right after `Room(...)`; drive "next track" from `completed`.
+- Delete app mic gates / "keep the publication unmuted while music plays" logic
+  (`micGate`, `onMusicSessionChanged`, `musicPausedProbe`, `musicSuppressHook`):
+  a plain `setMicrophoneEnabled(false)` is a voice-only mute while music plays,
+  and phone calls pause the music in the SDK.
+- An app that keeps its own kit must not use the channel
+  `com.gravitycompile.gravix_rtc/music`; `gravity.music_mixer` is free again.
+  Never run two mixers on one capture.
+- `GravixMusicController` moved to the new channel; its calls are unchanged.
+
 ## 0.4.9 — 2026-10-05
 
 Viewer first frame, standby per server, region hysteresis and the viewer's home

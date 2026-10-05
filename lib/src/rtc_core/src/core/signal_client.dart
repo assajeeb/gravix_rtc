@@ -164,6 +164,13 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       }
       // Clean up existing socket
       await cleanUp();
+      // GRAVIX(one-session, 2026-10-05): this connect's generation. A cleanUp()
+      // or a newer connect() while the dial is in flight supersedes it: its
+      // socket is closed when it lands and its events are never delivered, so a
+      // late resume socket can never run beside a fresh join (field 2026-10-05:
+      // a resume on one node raced a fresh join on another for the same identity).
+      final gen = _connectGen;
+      var socketClosed = false;
       // GRAVIX standby: a connection to this host opened ahead of the tap
       // (GravixRoomService.standby) carries the upgrade. A first join only: a
       // reconnect keeps its own path.
@@ -179,14 +186,42 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       // Attempt to connect
       final dialing = _wsConnector(
         rtcUri,
-        options: WebSocketEventHandlers(onData: _onSocketData, onDispose: _onSocketDispose, onError: _onSocketError),
+        options: WebSocketEventHandlers(
+          onData: (dynamic m) {
+            if (gen == _connectGen) return _onSocketData(m);
+          },
+          onDispose: () {
+            socketClosed = true;
+            if (gen == _connectGen) _onSocketDispose();
+          },
+          onError: (dynamic e) {
+            if (gen == _connectGen) _onSocketError(e);
+          },
+        ),
         headers: {'Authorization': 'Bearer $token'},
         networkOptions: roomOptions.networkOptions,
         // the taken standby itself: its client and its upgrade bound
         preconnected: taken.usable ? taken : null,
       );
       try {
-        _ws = await dialing.timeout(connectOptions.timeouts.connection);
+        final ws = await dialing.timeout(connectOptions.timeouts.connection);
+        if (gen != _connectGen || isDisposed) {
+          // superseded while dialling (cleanUp / a newer connect): this socket
+          // must not become the session. A fresh join's socket gets the leave
+          // (it may already be a server session); a resume's is just closed.
+          if (!reconnect) {
+            try {
+              ws.send(_leaveBytes);
+            } catch (_) {}
+          }
+          unawaited(ws.dispose());
+          throw WebSocketException('connect superseded (cleanUp or a newer connect while dialling)');
+        }
+        if (socketClosed) {
+          // the server closed it before the dial returned (a resume it refused)
+          throw WebSocketException('socket closed during connect');
+        }
+        _ws = ws;
       } catch (_) {
         // GRAVIX: a dial that answers after the join gave up (the connection
         // timeout) is a server session nobody reads -- a ghost participant until
@@ -313,10 +348,15 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     );
   }
 
+  /// GRAVIX: bumped by every cleanUp(); a connect() whose generation is no
+  /// longer current is superseded (see connect()).
+  int _connectGen = 0;
+
   // resets internal state to a re-usable state
   @internal
   Future<void> cleanUp() async {
     logger.fine('[${objectId}] cleanUp()');
+    _connectGen++;
     _connectionState = ConnectionState.disconnected;
     await _ws?.dispose();
     _ws = null;

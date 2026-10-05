@@ -26,6 +26,7 @@ import '../connect/gravix_region_prober.dart';
 import '../connect/gravix_region_report.dart';
 import '../connect/gravix_standby.dart';
 import '../music/gravix_music_controller.dart';
+import '../music/gravix_room_music.dart';
 import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
@@ -33,6 +34,7 @@ import '../rtc_core/src/support/websocket/standby.dart';
 import 'gravix_red_mode.dart';
 import '../large_room/gravix_publish_presets.dart' show GravixPublishPresets;
 import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMute;
+import '../rtc_core/src/track/local/mic_republish.dart';
 import '../rtc_core/src/internal/events.dart'
     show
         EngineJoinResponseEvent,
@@ -80,8 +82,8 @@ import '../rtc_core/src/internal/events.dart'
 /// the server call its participant-update API.
 ///
 /// ── Optional layers ──────────────────────────────────────────────────────────
-/// - [music]: background-music mixing (Android). Installed automatically on
-///   connect; playback is app-controlled through this field.
+/// - [roomMusic]: room music (a local file mixed into the published mic), bound
+///   to each room this service connects; [music] is its low-level bridge.
 /// - [videoEffect]: an optional [GravixVideoEffect] (beauty, blur, …) on the
 ///   local camera track, from an effect package. None by default: the service
 ///   then calls no effect code and [videoEffectActive] stays false.
@@ -90,6 +92,7 @@ class GravixRoomService implements GravixAudioHost {
     GravixVideoEffect? videoEffect,
     @Deprecated('Pass videoEffect: (a GravixVideoEffect). Removal no earlier than 2027-09.') GravixBeautyFilter? beauty,
     GravixMusicController? music,
+    GravixRoomMusic? roomMusic,
     this.analytics,
     this.reconnectPolicy,
     GravixRegionProber? regionProber,
@@ -104,6 +107,7 @@ class GravixRoomService implements GravixAudioHost {
        assert(videoEffect == null || beauty == null, 'pass videoEffect OR the deprecated beauty, not both'),
        _effect = GravixVideoEffectBinding(videoEffect ?? (beauty == null ? null : GravixBeautyFilterEffect(beauty))),
        music = music ?? GravixMusicController(),
+       roomMusic = roomMusic ?? GravixRoomMusic(null),
        _regionProber = regionProber ?? GravixRegionProber(),
        _regionCache = regionDecisionCache ?? GravixRegionDecisionCache.shared,
        _connectRoom = connectRoom ?? ((room, url, token) => room.connect(url, token));
@@ -194,6 +198,11 @@ class GravixRoomService implements GravixAudioHost {
   /// (start/pause/resume/stop/seek/volume) is app-controlled through this
   /// field; the native callback is installed automatically on connect.
   final GravixMusicController music;
+
+  /// Room music for the connected room: `start`, `pause`, `stop`, volumes,
+  /// ducking, loop and a state listenable. Re-bound to every room this service
+  /// connects; a disconnect stops the music. See [GravixRoomMusic].
+  final GravixRoomMusic roomMusic;
 
   /// How the engine backs off (and when it gives up) after the connection is
   /// lost mid-session. Null = the SDK default ([DefaultReconnectPolicy]).
@@ -614,7 +623,194 @@ class GravixRoomService implements GravixAudioHost {
     //   room-code screen lights the OS privacy indicator and takes the audio mode
     //   from other apps while the user has not joined anything.
     bool earlyMicTrack = false,
+    // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
+    //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
+    //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
+    //   RED), silence included. Speech rooms only: Opus' voice detector can treat
+    //   quiet background music as silence (singing hosts, the music mixer), so
+    //   leave it off where music matters. Kept across RED auto republishes.
+    bool dtx = false,
+  }) {
+    // GRAVIX(one-session, 2026-10-05): one session per room + identity. Field: a
+    // second join for the same identity raced the first one's resume on another
+    // node, moved the room's origin and cost ~2.5 min of instability.
+    //  * the same room + identity + token while a connect is in flight: that
+    //    connect's result (a double tap / re-entry is not a second session);
+    //  * the same room + identity + token while connected or reconnecting: the
+    //    current session is kept (true). disconnect() first forces a new one;
+    //    reconnectWithToken (another token) reconnects as before;
+    //  * anything else waits for a connect in flight to settle, then tears the
+    //    previous session down (leave first) before joining: never two at once.
+    final key = gravixSessionKey(token);
+    final inFlight = _connectInFlight;
+    if (inFlight != null && key != null && inFlight.key == key && inFlight.token == token) {
+      debugPrint('Gravix connect: the same room/identity is already joining; not starting a second session');
+      return inFlight.done.future;
+    }
+    final room = _room;
+    if (inFlight == null &&
+        gravixKeepSession(
+          key: key,
+          token: token,
+          sessionKey: _sessionKey,
+          sessionToken: _sessionToken,
+          state: room?.connectionState,
+        )) {
+      debugPrint('Gravix connect: already in this room as this identity (${room?.connectionState.name}); session kept');
+      return Future<bool>.value(true);
+    }
+    final mine = _ConnectInFlight(key, token);
+    _connectInFlight = mine;
+    () async {
+      try {
+        if (inFlight != null) await inFlight.done.future.then((_) {}, onError: (Object _) {});
+        final ok = await _connectOnce(
+          url: url,
+          token: token,
+          publishMic: publishMic,
+          enableVideo: enableVideo,
+          lowDataMode: lowDataMode,
+          regionUrls: regionUrls,
+          regionEntries: regionEntries,
+          homeRegion: homeRegion,
+          regionProbe: regionProbe,
+          regionDecisionCache: regionDecisionCache,
+          regionReprobeOnRestart: regionReprobeOnRestart,
+          joinTimeline: joinTimeline,
+          parallelAudioSession: parallelAudioSession,
+          analyticsUrl: analyticsUrl,
+          fastAnswer: fastAnswer,
+          earlyCallAudio: earlyCallAudio,
+          publishInBackground: publishInBackground,
+          red: red,
+          redLossThresholdPct: redLossThresholdPct,
+          earlyMicTrack: earlyMicTrack,
+          dtx: dtx,
+        );
+        if (ok) {
+          _sessionKey = key;
+          _sessionToken = token;
+        }
+        mine.done.complete(ok);
+      } catch (e, st) {
+        mine.done.completeError(e, st);
+      } finally {
+        if (identical(_connectInFlight, mine)) _connectInFlight = null;
+      }
+    }();
+    return mine.done.future;
+  }
+
+  /// Whether a connect() for [key] / [token] keeps the current session (same
+  /// room, identity and token, and that session is connected or reconnecting).
+  @visibleForTesting
+  static bool gravixKeepSession({
+    required String? key,
+    required String token,
+    required String? sessionKey,
+    required String? sessionToken,
+    required ConnectionState? state,
+  }) =>
+      key != null &&
+      key == sessionKey &&
+      token == sessionToken &&
+      (state == ConnectionState.connected || state == ConnectionState.reconnecting);
+
+  _ConnectInFlight? _connectInFlight;
+  String? _sessionKey;
+  String? _sessionToken;
+
+  /// `room \u0000 identity` of a join token; null when it cannot be read (then no
+  /// dedupe applies and connect() behaves as before).
+  @visibleForTesting
+  static String? gravixSessionKey(String token) {
+    try {
+      final p = GravixRtcJwtPayload.fromToken(token);
+      final room = p?.video?.room;
+      final identity = p?.identity;
+      if (room == null || room.isEmpty || identity == null || identity.isEmpty) return null;
+      return '$room\u0000$identity';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<bool> _connectOnce({
+    required String url,
+    required String token,
+    bool publishMic = false,
+    bool enableVideo = false,
+    bool lowDataMode = false,
+    List<String> regionUrls = const <String>[],
+    List<GravixRegionUrl> regionEntries = const <GravixRegionUrl>[],
+    // The room's home region (a viewer / guest in someone else's room; the
+    // token's `home_region`): the start-up measurement's pick moves to it when it
+    // is within max(25 ms, 30 %) of the fastest region, so the join skips the
+    // relay hop to the host's region. Hosts pass none. See gravixPickMeasuredRegion.
+    String? homeRegion,
+    bool regionProbe = false,
+    bool regionDecisionCache = true,
+    bool regionReprobeOnRestart = false,
+    GravixJoinTimelineInput? joinTimeline,
+    bool parallelAudioSession = false,
+    // [analyticsUrl] the analytics collector's base url for THIS join's report
+    //   (overrides the service's [analytics]); see [GravixAnalytics].
+    String? analyticsUrl,
+    // <candidate:fastAnswer>
+    // [fastAnswer] EXPERIMENTAL, opt-in. Send the subscriber answer as soon as it
+    //   is created instead of after `setLocalDescription` returns. On a phone the
+    //   first audio offer's `setLocalDescription` takes ~350 ms (audio playout
+    //   starts inside it) and the SFU forwards nothing until it has the answer.
+    //   Risk: media can arrive before the local description is applied - see
+    //   `gravixAnswerSubscriberOffer` and doc/FAST_CONNECT_INTEGRATION.md.
+    bool fastAnswer = false,
+    // </candidate:fastAnswer>
+    // <candidate:earlyCallAudio>
+    // [earlyCallAudio] EXPERIMENTAL, opt-in, Android only. Activate call audio
+    //   (focus, communication mode, route) at the WebSocket dial instead of when the
+    //   first remote audio track arrives - see [GravixEarlyCallAudio]. The user
+    //   hears other apps' audio pause ~0.5 s earlier than today; the microphone is
+    //   not touched. Ignored under audio routing v2.
+    bool earlyCallAudio = false,
+    // </candidate:earlyCallAudio>
+    // [publishInBackground] opt-in (2026-09-29). connect() returns once the peer
+    //   connection is up; the mic (and camera) publication, the music-mixer
+    //   install and the audio route run behind it. Field logs (Android, Kuwait ->
+    //   doh1, ~50 ms RTT): ~0.5 s between pcConnected and connect() returning,
+    //   spent publishing the mic (track create + capture start + AddTrack round
+    //   trip + publisher renegotiation) and, in a video room, opening and
+    //   publishing the camera. Nothing the user hears depends on it: remote audio
+    //   plays from the subscriber side. The timeline's `micPublished` mark says
+    //   when the mic went live; setMicEnabled / setCameraEnabled / disconnect wait
+    //   for the initial publication. Off = exactly the old order.
+    bool publishInBackground = false,
+    // [red] RED (redundant audio) for the microphone: on (default, as 0.4.3), off,
+    //   or auto = plain Opus until the uplink loses >= [redLossThresholdPct] % for
+    //   ~20 s (not with an RTT above 1.5 s), then the mic is republished with RED
+    //   once. RED roughly doubles the
+    //   audio upload (field 2026-09-30: ~125 vs ~50 kbps) and recovers lost
+    //   packets instead of concealing them; see gravix_red_mode.dart.
+    GravixRedMode red = GravixRedMode.on,
+    double redLossThresholdPct = kGravixRedLossThresholdPct,
+    // [earlyMicTrack] opt-in (2026-09-30). With [publishMic]: the microphone track
+    //   (capture start, the slow part of the mic step: 140-490 ms in the field) is
+    //   created right after the audio session, IN PARALLEL with the signalling, and
+    //   the join's mic step only publishes it. Field Android joins: micPublished
+    //   came 145-494 ms after pcConnected. Pass it only when the microphone
+    //   permission is already granted (otherwise the OS dialog would come up in
+    //   the middle of the join). Not before the tap: a capture running on the
+    //   room-code screen lights the OS privacy indicator and takes the audio mode
+    //   from other apps while the user has not joined anything.
+    bool earlyMicTrack = false,
+    // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
+    //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
+    //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
+    //   RED), silence included. Speech rooms only: Opus' voice detector can treat
+    //   quiet background music as silence (singing hosts, the music mixer), so
+    //   leave it off where music matters. Kept across RED auto republishes.
+    bool dtx = false,
   }) async {
+    _dtx = dtx;
     final joinWatch = Stopwatch()..start();
     // latched for this join: flipping the switch mid-join changes nothing
     final fastJoin = GravixFastJoin.enabled;
@@ -961,6 +1157,7 @@ class GravixRoomService implements GravixAudioHost {
       }
 
       _room = room;
+      roomMusic.attach(room);
       if (regionProbe && regionReprobeOnRestart && effectiveRegionUrls.isNotEmpty) {
         room.engine.restartRegionStrategy = GravixProbeRestartStrategy(
           pinnedUrl: url,
@@ -1162,7 +1359,24 @@ class GravixRoomService implements GravixAudioHost {
   /// not answer is closed (timeline `standby.outcome: stalled_redialed`).
   ///
   /// Same as [GravixStandby.open] (0.4.8), which needs no service.
-  Future<bool> standby(String url, String token, {int? rttMs}) => GravixStandby.open(url, token, rttMs: rttMs);
+  ///
+  /// Not while this service is already joining or in that room as that identity
+  /// (2026-10-05): nothing to warm then; resolves false.
+  Future<bool> standby(String url, String token, {int? rttMs}) {
+    final key = gravixSessionKey(token);
+    if (key != null &&
+        (_connectInFlight?.key == key ||
+            gravixKeepSession(
+              key: key,
+              token: token,
+              sessionKey: _sessionKey,
+              sessionToken: _sessionToken,
+              state: _room?.connectionState,
+            ))) {
+      return Future<bool>.value(false);
+    }
+    return GravixStandby.open(url, token, rttMs: rttMs);
+  }
 
   /// Call when the app comes back to the foreground: every standby connection is
   /// closed and opened again. One opened while the app was paused (behind a
@@ -1404,6 +1618,8 @@ class GravixRoomService implements GravixAudioHost {
     // <candidate:earlyCallAudio>
     bool earlyCallAudio = false,
     // </candidate:earlyCallAudio>
+    // see connect's `dtx`
+    bool dtx = false,
   }) async {
     lastTokenError = null;
     final GravixJoinCredentials credentials;
@@ -1444,6 +1660,7 @@ class GravixRoomService implements GravixAudioHost {
       // <candidate:earlyCallAudio>
       earlyCallAudio: earlyCallAudio,
       // </candidate:earlyCallAudio>
+      dtx: dtx,
     );
   }
 
@@ -1645,6 +1862,8 @@ class GravixRoomService implements GravixAudioHost {
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
+    // null = the current call's (connect's `dtx`)
+    bool? dtx,
   }) async {
     if (_url == null) return false;
     // regionEntries is forwarded too. Until 2026-09-19 only the bare url strings
@@ -1662,6 +1881,7 @@ class GravixRoomService implements GravixAudioHost {
       regionProbe: regionProbe,
       regionDecisionCache: regionDecisionCache,
       regionReprobeOnRestart: regionReprobeOnRestart,
+      dtx: dtx ?? _dtx,
     );
   }
 
@@ -2216,13 +2436,18 @@ class GravixRoomService implements GravixAudioHost {
   /// join's mic step takes it.
   Future<LocalAudioTrack>? _earlyMic;
 
-  static AudioPublishOptions _audioPublishOptions({required bool red}) => AudioPublishOptions(
-    encoding: const AudioEncoding(maxBitrate: 64000),
-    // dtx OFF = keep transmitting during silence (no clipped word
-    // onsets for singing hosts)
-    dtx: false,
-    red: red,
-  );
+  /// The microphone's publish options. [dtx] off (the default) keeps
+  /// transmitting during silence (no clipped word onsets for singing hosts);
+  /// on, silence costs ~1-2 kbps instead of the full rate (connect's `dtx`).
+  @visibleForTesting
+  static AudioPublishOptions audioPublishOptionsFor({required bool red, bool dtx = false}) =>
+      AudioPublishOptions(encoding: const AudioEncoding(maxBitrate: 64000), dtx: dtx, red: red);
+
+  AudioPublishOptions _audioPublishOptions({required bool red}) => audioPublishOptionsFor(red: red, dtx: _dtx);
+
+  /// DTX for this call's microphone (connect's `dtx`); kept by every republish.
+  bool _dtx = false;
+  bool get dtx => _dtx;
 
   GravixRedMode _redMode = GravixRedMode.on;
   Timer? _redAutoTimer;
@@ -2261,18 +2486,25 @@ class GravixRoomService implements GravixAudioHost {
     });
   }
 
-  /// The mic again, same capture (stopLocalTrackOnUnpublish is off), with RED.
-  /// Waits for a mic transition in flight; the mute state is kept.
+  /// The mic again with RED, on a NEW track on the same capture: the old one
+  /// is disposed by its unpublish, so republishing it lost the microphone
+  /// (0.4.10 fix, same as the room-music DTX swap). Waits for a mic transition
+  /// in flight; the mute state is kept; a refused publish is retried without
+  /// RED, so the host keeps a microphone.
   Future<void> _republishMicWithRed(LocalAudioTrack track) async {
     final w = _micWorker;
     if (w != null) await w;
     final local = localParticipant;
-    final pub = local?.getTrackPublicationBySource(TrackSource.microphone);
-    if (local == null || pub == null || !identical(pub.track, track)) return;
-    final wasMuted = pub.muted;
-    await local.removePublishedTrack(pub.sid, notify: true);
-    final again = await local.publishAudioTrack(track, publishOptions: _audioPublishOptions(red: true));
-    if (wasMuted) await again.mute();
+    if (local == null) return;
+    final room = _room;
+    final (fresh, ok) = await gravixRepublishMic(
+      local,
+      track,
+      wanted: _audioPublishOptions(red: true),
+      fallback: track.lastPublishOptions ?? _audioPublishOptions(red: false),
+      stillWanted: () => identical(_room, room),
+    );
+    debugPrint('RED auto: microphone republished=${fresh != null} red=$ok');
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2704,6 +2936,7 @@ class GravixRoomService implements GravixAudioHost {
     await _joinPhases?.dispose();
     await _effect.dispose();
     music.dispose();
+    await roomMusic.dispose();
     lowDataActive.dispose();
     activeSpeakers.dispose();
     isConnected.dispose();
@@ -2747,4 +2980,11 @@ Map<String, Object?>? _regionsMeasuredForReport() {
   } catch (_) {
     return null;
   }
+}
+
+class _ConnectInFlight {
+  _ConnectInFlight(this.key, this.token);
+  final String? key;
+  final String token;
+  final Completer<bool> done = Completer<bool>();
 }

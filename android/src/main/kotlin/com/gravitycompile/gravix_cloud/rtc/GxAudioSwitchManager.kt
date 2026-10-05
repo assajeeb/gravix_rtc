@@ -166,7 +166,11 @@ internal class GxAudioSwitchManager(private val context: Context) {
     sessionConfig: SessionConfig,
     speakerRouting: SpeakerRouting,
   ): AbstractAudioSwitch {
-    val focusListener = AudioManager.OnAudioFocusChangeListener { }
+    // Room music pauses on a transient focus loss (and resumes on regain); the
+    // room's own audio needs nothing here.
+    val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+      com.gravitycompile.gravix_cloud.music.MusicMixerEngine.onAudioFocusChange(change)
+    }
     // API-aware switch selection, matching the upstream Android RTC SDK's
     // AudioSwitchHandler: CommDeviceAudioSwitch uses the modern
     // AudioManager.setCommunicationDevice routing on API 31+.

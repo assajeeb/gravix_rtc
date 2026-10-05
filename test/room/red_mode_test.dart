@@ -61,7 +61,7 @@ void main() {
         const MethodChannel('FlutterWebRTC.Method'),
         (call) async => call.method == 'getSources' ? <String, dynamic>{'sources': <dynamic>[]} : null,
       );
-      m.setMockMethodCallHandler(const MethodChannel('gravity.music_mixer'), (call) async => true);
+      m.setMockMethodCallHandler(const MethodChannel('com.gravitycompile.gravix_rtc/music'), (call) async => true);
       m.setMockMethodCallHandler(const MethodChannel('com.ryanheise.audio_session'), (call) async => null);
       for (final name in const ['com.ryanheise.android_audio_manager', 'com.ryanheise.av_audio_session']) {
         m.setMockMethodCallHandler(

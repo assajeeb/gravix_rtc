@@ -36,6 +36,7 @@ import '../options.dart' as track_options;
 import 'engine_mic_mute.dart';
 import 'local.dart';
 import 'mic_uplink_pause.dart';
+import 'music_voice_mute.dart';
 
 class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMixin {
   // Options used for this track
@@ -98,6 +99,24 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   @override
   Future<bool> mute({bool stopOnMute = true}) async {
     if (muted) return false;
+    // Room music playing (gravix_rtc 0.4.10): a voice-only mute, whatever
+    // stopOnMute says. The module zeroes the voice, the mixer keeps adding the
+    // music, and the publication stays live on the wire (the SFU stops
+    // forwarding a track signalled muted, which would cut the music): no
+    // uplink cap, no mute signal. GravixRoomMusic turns it into a normal mute
+    // when the music ends.
+    if (GravixEngineMicMute.supported && GravixMusicVoiceMute.appliesTo(this)) {
+      final previous = _engineMuteOwner;
+      if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
+      if (await GravixEngineMicMute.engage()) {
+        _engineMuted = true;
+        _voiceOnlyMuted = true;
+        _engineMuteOwner = this;
+        logger.info('mic mute: voice-only (room music playing; the publication stays live)');
+        updateMuted(true, shouldSendSignal: false);
+        return true;
+      }
+    }
     if (!stopOnMute && GravixEngineMicMute.supported) {
       final previous = _engineMuteOwner;
       if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
@@ -121,6 +140,16 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   @override
   Future<bool> unmute({bool stopOnMute = true}) async {
     if (!muted) return false;
+    if (_voiceOnlyMuted) {
+      // the wire never saw the mute: no signal, no cap to lift
+      _voiceOnlyMuted = false;
+      _engineMuted = false;
+      if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+      await GravixEngineMicMute.release();
+      await enable();
+      updateMuted(false, shouldSendSignal: false);
+      return true;
+    }
     // A failed restore is logged (severe) and the unmute still goes ahead: the
     // user asked to be heard, and low-rate audio beats none.
     await _uplinkPause.resume(sender);
@@ -137,6 +166,55 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
   final _uplinkPause = MicUplinkPause();
 
+  /// Muted for the user (voice zeroed in the audio device module) while the
+  /// publication stays live for room music. See [mute].
+  bool _voiceOnlyMuted = false;
+
+  /// Whether the current mute is a voice-only mute (room music playing).
+  bool get voiceOnlyMuted => _voiceOnlyMuted;
+
+  /// The mute state the server should have: a voice-only mute is not one.
+  @override
+  bool get wireMuted => muted && !_voiceOnlyMuted;
+
+  /// Room music started while this track is muted: keeps the voice muted and
+  /// puts the track back on the wire (the caller sends the unmute signal).
+  /// Returns false when the platform cannot mute in the audio device module;
+  /// the track is then left as it was.
+  @internal
+  Future<bool> enterMusicVoiceMute() async {
+    if (!muted || _voiceOnlyMuted) return muted;
+    if (!GravixEngineMicMute.supported) return false;
+    if (!_engineMuted) {
+      // a disabled (stopOnMute) mute: zero the voice in the module FIRST, then
+      // bring the capture back, so not one frame of voice goes out
+      final previous = _engineMuteOwner;
+      if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
+      _engineMuteOwner = this;
+      if (!await GravixEngineMicMute.engage()) {
+        if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+        return false;
+      }
+      if (!isActive) await restartTrack();
+      await enable();
+      _engineMuted = true;
+    }
+    await _uplinkPause.resume(sender);
+    _voiceOnlyMuted = true;
+    return true;
+  }
+
+  /// Room music ended while voice-only muted: becomes a normal (module) mute,
+  /// uplink capped; the caller sends the mute signal. Returns whether it was
+  /// voice-only muted.
+  @internal
+  Future<bool> leaveMusicVoiceMute() async {
+    if (!_voiceOnlyMuted) return false;
+    _voiceOnlyMuted = false;
+    await _uplinkPause.pause(sender);
+    return true;
+  }
+
   /// Whether the muted-uplink bitrate cap is applied.
   @visibleForTesting
   bool get uplinkCapped => _uplinkPause.capped;
@@ -148,7 +226,7 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   @override
   Future<bool> onPublish() async {
     final did = await super.onPublish();
-    if (muted) await _uplinkPause.pause(sender);
+    if (wireMuted) await _uplinkPause.pause(sender);
     return did;
   }
 
@@ -164,6 +242,7 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     if (!_engineMuted) return;
     await disable();
     _engineMuted = false;
+    _voiceOnlyMuted = false;
     if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
     await GravixEngineMicMute.release();
   }

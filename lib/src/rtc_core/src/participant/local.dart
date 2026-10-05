@@ -120,7 +120,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       final pub = trackPublications[trackInfo.sid];
       if (pub == null) continue;
 
-      final localMuted = pub.muted;
+      // a voice-only mute (room music) is live on the wire
+      final localMuted = pub.track?.wireMuted ?? pub.muted;
       if (localMuted != trackInfo.muted) {
         logger.fine('updating server mute state after reconcile, track: ${trackInfo.sid}, muted: $localMuted');
         try {
@@ -228,7 +229,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         name: publishOptions.name ?? AudioPublishOptions.defaultMicrophoneName,
         type: track.kind.toPBType(),
         source: track.source.toPBType(),
-        muted: track.muted,
+        muted: track.wireMuted,
         stream: buildStreamId(publishOptions, track.source),
         disableDtx: !publishOptions.dtx,
         disableRed: gravixDisableRed(e2ee: room.e2eeManager != null, red: publishOptions.red),

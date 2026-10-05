@@ -10,8 +10,8 @@ vendored in-tree, with an app-facing room service on top.
 flutter pub add gravix_rtc
 ```
 
-Platforms: **Android** and **iOS**. Background-music mixing is Android-only for
-now.
+Platforms: **Android** and **iOS**. Room music is complete on Android; on iOS it
+plays (mic volume and ducking are Android-only) and is not yet verified on a device.
 
 ## Features
 
@@ -42,7 +42,7 @@ now.
 - **Prewarm** — `prewarm()` fetches the token, picks the region and warms DNS/TLS
   and the audio session while the room list is on screen.
 - **Audio** — opt-in v2 routing (`GravixAudioRouting.v2`), audio-first mode for
-  2G/EDGE (`GravixAudioFirst`), background-music mixing (`GravixMusicController`,
+  2G/EDGE (`GravixAudioFirst`), room music mixed into the mic (`GravixRoomMusic`,
   Android and iOS; see [Music mixer](#music-mixer)).
 - **Large rooms** — `GravixRoomView`, `GravixAudioOnlyFallback`,
   `GravixPublishPresets`.
@@ -125,7 +125,7 @@ The protobuf package is renamed to `gravixcloud` before regeneration; see
 ## Native platform setup
 
 The package ships a native plugin on both platforms (`gravix_client`,
-`gravity.music_mixer`). Nothing to register by hand; the sections below are
+`com.gravitycompile.gravix_rtc/music`). Nothing to register by hand; the sections below are
 what the **app** has to declare.
 
 ### Audio routing: speaker, earpiece, Bluetooth
@@ -243,25 +243,65 @@ is wasted on a clean uplink and competes with video on a constrained one.
 E2EE always turns RED off. Same options and policy as the JS SDK (`red`,
 `redLossThresholdPct`).
 
+### Microphone DTX
+
+`connect(dtx: true)` (also `connectWithTokenProvider` / `reconnectWithToken`) turns
+on Opus DTX for the published microphone: during digital silence the encoder sends
+a comfort-noise frame every ~400 ms instead of 50 frames a second. Default `false`
+(continuous transmission). Measured on an Android phone (64 kbps cap): a silent room drops
+from ~110 kbps (RED) / ~55 kbps (plain Opus) to 2-10 kbps, a muted mic from ~7 to
+~0.2 kbps, speech is unchanged; audible room noise counts as activity for Opus, so
+the saving there is small. RED roughly doubles the audio rate (see above). Use it for speech rooms; leave it off
+where music matters (singing hosts, the music mixer): Opus can treat quiet music as
+silence.
+
 ### Music mixer
 
+Room music: a local file is decoded on the phone and mixed into the **published
+microphone** (Android: in WebRTC's capture callback; iOS: into the audio engine's
+input mixer). One audio stream, no second track, no server bot, no upload.
+
 ```dart
-final music = roomService.music; // or GravixMusicController()
-await music.start(path: file.path, gain: 0.6, monitor: true);
-await music.setVolume(0.4);
-await music.pause(); await music.resume(); await music.seekTo(30000);
-music.onCompleted.listen((_) => debugPrint('track finished'));
+final music = GravixRoomMusic(room);   // or roomService.roomMusic
+await music.start(GravixMusicSource.file(path));   // .contentUri(uri) / .asset('assets/a.mp3')
+await music.pause(); await music.resume(); await music.seek(const Duration(seconds: 30));
+await music.setMusicVolume(0.6);       // 0..1
+await music.setMicVolume(1.0);         // voice level in the mix (Android)
+await music.setDucking(true);          // music dips while the host talks (Android)
+await music.setLoop(true);
+music.state;                           // ValueListenable<GravixMusicState>: status, position, duration
+music.completed.listen((_) => playNext());
 await music.stop();
 ```
 
-- **Android**: decoded PCM is added to WebRTC's microphone capture buffer, so
-  listeners hear it; `monitor` plays the same samples locally. Gain 0.0–2.0.
-- **iOS**: an `AVAudioPlayerNode` inside WebRTC's own audio engine, connected
-  to the engine's input mixer (what listeners hear); `monitor` also feeds the
-  playout mixer, so voice processing cancels it from the mic. Gain is clamped
-  to 0.0–1.0. Playback begins once the audio engine runs (mic published or
-  remote audio playing). This path is compile-verified only so far: confirm on
-  a device before relying on it (see `ios/README.md`).
+- **Needs** a connected room with the microphone published. Errors are
+  `GravixMusicException` with a stable `code` (`noMicrophone`, `openFailed`,
+  `captureNotReady`, ...); a bad file fails at `start()`, never silently.
+- **Mute while music plays (Android):** a voice-only mute. The voice is zeroed in
+  the audio device module, the music keeps going out, and the publication stays
+  live on the wire (the SFU stops forwarding a track signalled muted): the app
+  sees `muted`, **remote participants see the mic as on** while music plays. When
+  the music stops the mute becomes a normal one. `start()` while muted plays the
+  music with the voice still muted. `GravixMusicOptions(continueWhileMicMuted:
+  false)` keeps the old behaviour (a mute silences voice and music). iOS: a mute
+  also silences the music.
+- **Publish settings:** while music plays the mic sender's maxBitrate is raised to
+  `musicMaxBitrate` (96 kbps) through RTP sender parameters (no republish) and
+  restored after. RED is left as published (switching it needs a republish, an
+  audible gap) and doubles the rate on the wire. A mic published with DTX on is
+  republished once with DTX off for the music and back after (DTX treats quiet
+  music as silence); nothing happens for the default DTX-off mic.
+- **Interruptions (Android):** a phone call (audio mode RINGTONE / IN_CALL) or a
+  transient audio-focus loss pauses the music (`state.interrupted`) and resumes it
+  after; a user pause is never auto-resumed.
+- **Lifecycle:** a room disconnect, `stop()` or `dispose()` releases the decoder
+  and the monitor. The music runs on the capture thread, so it keeps playing in
+  the background as long as the app keeps the room and its mic alive.
+- **Host monitor:** `GravixMusicOptions(monitor: true)` (default) plays the same
+  samples locally on the room's stream type; the phone's echo canceller removes
+  it from the mic.
+- `GravixMusicController` (`roomService.music`) is the low-level channel bridge
+  under it; apps should use `GravixRoomMusic`.
 
 ## Licensing
 

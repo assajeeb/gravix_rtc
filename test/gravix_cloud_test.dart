@@ -71,7 +71,7 @@ void main() {
   });
 
   group('GravixMusicController', () {
-    const MethodChannel channel = MethodChannel('gravity.music_mixer');
+    const MethodChannel channel = MethodChannel('com.gravitycompile.gravix_rtc/music');
 
     Future<List<MethodCall>> drive(Future<void> Function(GravixMusicController c) body) async {
       final calls = <MethodCall>[];

@@ -20,7 +20,7 @@ void main() {
     order = <String>[];
     GravixAudioRouting.v2 = false;
     final m = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    m.setMockMethodCallHandler(const MethodChannel('gravity.music_mixer'), (call) async {
+    m.setMockMethodCallHandler(const MethodChannel('com.gravitycompile.gravix_rtc/music'), (call) async {
       if (call.method == 'install') {
         order.add('install:start');
         await installGate.future;

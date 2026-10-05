@@ -5,7 +5,9 @@ import AVFoundation
 import Flutter
 import WebRTC
 
-/// iOS counterpart of Android's `MusicMixerPlugin` on channel `gravity.music_mixer`.
+/// iOS counterpart of Android's `MusicMixerPlugin` on channel
+/// `com.gravitycompile.gravix_rtc/music` (gravix_rtc 0.4.10; <= 0.4.9 used
+/// `gravity.music_mixer`, which collided with the apps' own audio kits).
 ///
 /// ## How the music reaches listeners
 ///
@@ -38,7 +40,11 @@ import WebRTC
 ///  - Verified to compile only. Mixing into the WebRTC input path needs a real
 ///    device to confirm; see ios/README.md.
 ///
-/// Methods: install -> Bool, start {path,gain,monitor} -> Bool,
+/// Not on iOS (UNSUPPORTED error): setMicVolume, setDucking. A mic mute on iOS
+/// also silences the music for listeners.
+///
+/// Methods: install -> Bool, start {source|path, musicVolume|gain, monitor, loop}
+/// -> {durationMs} (Bool for the legacy `path` form), setLoop {on}, configure,
 /// pause / resume / stop -> nil, setVolume {gain}, seekTo {positionMs},
 /// isActive -> Bool, getState -> {active,paused,positionMs,durationMs};
 /// native -> Dart: onCompleted.
@@ -68,6 +74,7 @@ final class GravixMusicMixer: NSObject {
         let monitor: Bool
         var gain: Float
         var paused = false
+        var loop = false
         var playing = false
         var attached = false
         var connected = false
@@ -90,7 +97,7 @@ final class GravixMusicMixer: NSObject {
     // MARK: - Registration
 
     static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(name: "gravity.music_mixer", binaryMessenger: registrar.messenger())
+        let channel = FlutterMethodChannel(name: "com.gravitycompile.gravix_rtc/music", binaryMessenger: registrar.messenger())
         shared.channel = channel
         channel.setMethodCallHandler { call, result in
             shared.handle(call, result: result)
@@ -105,27 +112,37 @@ final class GravixMusicMixer: NSObject {
             // GravixClientPlugin installs at registration. Nothing to do here.
             result(true)
         case "start":
-            guard let path = args["path"] as? String else {
-                result(FlutterError(code: "MIXER_ERROR", message: "path is required", details: nil))
+            let legacy = args["source"] as? String == nil
+            guard let path = (args["source"] as? String) ?? (args["path"] as? String) else {
+                result(FlutterError(code: "OPEN_FAILED", message: "no source", details: nil))
                 return
             }
-            let gain = (args["gain"] as? NSNumber)?.floatValue ?? 1.0
+            let gain = ((args["musicVolume"] as? NSNumber) ?? (args["gain"] as? NSNumber))?.floatValue ?? 1.0
             let monitor = (args["monitor"] as? Bool) ?? true
+            let loop = (args["loop"] as? Bool) ?? false
             do {
-                try start(path: path, gain: gain, monitor: monitor)
-                result(true)
+                try start(path: path, gain: gain, monitor: monitor, loop: loop)
+                lock.lock(); let dur = session?.durationMs ?? -1; lock.unlock()
+                result(legacy ? true : ["durationMs": dur])
             } catch {
-                result(FlutterError(code: "MIXER_ERROR", message: error.localizedDescription, details: nil))
+                result(FlutterError(code: "OPEN_FAILED", message: error.localizedDescription, details: nil))
             }
+        case "configure":
+            result(nil)
+        case "setLoop":
+            lock.lock(); session?.loop = (args["on"] as? Bool) ?? false; lock.unlock()
+            result(nil)
+        case "setMicVolume", "setDucking":
+            result(FlutterError(code: "UNSUPPORTED", message: "\(call.method) is Android-only", details: nil))
         case "pause":
             pause(); result(nil)
         case "resume":
             resume(); result(nil)
         case "stop":
             stop(); result(nil)
-        case "setVolume":
-            setGain((args["gain"] as? NSNumber)?.floatValue ?? 1.0); result(nil)
-        case "seekTo":
+        case "setVolume", "setMusicVolume":
+            setGain(((args["volume"] as? NSNumber) ?? (args["gain"] as? NSNumber))?.floatValue ?? 1.0); result(nil)
+        case "seekTo", "seek":
             seek(toMs: (args["positionMs"] as? NSNumber)?.intValue ?? 0); result(nil)
         case "isActive":
             result(isActive)
@@ -178,7 +195,7 @@ final class GravixMusicMixer: NSObject {
 
     // MARK: - Control (platform thread)
 
-    private func start(path: String, gain: Float, monitor: Bool) throws {
+    private func start(path: String, gain: Float, monitor: Bool, loop: Bool = false) throws {
         let url = path.hasPrefix("file://") ? URL(string: path)! : URL(fileURLWithPath: path)
         let file = try AVAudioFile(forReading: url)
         guard file.processingFormat.sampleRate > 0, file.processingFormat.channelCount > 0, file.length > 0 else {
@@ -188,6 +205,7 @@ final class GravixMusicMixer: NSObject {
         lock.lock(); defer { lock.unlock() }
         stopLocked()
         let session = Session(file: file, gain: min(max(gain, 0), 1), monitor: monitor)
+        session.loop = loop
         self.session = session
         connectLocked(session)
         scheduleLocked(session, fromFrame: 0)
@@ -241,7 +259,8 @@ final class GravixMusicMixer: NSObject {
     private func state() -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         guard let session else {
-            return ["active": false, "paused": false, "positionMs": 0, "durationMs": -1]
+            return ["active": false, "paused": false, "positionMs": 0, "durationMs": -1,
+                    "captureReady": inputMixer != nil, "captureLive": inputMixer != nil, "installed": true]
         }
         let frames = session.paused || !session.playing ? session.lastPositionFrames : currentFrameLocked(session)
         return [
@@ -249,6 +268,9 @@ final class GravixMusicMixer: NSObject {
             "paused": session.paused,
             "positionMs": Int(Double(frames) / session.sampleRate * 1000),
             "durationMs": session.durationMs,
+            "captureReady": inputMixer != nil,
+            "captureLive": inputMixer != nil,
+            "installed": true,
         ]
     }
 
@@ -324,6 +346,15 @@ final class GravixMusicMixer: NSObject {
             guard let self else { return }
             self.lock.lock()
             let stillCurrent = self.session?.generation == generation
+            if stillCurrent, let current = self.session, current.loop {
+                // loop: play the file again from the start
+                current.playing = false
+                self.scheduleLocked(current, fromFrame: 0)
+                current.lastPositionFrames = 0
+                self.playWhenEngineRunsLocked(current)
+                self.lock.unlock()
+                return
+            }
             if stillCurrent { self.stopLocked() }
             self.lock.unlock()
             if stillCurrent { self.channel?.invokeMethod("onCompleted", arguments: nil) }

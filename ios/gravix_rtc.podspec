@@ -16,10 +16,12 @@ A new Flutter plugin project.
   s.source_files = 'gravix_rtc/Sources/gravix_rtc/**/*.swift'
   s.dependency 'Flutter'
   # The native RTC plugin talks to flutter_webrtc's audio device module and
-  # RTCAudioSession. Pin WebRTC-SDK to the exact version flutter_webrtc 1.6.0
-  # uses so CocoaPods resolves a single WebRTC binary.
+  # RTCAudioSession. WebRTC-SDK without a version: flutter_webrtc pins it
+  # (144.7559.09 for 1.6.0, 150.7871.01 for 1.6.2+hotfix.3), and one WebRTC
+  # binary is resolved. 0.4.10: was pinned to 144, which conflicted with every
+  # flutter_webrtc after 1.6.0.
   s.dependency 'flutter_webrtc'
-  s.dependency 'WebRTC-SDK', '144.7559.09'
+  s.dependency 'WebRTC-SDK'
   s.static_framework = true
   s.frameworks = 'AVFoundation', 'ReplayKit'
   s.platform = :ios, '13.0'

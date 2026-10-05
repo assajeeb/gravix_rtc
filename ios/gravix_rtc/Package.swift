@@ -16,16 +16,16 @@ let package = Package(
         // The flutter_webrtc plugin package. Its `WebRTC` product re-exports the
         // same WebRTC binary target, so the app links exactly one copy.
         //
-        // The path is the name the Flutter tool gives flutter_webrtc's symlink
-        // (`<name>-<version>`, next to this package's own symlink), spelled out
-        // on purpose. Written as the bare package name (dot-dot-slash flutter_webrtc,
-        // not quoted here because the tool greps this file) the tool would instead
-        // rsync this ENTIRE package root (example/ and its build/ included)
-        // into the app's build/ios/SourcePackages to rewrite the path, and for
-        // the in-repo example app, whose build/ lives inside that root, every
-        // build nested one more copy (tens of GB after a few builds).
-        // pubspec pins flutter_webrtc to exactly 1.6.0; keep the two in step.
-        .package(name: "flutter_webrtc", path: "../flutter_webrtc-1.6.0")
+        // The documented form for a dependency on another Flutter plugin: the
+        // Flutter tool rewrites the path to the resolved version's symlink
+        // ("<name>-<version>"), so every flutter_webrtc the pubspec allows
+        // (>=1.6.0 <1.7.0) resolves. 0.4.10: was pinned to the 1.6.0 symlink,
+        // which broke the SwiftPM build with 1.6.2+hotfix.3 (what a fresh
+        // `pub get` resolves). To do that the tool copies this package's root
+        // into the app's build/ios/SourcePackages; the in-repo example would
+        // copy its own build/ into itself on every build, so the example
+        // builds with CocoaPods (example/pubspec.yaml).
+        .package(name: "flutter_webrtc", path: "../flutter_webrtc")
     ],
     targets: [
         .target(

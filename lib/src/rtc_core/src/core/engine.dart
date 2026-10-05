@@ -176,13 +176,51 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   }
 
   /// GRAVIX: consecutive resumes that failed for a reason upstream does not
-  /// escalate on (a timeout, not a refused socket). Only counted while a
-  /// [restartRegionStrategy] is set; see [attemptReconnect].
+  /// escalate on (a timeout, not a refused socket); see [attemptReconnect].
   int _unrecoveredResumes = 0;
 
-  /// ~2.4 s at the default retry delays: a client network blip has usually
-  /// resumed by then, an unreachable region has not.
-  static const _unrecoveredResumesBeforeReprobe = 3;
+  /// Resumes that failed without a refusal (a dial timeout, not a refused or
+  /// dead socket) before the next attempt is a full reconnect. Two dial timeouts
+  /// are ~20 s: past the server's disconnect grace (15 s).
+  static const _unrecoveredResumesBeforeFull = 2;
+
+  /// GRAVIX(resume-rejected, 2026-10-05): completed when the resume in flight
+  /// can no longer succeed -- the server answered it with a Leave, or closed its
+  /// socket before the ReconnectResponse. Upstream only learnt that from the
+  /// 10 s ReconnectResponse timeout, and the Leave's own reconnect was dropped
+  /// by the [attemptReconnect] guard while the resume was still waiting; field
+  /// 2026-10-05: 3-4 resume attempts and 10-17 s of extra outage before the full
+  /// rejoin, each time the server had already closed the participant.
+  Completer<GravixResumeRejectedException>? _resumeAbort;
+
+  /// GRAVIX(one-session): bumped by a fresh [connect] and by [disconnect]. A
+  /// reconnect attempt that started under an older generation was cancelled by
+  /// them and must not schedule another one.
+  int _sessionGen = 0;
+
+  /// GRAVIX(one-session): set while [restartConnection] runs its own [connect].
+  bool _inRestart = false;
+
+  /// Whether a resume is in flight (between its dial and its ReconnectResponse).
+  @visibleForTesting
+  bool get gravixResumeInFlight => _resumeAbort != null && !_resumeAbort!.isCompleted;
+
+  void _abortResume(GravixResumeRejectedException reason) {
+    final c = _resumeAbort;
+    if (c != null && !c.isCompleted) {
+      logger.info('resume aborted: ${reason.message}');
+      c.complete(reason);
+    }
+  }
+
+  /// Cancels a scheduled reconnect and any resume in flight: a fresh connect or a
+  /// disconnect owns the session now.
+  void _cancelReconnect(String why) {
+    _sessionGen++;
+    _clearPendingReconnect();
+    _abortResume(GravixResumeRejectedException('cancelled: $why', full: false, cancelled: true));
+    _isReconnecting = false;
+  }
 
   lk_models.ServerInfo? _serverInfo;
 
@@ -282,6 +320,13 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     if (regionUrlProvider != null) {
       _regionUrlProvider = regionUrlProvider;
+    }
+
+    // GRAVIX(one-session): a fresh connect never runs beside a resume. One that
+    // is not the full reconnect's own cancels whatever reconnect is pending or in
+    // flight first (its late socket is superseded in SignalClient.connect).
+    if (!_inRestart && (_attemptingReconnect || isPendingReconnect || _isReconnecting)) {
+      _cancelReconnect('fresh connect');
     }
 
     //reset state
@@ -1065,7 +1110,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   }
 
   @internal
-  Future<void> handleReconnect(ClientDisconnectReason reason, {lk_models.ReconnectReason? reconnectReason}) async {
+  Future<void> handleReconnect(
+    ClientDisconnectReason reason, {
+    lk_models.ReconnectReason? reconnectReason,
+    // GRAVIX: retry at once (the server said how: a Leave, or a refused resume)
+    bool immediate = false,
+  }) async {
     if (_isClosed) {
       logger.fine('handleReconnect: engine is closed, skip');
       return;
@@ -1107,7 +1157,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     // Jitter (against a thundering herd) is the policy's job now; the default
     // policy adds it exactly as this code used to.
-    final delay = nextDelay < 0 ? 0 : nextDelay;
+    // GRAVIX: a reconnect the server asked for (Leave) or a resume it refused
+    // goes at once, as the JS SDK does for a Leave.
+    final delay = (immediate || reason == ClientDisconnectReason.leaveReconnect || nextDelay < 0) ? 0 : nextDelay;
 
     events.emit(
       EngineAttemptReconnectEvent(
@@ -1149,6 +1201,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       fullReconnectOnNext = true;
     }
 
+    final gen = _sessionGen;
     try {
       _attemptingReconnect = true;
 
@@ -1174,21 +1227,36 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _isReconnecting = false;
       _unrecoveredResumes = 0;
     } catch (e) {
+      if (gen != _sessionGen || _isClosed || (e is GravixResumeRejectedException && e.cancelled)) {
+        // GRAVIX(one-session): a fresh connect or a disconnect cancelled this
+        // attempt; it owns the session now
+        logger.fine('attemptReconnect: cancelled ($e)');
+        return;
+      }
       _reconnectAttempts = _reconnectAttempts + 1;
       bool recoverable = true;
-      if (e is WebSocketException || e is MediaConnectException) {
+      var immediate = false;
+      if (e is GravixResumeRejectedException) {
+        // GRAVIX(resume-rejected): the server closed this session (Leave
+        // RECONNECT / socket closed before the ReconnectResponse): rejoin now,
+        // no second resume. A Leave{RESUME} keeps resuming, also at once.
+        logger.info('resume rejected (${e.message}); ${e.full ? 'full reconnect' : 'resume again'} now');
+        fullReconnectOnNext = e.full;
+        immediate = true;
+        _unrecoveredResumes = 0;
+      } else if (e is WebSocketException || e is MediaConnectException) {
         // cannot resume connection, need to do full reconnect
         fullReconnectOnNext = true;
-      } else if (!fullReconnectOnNext &&
-          restartRegionStrategy != null &&
-          ++_unrecoveredResumes >= _unrecoveredResumesBeforeReprobe) {
+      } else if (!fullReconnectOnNext && ++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
         // GRAVIX (regionReprobeOnRestart, 2026-09-19): a resume against an
         // UNREACHABLE region times out rather than being refused, and upstream
         // keeps resuming. The JS SDK's live test (pinned SFU stopped) showed the
-        // re-probe, which only runs on a full reconnect, then never happens. After
-        // a few such failures, reconnect fully so the re-probe can move the
-        // session. Only with the re-probe installed: default behaviour unchanged.
-        logger.info('resume failed $_unrecoveredResumes times; full reconnect with region re-probe');
+        // re-probe, which only runs on a full reconnect, then never happens.
+        // GRAVIX (2026-10-05): for every session, not only with the re-probe: two
+        // resume dials that timed out (10 s each) outlast the server's disconnect
+        // grace (15 s), so the participant is gone and a third resume can only be
+        // refused. Field 2026-10-05: 3-4 resumes before the full rejoin.
+        logger.info('resume failed $_unrecoveredResumes times; full reconnect');
         fullReconnectOnNext = true;
         _unrecoveredResumes = 0;
       }
@@ -1200,7 +1268,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       }
 
       if (recoverable) {
-        unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
+        unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry, immediate: immediate));
       } else {
         logger.fine('attemptReconnect: disconnecting...');
         // clean up before emitting, room's EngineDisconnectedEvent handler
@@ -1227,23 +1295,41 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     events.emit(const EngineResumingEvent());
 
-    // wait for socket to connect rtc server
-    await signalClient.connect(
-      url!,
-      token!,
-      connectOptions: connectOptions,
-      roomOptions: roomOptions,
-      reconnect: true,
-      reconnectReason: reconnectReason,
-    );
+    final abort = Completer<GravixResumeRejectedException>();
+    _resumeAbort = abort;
+    try {
+      // wait for socket to connect rtc server
+      try {
+        await signalClient.connect(
+          url!,
+          token!,
+          connectOptions: connectOptions,
+          roomOptions: roomOptions,
+          reconnect: true,
+          reconnectReason: reconnectReason,
+        );
+      } catch (_) {
+        // a Leave that arrived before the server closed the socket says why
+        if (abort.isCompleted) throw await abort.future;
+        rethrow;
+      }
+      if (abort.isCompleted) throw await abort.future;
 
-    await events.waitFor<SignalReconnectedEvent>(
-      duration: connectOptions.timeouts.connection,
-      onTimeout: () => throw ConnectException(
-        'resumeConnection: Timed out waiting for SignalReconnectedEvent',
-        reason: ConnectionErrorReason.Timeout,
-      ),
-    );
+      // GRAVIX(resume-rejected): the ReconnectResponse, or the server's refusal,
+      // whichever comes first. The socket is open here, so no answer within the
+      // timeout is a refusal too (the server answers a resume it accepts at once).
+      final reconnected = events.waitFor<SignalReconnectedEvent>(
+        duration: connectOptions.timeouts.connection,
+        onTimeout: () => throw GravixResumeRejectedException('no ReconnectResponse within the connect timeout'),
+      );
+      final outcome = await Future.any<Object?>([reconnected, abort.future]);
+      if (outcome is GravixResumeRejectedException) {
+        reconnected.ignore();
+        throw outcome;
+      }
+    } finally {
+      if (identical(_resumeAbort, abort)) _resumeAbort = null;
+    }
 
     logger.fine('resumeConnection: reason: ${reason.name}');
 
@@ -1293,6 +1379,11 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       }
 
       if (signalClient.connectionState == ConnectionState.connected) {
+        // GRAVIX(one-session): tell the server this session is over before the new
+        // join (JS parity). Otherwise the old session lives on until the new join
+        // evicts it as a DUPLICATE_IDENTITY -- across nodes, that moved the room's
+        // origin (field 2026-10-05).
+        await signalClient.sendLeave();
         await signalClient.cleanUp();
       }
 
@@ -1314,13 +1405,18 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _signalListener = signalClient.createListener(synchronized: true);
       _setUpSignalListeners();
 
-      await connect(
-        regionUrl ?? url!,
-        token!,
-        roomOptions: roomOptions,
-        connectOptions: connectOptions,
-        fastConnectOptions: fastConnectOptions,
-      );
+      _inRestart = true;
+      try {
+        await connect(
+          regionUrl ?? url!,
+          token!,
+          roomOptions: roomOptions,
+          connectOptions: connectOptions,
+          fastConnectOptions: fastConnectOptions,
+        );
+      } finally {
+        _inRestart = false;
+      }
 
       if (_hasPublished) {
         await ensurePublisherConnected();
@@ -1465,7 +1561,10 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     })
     ..on<SignalConnectedEvent>((event) async {
       logger.fine('Signal connected');
-      _reconnectAttempts = 0;
+      // GRAVIX: not during a reconnect -- a resume whose socket opens and is then
+      // refused reset the count every time, so maxAttempts was never reached.
+      // A reconnect that succeeds resets it in attemptReconnect.
+      if (!_isReconnecting) _reconnectAttempts = 0;
       events.emit(const EngineConnectedEvent());
     })
     ..on<SignalConnectingEvent>((event) async {
@@ -1478,6 +1577,19 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     })
     ..on<SignalDisconnectedEvent>((event) async {
       logger.fine('Signal disconnected ${event.reason}');
+      if (gravixResumeInFlight) {
+        // GRAVIX(resume-rejected): the server closed the resume's socket before
+        // its ReconnectResponse: the session is gone
+        _abortResume(GravixResumeRejectedException('socket closed before the ReconnectResponse'));
+        return;
+      }
+      if (_attemptingReconnect || isPendingReconnect) {
+        // GRAVIX: a reconnect is already under way and owns the retry; scheduling
+        // here again would replace its (possibly immediate) retry with the
+        // back-off's delay
+        logger.fine('Signal disconnected during a reconnect; the reconnect handles it');
+        return;
+      }
       if (event.reason == DisconnectReason.disconnected && !_isClosed) {
         await handleReconnect(
           ClientDisconnectReason.signal,
@@ -1571,16 +1683,34 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       // Protocol v13: LeaveRequest.action replaces the deprecated canReconnect boolean.
       // canReconnect is still checked for backward compatibility with v12 servers
       // (where action defaults to DISCONNECT=0 since it's unset).
+      // GRAVIX(resume-rejected): a Leave that answers a resume in flight fails that
+      // resume now; attemptReconnect then reconnects as the action says, at once.
+      // (Upstream scheduled a reconnect here that the attemptReconnect guard
+      // dropped, and the resume sat out its 10 s timeout.)
+      final resuming = gravixResumeInFlight;
       if (event.action == lk_rtc.LeaveRequest_Action.RESUME) {
         fullReconnectOnNext = false;
+        if (resuming) {
+          _abortResume(GravixResumeRejectedException('Leave{RESUME} during the resume', full: false));
+          return;
+        }
         // reconnect immediately instead of waiting for next attempt
         await handleReconnect(ClientDisconnectReason.leaveReconnect);
       } else if (event.action == lk_rtc.LeaveRequest_Action.RECONNECT || event.canReconnect) {
         fullReconnectOnNext = true;
+        if (resuming) {
+          _abortResume(GravixResumeRejectedException('Leave{RECONNECT} (${event.reason}) during the resume'));
+          return;
+        }
         // reconnect immediately instead of waiting for next attempt
         await handleReconnect(ClientDisconnectReason.leaveReconnect);
       } else {
         // DISCONNECT or v12 server with canReconnect=false
+        if (resuming) {
+          _abortResume(
+            GravixResumeRejectedException('Leave{DISCONNECT} during the resume', full: false, cancelled: true),
+          );
+        }
         await signalClient.cleanUp();
         fullReconnectOnNext = false;
         await disconnect(reason: event.reason.toSDKType());
@@ -1610,11 +1740,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   Future<void> disconnect({DisconnectReason reason = DisconnectReason.clientInitiated}) async {
     _isClosed = true;
+    final pendingReconnect = isPendingReconnect;
+    // GRAVIX(one-session): a resume in flight ends here too (its late socket is
+    // superseded by the cleanUp below, or closed by the server after the leave)
+    _cancelReconnect('disconnect');
     events.emit(EngineClosingEvent());
     if (connectionState == ConnectionState.connected) {
       await signalClient.sendLeave();
     } else {
-      if (isPendingReconnect) {
+      if (pendingReconnect) {
         logger.fine('disconnect: Cancel the reconnection processing!');
         await signalClient.cleanUp();
         await _signalListener.cancelAll();
@@ -1798,4 +1932,18 @@ Future<String?> getConnectedAddress(rtc.RTCPeerConnection pc) async {
   }
   final selectedID = report.values['remoteCandidateId'] as String;
   return candidates[selectedID];
+}
+
+/// GRAVIX(resume-rejected): a resume that cannot succeed (see Engine._resumeAbort).
+/// [full]: rejoin with a new session (the server closed this one) rather than
+/// resume again. [cancelled]: a fresh connect / disconnect took over; nothing is
+/// retried.
+@internal
+class GravixResumeRejectedException implements Exception {
+  GravixResumeRejectedException(this.message, {this.full = true, this.cancelled = false});
+  final String message;
+  final bool full;
+  final bool cancelled;
+  @override
+  String toString() => 'GravixResumeRejectedException: $message';
 }

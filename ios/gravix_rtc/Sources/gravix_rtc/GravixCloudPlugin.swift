@@ -7,7 +7,7 @@ import UIKit
 ///  - `gravix_client`: RTC core (audio session, routing, CallKit engine gating,
 ///    audio processing, visualizer/renderer, screen-share broadcast), see
 ///    `GravixClientPlugin`.
-///  - `gravity.music_mixer`: background music mixed into the microphone, see
+///  - `com.gravitycompile.gravix_rtc/music`: room music mixed into the microphone, see
 ///    `GravixMusicMixer`.
 ///  - `gravix_cloud`: `getPlatformVersion` (kept for compatibility).
 public class GravixCloudPlugin: NSObject, FlutterPlugin {

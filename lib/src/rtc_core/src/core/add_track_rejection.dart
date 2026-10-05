@@ -12,9 +12,16 @@ import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 /// TrackPublished. AddTrack carries no requestId, so the cid inside the echoed
 /// request is the only correlation. Without this the publish would sit until
 /// the publish timeout and surface a generic error.
+///
+/// `QUEUED` is not a refusal: the SFU queues an addTrack whose cid is still
+/// published (a republish of the same track: RED auto, the room-music DTX swap)
+/// and answers TrackPublished once the old publication is gone. Field
+/// 2026-10-05: treating it as a refusal failed every same-track republish and
+/// left the host without a microphone.
 @internal
 String? gravixAddTrackRejection(lk_rtc.RequestResponse response, String cid) {
   if (response.reason == lk_rtc.RequestResponse_Reason.OK) return null;
+  if (response.reason == lk_rtc.RequestResponse_Reason.QUEUED) return null;
   if (response.whichRequest() != lk_rtc.RequestResponse_Request.addTrack) return null;
   if (response.addTrack.cid != cid) return null;
   final detail = response.message.isEmpty ? '' : ' - ${response.message}';

@@ -14,8 +14,8 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
  *  - [GravixClientPlugin]: the RTC core's `gravix_client` channel (audio
  *    session + routing, audio processing, visualizer/renderer, screen-capture
  *    foreground service).
- *  - [MusicMixerPlugin]: `gravity.music_mixer` (and the fast-connect channel it
- *    already owns). Its `flutterEngine` companion keeps working for apps that
+ *  - [MusicMixerPlugin]: `com.gravitycompile.gravix_rtc/music` (room music;
+ *    and the fast-connect channel it already owns). Its `flutterEngine` companion keeps working for apps that
  *    set it from `configureFlutterEngine`.
  */
 class GravixCloudPlugin : FlutterPlugin, ActivityAware {

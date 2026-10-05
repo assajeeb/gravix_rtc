@@ -69,7 +69,11 @@ class UnreachableResumeEngine extends Engine {
   Future<void> restartConnection({String? regionUrl}) async => restarts++;
 
   @override
-  Future<void> handleReconnect(ClientDisconnectReason reason, {lk_models.ReconnectReason? reconnectReason}) async {}
+  Future<void> handleReconnect(
+    ClientDisconnectReason reason, {
+    lk_models.ReconnectReason? reconnectReason,
+    bool immediate = false,
+  }) async {}
 }
 
 class ScriptedStrategy implements GravixRestartRegionStrategy {
@@ -160,26 +164,31 @@ void main() {
   // region (timeout, not a refused socket) never escalated to a full reconnect,
   // so the re-probe never ran. A refused WebSocket already escalates here.
   group('Engine.attemptReconnect escalates for the re-probe', () {
-    test('after 3 unreachable resumes the next attempt is a full reconnect', () async {
+    test('after 2 unreachable resumes the next attempt is a full reconnect', () async {
       final engine = UnreachableResumeEngine()..restartRegionStrategy = ScriptedStrategy(fra, []);
       addTearDown(engine.dispose);
-      for (var i = 0; i < 3; i++) {
+      for (var i = 0; i < 2; i++) {
         await engine.attemptReconnect(ClientDisconnectReason.signal);
       }
-      expect(engine.resumes, 3);
+      expect(engine.resumes, 2);
       expect(engine.restarts, 0);
       await engine.attemptReconnect(ClientDisconnectReason.signal);
       expect(engine.restarts, 1);
     });
 
-    test('without the re-probe strategy it keeps resuming (upstream unchanged)', () async {
+    // 0.4.10 (field 2026-10-05): without the re-probe too. Upstream kept resuming
+    // forever on dial timeouts; two of them (~20 s) outlast the server's 15 s
+    // disconnect grace, so a third resume could only be refused.
+    test('without the re-probe strategy: also a full reconnect after 2 unreachable resumes', () async {
       final engine = UnreachableResumeEngine();
       addTearDown(engine.dispose);
-      for (var i = 0; i < 6; i++) {
+      for (var i = 0; i < 2; i++) {
         await engine.attemptReconnect(ClientDisconnectReason.signal);
       }
-      expect(engine.resumes, 6);
+      expect(engine.resumes, 2);
       expect(engine.restarts, 0);
+      await engine.attemptReconnect(ClientDisconnectReason.signal);
+      expect(engine.restarts, 1);
     });
   });
 

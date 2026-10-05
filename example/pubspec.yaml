@@ -49,6 +49,13 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  # CocoaPods for the in-repo example: with SwiftPM the Flutter tool copies the
+  # plugin's whole package root (this example's build/ included) into
+  # build/ios/SourcePackages on every build, which nests without bound. Apps
+  # that depend on gravix_rtc from pub (or a path outside the app) use SwiftPM
+  # or CocoaPods as they like.
+  config:
+    enable-swift-package-manager: false
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

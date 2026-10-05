@@ -25,6 +25,10 @@ void main() {
     expect(msg, contains('LIMIT_EXCEEDED'));
   });
 
+  test('QUEUED is not a rejection: the SFU publishes it once the old cid is gone (same-track republish)', () {
+    expect(gravixAddTrackRejection(resp(reason: lk_rtc_enum.RequestResponse_Reason.QUEUED), 'TR_cam'), isNull);
+  });
+
   test('any non-OK reason for our cid is a rejection', () {
     expect(gravixAddTrackRejection(resp(reason: lk_rtc_enum.RequestResponse_Reason.NOT_ALLOWED), 'TR_cam'), isNotNull);
   });

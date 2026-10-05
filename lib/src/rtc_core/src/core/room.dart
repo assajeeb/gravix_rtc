@@ -85,6 +85,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   LocalParticipant? get localParticipant => _localParticipant;
   LocalParticipant? _localParticipant;
 
+  /// Tests: a local participant without a join.
+  @visibleForTesting
+  set debugLocalParticipant(LocalParticipant? p) => _localParticipant = p;
+
   /// name of the room
   String? get name => _name;
   String? _name;

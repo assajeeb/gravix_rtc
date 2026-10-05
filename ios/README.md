@@ -5,7 +5,7 @@ Registered class: `GravixCloudPlugin` (pubspec `pluginClass`). It registers:
 | Channel | Implementation | What it does |
 |---|---|---|
 | `gravix_client` | `Sources/gravix_rtc/rtc/GravixClientPlugin.swift` | Audio session (engine-driven `RTCAudioSession` configuration and activation), speaker/receiver/Bluetooth routing, route-change reporting, CallKit engine gating and microphone mute modes, explicit recording start with audio-processing options, audio processing state, visualizer + PCM renderer event channels, `osVersionString`, broadcast picker + state |
-| `gravity.music_mixer` | `Sources/gravix_rtc/music/GravixMusicMixer.swift` | Background music mixed into the outgoing microphone signal |
+| `com.gravitycompile.gravix_rtc/music` | `Sources/gravix_rtc/music/GravixMusicMixer.swift` | Background music mixed into the outgoing microphone signal |
 | `gravix_cloud` | `GravixCloudPlugin.swift` | `getPlatformVersion` |
 
 `ios/BroadcastExtension/` is a template for the app's screen-share Broadcast

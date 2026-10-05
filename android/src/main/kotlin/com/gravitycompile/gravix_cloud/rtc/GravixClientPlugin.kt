@@ -273,6 +273,8 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       return
     }
 
+    // room music: the mixer hook goes in before the record thread starts
+    com.gravitycompile.gravix_cloud.music.MusicMixerPlugin.installIfWanted(audioDeviceModule)
     val executor = audioDeviceModuleExecutorOrError(result, "rejectedPlatformUnavailable") ?: return
     val options = audioProcessingOptions(call)
     try {
@@ -312,7 +314,8 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
   // input under a live call re-routes the voice path on OEM HALs, interrupting
   // the playout of the other participants. WebRtcAudioRecord zeroes the buffer
   // right after AudioRecord.read(), before the mixer callback and the native
-  // delivery; the music mixer is held too, so nothing but silence is sent.
+  // delivery. Room music (0.4.10): the mixer still mixes onto the zeroed voice
+  // (a voice-only mute) unless MusicMixerEngine.holdOnMute, which holds it.
   // Returns true only when the module exists; Dart falls back to disabling the
   // track otherwise.
   private fun handleSetMicrophoneMute(call: MethodCall, result: Result) {
@@ -323,7 +326,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
     val mute = call.argument<Boolean>("mute") ?: false
     try {
-      // mixer first on mute, last on unmute: no window where music goes out alone
+      // flag first on mute, last on unmute: no window where a held mixer runs
       if (mute) MusicMixerEngine.captureMuted = true
       audioDeviceModule.setMicrophoneMute(mute)
       if (!mute) MusicMixerEngine.captureMuted = false

@@ -12,7 +12,9 @@
 /// - [GravixRoomService] — the one-stop room/call controller with mic/camera
 ///   control, remote mute, active-speaker tracking, connection-quality
 ///   auto data-saver, camera-facing sync and audio-session handling,
-/// - [GravixMusicController] — background-music mixing (Android and iOS),
+/// - [GravixRoomMusic] — room music: a local file mixed into the published
+///   microphone (Android and iOS); [GravixMusicController] is its low-level
+///   channel bridge,
 /// - [GravixVideoEffect] — the hook an effect package (beauty, blur, …) plugs
 ///   into to process the local camera track (none by default),
 /// - [GravixTokenProvider] — how the app hands the SDK a join token (literal,
@@ -50,6 +52,8 @@ export 'src/beauty/gravix_beauty_filter.dart';
 export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding;
 export 'src/large_room/large_room.dart';
 export 'src/music/gravix_music_controller.dart';
+export 'src/music/gravix_music_channel.dart' show kGravixMusicChannel;
+export 'src/music/gravix_room_music.dart';
 export 'src/room/gravix_audio_first.dart';
 export 'src/room/gravix_effective_quality.dart';
 export 'src/room/gravix_red_mode.dart';

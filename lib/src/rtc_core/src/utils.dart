@@ -29,7 +29,6 @@ import 'package:meta/meta.dart';
 import './proto/gravixcloud_models.pb.dart' as lk_models;
 import './support/native.dart';
 import 'extensions.dart';
-import 'gravix.dart';
 import 'logger.dart';
 import 'options.dart';
 import 'support/platform.dart';
@@ -40,6 +39,7 @@ import 'types/video_cap.dart';
 import 'types/video_dimensions.dart';
 import 'types/video_encoding.dart';
 import 'types/video_parameters.dart';
+import '../../connect/gravix_join_timeline.dart' show kGravixSdkVersion; // GRAVIX: reported version
 
 extension UriExt on Uri {
   @internal
@@ -208,7 +208,13 @@ class Utils {
         'protocol': connectOptions.protocolVersion.toStringValue(),
         'client_protocol': connectOptions.clientProtocolVersion.toStringValue(),
         'sdk': 'flutter',
-        'version': GravixRtcClient.version,
+        // GRAVIX(2026-10-05): the gravix_rtc version, not the vendored core's
+        // (2.11.0): the server's logs and join analytics read `version`, and
+        // every client reported 2.11.0, so the release a user ran could not be
+        // told. The server gates nothing on a FLUTTER client's version.
+        'version': kGravixSdkVersion,
+        // ClientInfo.other_sdks, unambiguous for analytics: "gravix_rtc/x.y.z"
+        'other_sdks': 'gravix_rtc/$kGravixSdkVersion',
         'network': networkType,
         // client info
         if (clientInfo != null) ...{
