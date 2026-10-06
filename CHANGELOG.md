@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.4.12 — 2026-10-06
+
+### Fix (privacy): the microphone could stay open after leaving a room while room music played (Android)
+Field 2026-10-06 (an app on 0.4.11, Xiaomi, Android 13): the user left a room
+while room music was playing. After the leave, `dumpsys media.audio_policy`
+still listed an **active AudioRecord client** for the app 30+ s later. In the
+foreground the microphone was really live; in the background Android silenced
+it ("App op 27 missing, silencing record") about 8 s after the leave.
+
+What happened:
+1. The leave stopped the music. With DTX on the microphone (the default),
+   ending the music session gives DTX back by **republishing the microphone**
+   on a new track.
+2. That republish raced the disconnect. Every publish attempt failed (three
+   attempts, ~10 s each).
+3. Each attempt started the new track's capture. On Android that start is an
+   explicit **pre-warm of the audio device module's recorder**
+   (`startLocalRecording`). WebRTC adopts that recorder only when the track is
+   published and the engine starts recording. Here the engine had already
+   stopped and terminated its recording, so nothing ever stopped the pre-warmed
+   recorder. Stopping the unpublished track did not release it either.
+
+Why it showed up with 0.4.11: the bug is older, but 0.4.11 made it reachable
+in more apps. Before 0.4.11, an app that also ran a headless Flutter engine (a
+foreground-task plugin) replaced flutter_webrtc's plugin singleton. The
+pre-warm then found no audio device module and was skipped, so there was no
+recorder to leak. 0.4.11 uses the app engine's own flutter_webrtc instance
+(the fix for room music in such apps), so the pre-warm works there now, and
+the same apps typically dropped the foreground-task plugin for the new built-in
+service. The call foreground service itself starts no capture and is not part
+of the cause; its 3 s stop grace only delayed Android's background silencing.
+
+The fixes:
+- **A leave no longer republishes the microphone.** `Room.disconnect()` /
+  `dispose()` and `GravixRoomService.disconnect()` mark the room as leaving
+  before anything else. Ending room music on a room that is leaving or gone
+  just stops the mixer: no DTX republish, no bitrate or voice-processing
+  restore (the leave unpublishes and stops the microphone itself).
+  `GravixRoomService.disconnect()` stops the room music this way first.
+- **A republish never leaves a track behind** (room music DTX swap and RED
+  auto). It checks that the room is still connected and not leaving before
+  the unpublish, before every attempt and after a successful publish. It starts
+  the new track once (failed attempts no longer stop and restart its capture).
+  When nothing ends up published, the new track is stopped.
+- **Stopping a microphone track releases the recorder its capture pre-warmed**
+  (Android). The native side stops it only while WebRTC itself is not
+  recording, so a live published microphone is never cut. iOS is unchanged:
+  its stop is engine-wide.
+- **Leaving a room releases any pre-warmed recorder** after the engine is
+  cleaned up, before the audio session stop and the foreground-service
+  release, whatever the service's stop grace.
+- RED auto stops at the start of `GravixRoomService.disconnect()`, not at the
+  end.
+
+No API change. Apps on 0.4.11 that use room music should update.
+
 ## 0.4.11 — 2026-10-06
 
 ### Android: built-in call foreground service (`GravixForegroundService`), disabled by default

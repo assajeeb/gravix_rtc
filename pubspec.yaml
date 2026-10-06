@@ -3,7 +3,7 @@ description: >-
   Real-time video and audio rooms for Flutter on Gravix Cloud: one room
   service, region-aware connect, token providers, join analytics and a
   video-effect hook.
-version: 0.4.11
+version: 0.4.12
 homepage: https://gravitycompile.com
 repository: https://github.com/assajeeb/gravix_rtc
 issue_tracker: https://github.com/assajeeb/gravix_rtc/issues

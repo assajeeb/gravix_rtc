@@ -2528,7 +2528,8 @@ class GravixRoomService implements GravixAudioHost {
       track,
       wanted: _audioPublishOptions(red: true),
       fallback: track.lastPublishOptions ?? _audioPublishOptions(red: false),
-      stillWanted: () => identical(_room, room),
+      // still this room, connected and not leaving (0.4.12)
+      stillWanted: () => identical(_room, room) && (room?.gravixCanRepublish ?? false),
     );
     debugPrint('RED auto: microphone republished=${fresh != null} red=$ok');
   }
@@ -2899,10 +2900,26 @@ class GravixRoomService implements GravixAudioHost {
   }
 
   Future<void> disconnect() async {
+    // GRAVIX(0.4.12, field 2026-10-06): the leave is marked before anything
+    // else, so a room-music stop or a RED auto tick racing it does not
+    // republish the microphone into the disconnect (a failed republish left
+    // the microphone open after the leave). RED auto stops here, not at the end.
+    _room?.gravixMarkLeaving();
+    _redAutoTimer?.cancel();
+    _redAutoTimer = null;
     // a publication still running behind connect() finishes first: tearing the
     // tracks down under it could leave a camera capturing after the leave
     await _awaitInitialPublish();
     try {
+      // room music: the mixer stops; the microphone is left to the steps below
+      // (no DTX republish while leaving)
+      if (_room != null && identical(roomMusic.room, _room)) {
+        try {
+          await roomMusic.stopForLeave();
+        } catch (e) {
+          debugPrint('room music stop on leave: $e');
+        }
+      }
       // A session that ends before audio arrives still gets the event, with
       // null audio fields — otherwise the short sessions this split exists to
       // catch would be exactly the ones missing a first-audio row.

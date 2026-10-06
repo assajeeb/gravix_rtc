@@ -15,6 +15,7 @@ import 'package:gravix_rtc/src/rtc_core/src/participant/local.dart';
 import 'package:gravix_rtc/src/rtc_core/src/proto/gravixcloud_models.pb.dart' as lk_models;
 import 'package:gravix_rtc/src/rtc_core/src/proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 import 'package:gravix_rtc/src/rtc_core/src/publication/local.dart';
+import 'package:gravix_rtc/src/rtc_core/src/support/platform.dart';
 import 'package:gravix_rtc/src/rtc_core/src/support/websocket.dart';
 import 'package:gravix_rtc/src/rtc_core/src/track/local/audio.dart';
 import 'package:gravix_rtc/src/rtc_core/src/track/local/engine_mic_mute.dart';
@@ -193,5 +194,206 @@ void main() {
     final (fresh, _) = await gravixRepublishMic(lp, other, wanted: red, fallback: plain, createTrack: newTrack);
     expect(fresh, isNull);
     expect(log, isEmpty);
+  });
+
+  // 0.4.12, field 2026-10-06: leaving a room while room music played. The music
+  // stop republished the mic during the disconnect, every publish failed, and
+  // the capture start of the new track (an Android recorder pre-warm WebRTC
+  // never adopts) stayed open after the leave: the microphone stayed live.
+  group('teardown (0.4.12)', () {
+    late List<String> native;
+
+    setUp(() {
+      native = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        (call) async {
+          native.add(call.method);
+          return null;
+        },
+      );
+      gravixExplicitRecordingDebugPlatform = PlatformType.android;
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        null,
+      );
+      gravixExplicitRecordingDebugPlatform = null;
+    });
+
+    // what LocalAudioTrack.create gives: a track that is not started yet
+    final created = <LocalAudioTrack>[];
+    Future<LocalAudioTrack> unstarted(AudioCaptureOptions o) async {
+      final t = LocalAudioTrack(TrackSource.microphone, _FakeStream(), _FakeTrack('new-${++n}'), o);
+      created.add(t);
+      log.add('create');
+      return t;
+    }
+
+    bool stopped(LocalAudioTrack t) => (t.mediaStreamTrack as _FakeTrack).stopped;
+
+    setUp(created.clear);
+
+    // the published mic; its own capture start is not part of the test
+    Future<(LocalParticipant, LocalAudioTrack)> mic() async {
+      final r = await publishedMic();
+      native.clear();
+      return r;
+    }
+
+    test('every attempt fails: the new track is stopped and its pre-warmed recorder released, started once', () async {
+      final (lp, old) = await mic();
+      final (fresh, ok) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        retryDelay: Duration.zero,
+        publish: (t, o) async => throw Exception('Failed to publish track'),
+      );
+      expect((fresh, ok), (null, false));
+      expect(created, hasLength(1));
+      expect(stopped(created.single), isTrue);
+      // one capture start (not one per attempt), then its release
+      expect(native.where((m) => m == 'startLocalRecording'), hasLength(1));
+      expect(native.last, 'stopLocalRecording');
+    });
+
+    test('the leave starts between attempts: no more attempts, the new track is stopped', () async {
+      final (lp, old) = await mic();
+      var leaving = false;
+      var attempts = 0;
+      final (fresh, _) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        retryDelay: Duration.zero,
+        stillWanted: () => !leaving,
+        publish: (t, o) async {
+          attempts++;
+          leaving = true; // the disconnect closed the transport under it
+          throw Exception('Failed to publish track');
+        },
+      );
+      expect(fresh, isNull);
+      expect(attempts, 1);
+      expect(stopped(created.single), isTrue);
+      expect(native.last, 'stopLocalRecording');
+    });
+
+    test('already leaving: nothing is created, the published mic is left to the leave', () async {
+      final (lp, old) = await mic();
+      final (fresh, _) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        stillWanted: () => false,
+        publish: (t, o) async => log.add('publish'),
+      );
+      expect(fresh, isNull);
+      expect(created, isEmpty);
+      expect(log, isEmpty);
+      expect(native, isEmpty);
+      expect(identical(lp.getTrackPublicationBySource(TrackSource.microphone)?.track, old), isTrue);
+    });
+
+    test('the leave starts while the track is created: it is stopped, the old mic stays published', () async {
+      final (lp, old) = await mic();
+      var leaving = false;
+      final (fresh, _) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: (o) async {
+          final t = await unstarted(o);
+          leaving = true;
+          return t;
+        },
+        unpublish: unpublishFrom(lp),
+        stillWanted: () => !leaving,
+        publish: (t, o) async => log.add('publish'),
+      );
+      expect(fresh, isNull);
+      expect(stopped(created.single), isTrue);
+      expect(log, ['create']);
+      expect(identical(lp.getTrackPublicationBySource(TrackSource.microphone)?.track, old), isTrue);
+    });
+
+    test('published after the leave started: taken down and stopped', () async {
+      final (lp, old) = await mic();
+      var leaving = false;
+      final (fresh, _) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        stillWanted: () => !leaving,
+        publish: (t, o) async {
+          lp.addTrackPublication(
+            LocalTrackPublication<LocalAudioTrack>(
+              participant: lp,
+              info: lk_models.TrackInfo(
+                sid: 'TR_new',
+                type: lk_models.TrackType.AUDIO,
+                source: lk_models.TrackSource.MICROPHONE,
+              ),
+              track: t,
+            ),
+          );
+          leaving = true;
+        },
+      );
+      expect(fresh, isNull);
+      expect(log, ['create', 'unpublish TR_mic', 'unpublish TR_new']);
+      expect(stopped(created.single), isTrue);
+      expect(native.last, 'stopLocalRecording');
+    });
+
+    test('a republish that works keeps its capture (nothing released)', () async {
+      final (lp, old) = await mic();
+      final (fresh, ok) = await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        publish: (t, o) async => log.add('publish red=${o.red}'),
+      );
+      expect(ok, isTrue);
+      expect(identical(fresh, created.single), isTrue);
+      expect(stopped(fresh!), isFalse);
+      expect(native, ['startLocalRecording']);
+    });
+
+    test('iOS: the track is stopped, the engine-wide stopLocalRecording is never called', () async {
+      gravixExplicitRecordingDebugPlatform = PlatformType.iOS;
+      final (lp, old) = await mic();
+      await gravixRepublishMic(
+        lp,
+        old,
+        wanted: red,
+        fallback: plain,
+        createTrack: unstarted,
+        unpublish: unpublishFrom(lp),
+        retryDelay: Duration.zero,
+        publish: (t, o) async => throw Exception('no'),
+      );
+      expect(stopped(created.single), isTrue);
+      expect(native, ['startLocalRecording']);
+    });
   });
 }

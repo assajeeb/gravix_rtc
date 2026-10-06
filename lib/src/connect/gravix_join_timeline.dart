@@ -138,7 +138,7 @@ const String kGravixFirstAudioDefinition =
 /// This package's version, for the report. Kept in step with pubspec.yaml by
 /// `test/connect/join_timeline_test.dart`, because a Dart package cannot read
 /// its own pubspec at runtime.
-const String kGravixSdkVersion = '0.4.11';
+const String kGravixSdkVersion = '0.4.12';
 
 /// Default stats poll while waiting for first audio. 50 ms keeps the proxy's
 /// resolution well under the ~100 ms differences the phone runs need to

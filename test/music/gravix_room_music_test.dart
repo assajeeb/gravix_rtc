@@ -670,4 +670,174 @@ void main() {
       expect(const GravixMusicSource.file('/a') == const GravixMusicSource.contentUri('/a'), isFalse);
     });
   });
+
+  // 0.4.12, field 2026-10-06: leaving a room while music played. The music stop
+  // gave DTX back by republishing the mic during the disconnect; the publishes
+  // failed and a capture started by the republish stayed open after the leave.
+  group('leave while music plays (0.4.12)', () {
+    late List<String> rec;
+    late List<String> clientNative;
+    late List<_RecTrack> media;
+
+    setUp(() {
+      rec = [];
+      clientNative = [];
+      media = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        (call) async {
+          clientNative.add(call.method);
+          return null;
+        },
+      );
+      gravixExplicitRecordingDebugPlatform = PlatformType.android;
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        null,
+      );
+      gravixExplicitRecordingDebugPlatform = null;
+    });
+
+    /// Music on a DTX mic: the session republishes it with DTX off. After
+    /// that, [failRestore] refuses every publish (the one giving DTX back and
+    /// its fallbacks) and [onRestorePublish] runs on each.
+    Future<(Room, LocalParticipant, GravixRoomMusic)> musicOnDtxMic({
+      bool failRestore = false,
+      void Function()? onRestorePublish,
+    }) async {
+      var started = false;
+      final (room, lp, track, _, _) = await roomWithMic();
+      track.lastPublishOptions = const AudioPublishOptions(dtx: true);
+      var sid = 0;
+      final m = GravixRoomMusic(
+        room,
+        pollInterval: const Duration(milliseconds: 10),
+        captureTimeout: const Duration(milliseconds: 150),
+        fileExists: (_) async => true,
+        republishRetryDelay: Duration.zero,
+        createMicTrack: (o) async {
+          final t = _RecTrack('new-${media.length + 1}');
+          media.add(t);
+          rec.add('create');
+          return LocalAudioTrack(TrackSource.microphone, _FakeStream(), t, o);
+        },
+        unpublishMicTrack: (s) async {
+          rec.add('unpublish $s');
+          lp.trackPublications.remove(s);
+        },
+        publishMicTrack: (t, o) async {
+          rec.add('publish dtx=${o.dtx}');
+          if (started) {
+            onRestorePublish?.call();
+            if (failRestore) throw Exception('Failed to publish track');
+          }
+          t.lastPublishOptions = o;
+          lp.addTrackPublication(
+            LocalTrackPublication<LocalAudioTrack>(
+              participant: lp,
+              info: lk_models.TrackInfo(
+                sid: 'TR_r${++sid}',
+                type: lk_models.TrackType.AUDIO,
+                source: lk_models.TrackSource.MICROPHONE,
+              ),
+              track: t,
+            ),
+          );
+        },
+      );
+      addTearDown(m.dispose);
+      await m.start(const GravixMusicSource.file('/a.mp3'));
+      expect(rec, ['create', 'unpublish TR_mic', 'publish dtx=false']);
+      started = true;
+      rec.clear();
+      clientNative.clear();
+      return (room, lp, m);
+    }
+
+    test('connected: stop gives DTX back (the republish still runs)', () async {
+      final (_, lp, m) = await musicOnDtxMic();
+      await m.stop();
+      expect(rec, ['create', 'unpublish TR_r1', 'publish dtx=true']);
+      expect(
+        (lp.getTrackPublicationBySource(TrackSource.microphone)?.track as LocalAudioTrack?)?.lastPublishOptions?.dtx,
+        isTrue,
+      );
+    });
+
+    test('stop while the room is leaving: the mixer stops, no republish, no new track', () async {
+      final (room, lp, m) = await musicOnDtxMic();
+      final sessionMic = lp.getTrackPublicationBySource(TrackSource.microphone)?.track;
+      room.gravixMarkLeaving();
+      await m.stop();
+      expect(native.control.last, 'stop');
+      expect(m.state.value.status, GravixMusicStatus.idle);
+      expect(rec, isEmpty);
+      expect(media.skip(1), isEmpty);
+      expect(clientNative.where((c) => c == 'startLocalRecording'), isEmpty);
+      // the leave unpublishes and stops it, not the music
+      expect(identical(lp.getTrackPublicationBySource(TrackSource.microphone)?.track, sessionMic), isTrue);
+    });
+
+    test('stopForLeave (GravixRoomService.disconnect): no republish even while still connected', () async {
+      final (_, _, m) = await musicOnDtxMic();
+      await m.stopForLeave();
+      expect(native.control.last, 'stop');
+      expect(rec, isEmpty);
+    });
+
+    test('room disconnected event: no republish', () async {
+      final (room, _, m) = await musicOnDtxMic();
+      room.gravixMarkLeaving();
+      room.events.emit(RoomDisconnectedEvent());
+      await _settle(5);
+      expect(m.state.value.status, GravixMusicStatus.idle);
+      expect(rec, isEmpty);
+    });
+
+    test('dispose of a leaving room: no republish', () async {
+      final (room, _, m) = await musicOnDtxMic();
+      room.gravixMarkLeaving();
+      await m.dispose();
+      expect(rec, isEmpty);
+    });
+
+    test('the leave starts during the DTX republish: retries stop, every created track is stopped', () async {
+      late Room r;
+      final (room, _, m) = await musicOnDtxMic(failRestore: true, onRestorePublish: () => r.gravixMarkLeaving());
+      r = room;
+      await m.stop();
+      expect(rec, ['create', 'unpublish TR_r1', 'publish dtx=true']);
+      expect(media, hasLength(2));
+      expect(media[1].stopped, isTrue); // the unpublished new track
+      expect(clientNative, ['startLocalRecording', 'stopLocalRecording']);
+    });
+
+    test('a republish refused three times (connected): the new track is stopped and released', () async {
+      final (_, _, m) = await musicOnDtxMic(failRestore: true);
+      await m.stop();
+      // wanted (dtx on), then twice the fallback (the session's options)
+      expect(rec, ['create', 'unpublish TR_r1', 'publish dtx=true', 'publish dtx=false', 'publish dtx=false']);
+      expect(media[1].stopped, isTrue);
+      expect(clientNative.where((c) => c == 'startLocalRecording'), hasLength(1));
+      expect(clientNative.last, 'stopLocalRecording');
+    });
+  });
+}
+
+class _RecTrack implements rtc.MediaStreamTrack {
+  _RecTrack(this.id);
+  @override
+  final String? id;
+  @override
+  bool enabled = true;
+  bool stopped = false;
+  @override
+  String? get kind => 'audio';
+  @override
+  Future<void> stop() async => stopped = true;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => invocation.isSetter ? null : super.noSuchMethod(invocation);
 }

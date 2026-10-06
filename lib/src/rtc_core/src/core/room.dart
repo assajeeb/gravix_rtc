@@ -90,6 +90,25 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   @visibleForTesting
   set debugLocalParticipant(LocalParticipant? p) => _localParticipant = p;
 
+  /// GRAVIX(0.4.12): a leave has started (disconnect, dispose, or
+  /// GravixRoomService's disconnect, which marks it before its unpublish
+  /// steps). Cleared by the next connect.
+  bool _gravixLeaving = false;
+
+  @internal
+  bool get gravixLeaving => _gravixLeaving;
+
+  @internal
+  void gravixMarkLeaving() => _gravixLeaving = true;
+
+  /// GRAVIX(0.4.12): whether the local microphone may still be republished (a
+  /// room-music DTX swap, RED auto). False from the moment a leave starts:
+  /// field 2026-10-06, a republish racing the leave failed three times and
+  /// left a capture running after the room was gone.
+  @internal
+  bool get gravixCanRepublish =>
+      !_gravixLeaving && !isDisposed && _localParticipant != null && connectionState == ConnectionState.connected;
+
   /// name of the room
   String? get name => _name;
   String? _name;
@@ -219,6 +238,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     preConnectAudioBuffer = PreConnectAudioBuffer(this);
 
     onDispose(() async {
+      _gravixLeaving = true;
       // GRAVIX: disposed while still connected: the leave goes out before the
       // cleanup below (which unpublishes tracks and closes the socket without one)
       this.engine.gravixLeaveBestEffort();
@@ -296,6 +316,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       );
     }
     connectOptions ??= ConnectOptions();
+    _gravixLeaving = false;
     _pendingTrackQueue.updateTtl(connectOptions.timeouts.subscribe);
     // ignore: deprecated_member_use_from_same_package
     if ((effectiveRoomOptions.encryption != null || effectiveRoomOptions.e2eeOptions != null) &&
@@ -800,6 +821,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
+    _gravixLeaving = true;
     final bool isPendingReconnect = engine.isPendingReconnect;
     if (engine.isClosed && !isPendingReconnect && engine.connectionState == ConnectionState.disconnected) {
       logger.warning('Engine is already closed');
@@ -1136,6 +1158,14 @@ extension RoomPrivateMethods on Room {
 
     // clean up engine
     await engine.cleanUp();
+
+    if (disposeLocalParticipant) {
+      // GRAVIX(0.4.12): the room is left; no recorder the explicit start
+      // pre-warmed may outlive it (Android; WebRTC's own recording, stopped
+      // with the engine above, is not touched). Before the audio session stop
+      // and the foreground-service release, whatever their timing.
+      await gravixReleaseExplicitRecording();
+    }
 
     await NativeAudioManagement.stop();
 

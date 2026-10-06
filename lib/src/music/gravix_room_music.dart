@@ -260,7 +260,15 @@ class GravixRoomMusic {
     @visibleForTesting Duration captureTimeout = const Duration(seconds: 3),
     @visibleForTesting Future<String> Function(GravixMusicSource source)? assetResolver,
     @visibleForTesting Future<bool> Function(String path)? fileExists,
+    @visibleForTesting Future<LocalAudioTrack> Function(AudioCaptureOptions options)? createMicTrack,
+    @visibleForTesting Future<void> Function(LocalAudioTrack track, AudioPublishOptions options)? publishMicTrack,
+    @visibleForTesting Future<void> Function(String sid)? unpublishMicTrack,
+    @visibleForTesting Duration republishRetryDelay = const Duration(milliseconds: 400),
   }) : _fileExists = fileExists ?? ((p) => File(p).exists()),
+       _createMicTrack = createMicTrack,
+       _publishMicTrack = publishMicTrack,
+       _unpublishMicTrack = unpublishMicTrack,
+       _republishRetryDelay = republishRetryDelay,
        _channel = channel ?? const MethodChannel(kGravixMusicChannel),
        _pollInterval = pollInterval,
        _captureTimeout = captureTimeout,
@@ -297,6 +305,12 @@ class GravixRoomMusic {
   Timer? _poll;
   bool _polling = false;
   Future<void> _queue = Future<void>.value();
+
+  // tests: the republish's track/publish seams (null = the real ones)
+  final Future<LocalAudioTrack> Function(AudioCaptureOptions options)? _createMicTrack;
+  final Future<void> Function(LocalAudioTrack track, AudioPublishOptions options)? _publishMicTrack;
+  final Future<void> Function(String sid)? _unpublishMicTrack;
+  final Duration _republishRetryDelay;
 
   // the music session's hold on the microphone
   LocalAudioTrack? _sessionTrack;
@@ -394,6 +408,12 @@ class GravixRoomMusic {
     await _endSession();
     _set(_state.value.copyWith(status: GravixMusicStatus.idle, interrupted: false, clearError: true));
   });
+
+  /// The room is being left (GravixRoomService.disconnect, 0.4.12): the mixer
+  /// stops and the session ends without touching the microphone (no DTX
+  /// republish, no restore); the leave unpublishes and stops the mic itself.
+  @internal
+  Future<void> stopForLeave() => _serial(() => _teardown(roomGone: true));
 
   /// Jumps within the current track (no-op when idle).
   Future<void> seek(Duration position) => _serial(() async {
@@ -618,6 +638,16 @@ class GravixRoomMusic {
     final processingBefore = _processingBefore;
     _processingBefore = null;
     if (track == null) return;
+    // GRAVIX(0.4.12): a room that is leaving (or gone) gets nothing back: no
+    // DTX republish, no bitrate or processing restore. Field 2026-10-06: the
+    // app's leave stopped the music, the stop republished the mic during the
+    // disconnect, and the failed republish left the microphone open after the
+    // leave. The leave unpublishes and stops the microphone itself.
+    final room = _room;
+    if (!roomGone && (room == null || !room.gravixCanRepublish)) {
+      debugPrint('room music: ended while the room is leaving; the mixer stops, the microphone is left to the leave');
+      roomGone = true;
+    }
     if (roomGone) {
       _bitrateApplied = false;
       await track.leaveMusicVoiceMute();
@@ -689,7 +719,13 @@ class GravixRoomMusic {
       track,
       wanted: base.copyWith(dtx: dtx),
       fallback: base,
-      stillWanted: () => identical(_room, room),
+      createTrack: _createMicTrack,
+      publish: _publishMicTrack,
+      unpublish: _unpublishMicTrack,
+      retryDelay: _republishRetryDelay,
+      // the room still connected and not leaving (0.4.12): a republish racing
+      // a leave must not leave a track or a capture behind
+      stillWanted: () => identical(_room, room) && room.gravixCanRepublish,
     );
     debugPrint('room music: microphone republished=${fresh != null} dtx=${ok ? dtx : base.dtx}');
     return (fresh, ok);

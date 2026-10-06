@@ -247,10 +247,26 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     await GravixEngineMicMute.release();
   }
 
+  /// Whether this track's [startCapture] started the audio device module's
+  /// recorder itself (the explicit start, `startLocalRecording`).
+  bool _explicitRecording = false;
+
   @override
   Future<bool> stop() async {
     await _leaveEngineMute();
-    return super.stop();
+    final did = await super.stop();
+    // GRAVIX(0.4.12, field 2026-10-06): the explicit start is a pre-warm that
+    // WebRTC never adopts unless the track gets published and the engine starts
+    // recording. A track stopped without that (a failed publish, a republish
+    // that lost the race with a leave) left the Android recorder running after
+    // the engine's StopRecording/Terminate: the microphone stayed open after
+    // the leave. Released here; a recorder WebRTC itself is running is left
+    // alone by the native side.
+    if (_explicitRecording) {
+      _explicitRecording = false;
+      await gravixReleaseExplicitRecording();
+    }
+    return did;
   }
 
   @override
@@ -261,10 +277,12 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     if (owner != null && !identical(owner, this)) await owner._leaveEngineMute();
     if (GravixEngineMicMute.engaged && _engineMuteOwner == null) await GravixEngineMicMute.release();
     await super.startCapture();
-    if (lkPlatformSupportsExplicitAudioRecordingStart()) {
+    if (_gravixExplicitRecordingSupported()) {
       // Match Swift: start the ADM before publishing so capture-time audio
       // processing options are applied before WebRTC opens the microphone.
-      await gravixStartExplicitRecording(() => Native.startLocalRecording(currentOptions.processing.toMap()));
+      if (await gravixStartExplicitRecording(() => Native.startLocalRecording(currentOptions.processing.toMap()))) {
+        _explicitRecording = true;
+      }
     }
   }
 
@@ -349,6 +367,36 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 /// something a later start can fix, so it fails the track as a
 /// [TrackCreateException] instead of being reported as an audio processing
 /// failure.
+/// Tests: the platform the explicit recording start/release pretend to run on
+/// (null = the real one; under `flutter test` the explicit start is off).
+@visibleForTesting
+PlatformType? gravixExplicitRecordingDebugPlatform;
+
+bool _gravixExplicitRecordingSupported() {
+  final p = gravixExplicitRecordingDebugPlatform;
+  if (p != null) return const [PlatformType.iOS, PlatformType.macOS, PlatformType.android].contains(p);
+  return lkPlatformSupportsExplicitAudioRecordingStart();
+}
+
+/// Releases a recorder pre-warmed by the explicit start that WebRTC never
+/// took over (0.4.12). Android only: `requestStopRecording` stops the Java
+/// recorder only while the engine itself is not recording, so it can never cut
+/// a live published microphone. iOS's `stopLocalRecording` stops the audio
+/// engine unconditionally, so it is not called there. Never throws.
+@internal
+Future<void> gravixReleaseExplicitRecording() async {
+  final p = gravixExplicitRecordingDebugPlatform;
+  final android = p != null
+      ? p == PlatformType.android
+      : _gravixExplicitRecordingSupported() && lkPlatformIs(PlatformType.android);
+  if (!android) return;
+  try {
+    await Native.stopLocalRecording();
+  } catch (e) {
+    logger.warning('releasing the explicit audio recording failed: $e');
+  }
+}
+
 @visibleForTesting
 Future<bool> gravixStartExplicitRecording(Future<void> Function() start) async {
   try {
