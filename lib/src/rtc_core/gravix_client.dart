@@ -38,6 +38,7 @@ export 'src/gravix.dart';
 export 'src/logger.dart';
 export 'src/managers/android_screen_capture.dart';
 export 'src/managers/broadcast_manager.dart';
+export 'src/managers/gravix_foreground_service.dart';
 export 'src/managers/event.dart';
 export 'src/options.dart';
 export 'src/agent/agent.dart';

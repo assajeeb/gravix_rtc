@@ -261,8 +261,14 @@ class MusicMixerPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallH
     // ---- reflection install ----
 
     private fun audioInput(): Any? {
-        // flutter_webrtc's own singleton first (works for any engine), then the
-        // engine's plugin registry
+        // the UI engine's own flutter_webrtc first, its singleton second: a
+        // headless engine registered later (foreground task, FCM) replaces the
+        // singleton with an instance that has no audio device module
+        // (field 2026-10-06, EnginePluginLookup)
+        val ownAdm = (flutterEngine ?: bindingEngine)?.let { e ->
+            (e.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin)?.audioDeviceModule
+        }
+        ownAdm?.let { return it.audioInput }
         FlutterWebRTCPlugin.sharedSingleton?.audioDeviceModule?.let { return it.audioInput }
         val engine = flutterEngine ?: bindingEngine
             ?: return null.also { Log.e(TAG, "flutterEngine not set") }

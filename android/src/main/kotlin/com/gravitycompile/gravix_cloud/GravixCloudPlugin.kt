@@ -13,7 +13,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
  * this one owns the others:
  *  - [GravixClientPlugin]: the RTC core's `gravix_client` channel (audio
  *    session + routing, audio processing, visualizer/renderer, screen-capture
- *    foreground service).
+ *    and call foreground services).
  *  - [MusicMixerPlugin]: `com.gravitycompile.gravix_rtc/music` (room music;
  *    and the fast-connect channel it already owns). Its `flutterEngine` companion keeps working for apps that
  *    set it from `configureFlutterEngine`.
@@ -32,12 +32,17 @@ class GravixCloudPlugin : FlutterPlugin, ActivityAware {
     client.onDetachedFromEngine(binding)
   }
 
-  override fun onAttachedToActivity(binding: ActivityPluginBinding) = music.onAttachedToActivity(binding)
+  override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+    client.onAttachedToActivity()
+    music.onAttachedToActivity(binding)
+  }
 
   override fun onDetachedFromActivityForConfigChanges() = music.onDetachedFromActivityForConfigChanges()
 
-  override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) =
+  override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+    client.onAttachedToActivity()
     music.onReattachedToActivityForConfigChanges(binding)
+  }
 
   override fun onDetachedFromActivity() = music.onDetachedFromActivity()
 }

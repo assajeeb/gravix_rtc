@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.4.11 — 2026-10-06
+
+### Android: built-in call foreground service (`GravixForegroundService`), disabled by default
+Field 2026-10-05 (SDK phone bench, Xiaomi, Android 13): about 5 s after the user pressed Home,
+`AudioPolicyService` logged `App op 27 missing, silencing record` and the room
+heard silence from the phone. Android 11+ silences microphone capture of an
+app that is not visible unless it runs a foreground service of type
+`microphone`. Room music went silent with it: it is mixed into the microphone
+capture. Listeners need `mediaPlayback` so playback keeps going.
+
+The SDK now ships that service. It is **off by default** and does nothing
+until the app turns it on:
+
+```dart
+GravixForegroundService.defaults = const GravixForegroundServiceOptions(
+  enabled: true,
+  notificationTitle: 'Live room',
+  notificationText: 'Tap to return',
+  showLeaveAction: true,
+);
+GravixForegroundService.leaveRequests.listen((_) => leaveTheRoom());
+```
+
+- **Turned on:** `Room.connect` (so also `GravixRoomService.connect`) starts it
+  as `mediaPlayback`. This covers every role, listeners included.
+  - Publishing the microphone adds `microphone`, but only when RECORD_AUDIO is
+    granted.
+  - Publishing the camera adds `camera`, only with `includeCamera` and the
+    CAMERA permission.
+  - When the last room disconnects or is disposed, the service stops after a
+    3 s grace. The grace means a room being replaced does not have to restart
+    it from the background.
+- **Type upgrades:** Android 14 refuses one asked for while the app is in the
+  background. The SDK applies it when the app comes back.
+- **Per room:** `RoomOptions(foregroundService: ...)` and
+  `GravixRoomService.connect(foregroundService: ...)`.
+- **Manual control:** `GravixForegroundService.start/update/stop`, `isRunning`,
+  `activeTypes`, `isSupported`.
+- **The service itself:** a partial wake lock and a Wi-Fi lock while it runs.
+  Notification channel `gravix_call` (low importance). Swiping the app from
+  Recents stops it (no restart). Only the activity's Flutter engine can start
+  or stop it, so a headless engine detaching does not end the call.
+- **Lifecycle:** while the service is enabled, the SDK forwards app
+  background/foreground to `GravixRoomService.setAppBackgrounded`. It never
+  mutes the microphone or the playout.
+- **Manifest:** the SDK manifest adds the service, the
+  `FOREGROUND_SERVICE_MICROPHONE` / `_MEDIA_PLAYBACK` / `_CAMERA`, `WAKE_LOCK`
+  and `POST_NOTIFICATIONS` permissions, and a non-exported receiver for the
+  Leave action. While the service is disabled these entries do nothing. To drop
+  them, see the README, "Android background (foreground service)".
+- **iOS and web:** no-op.
+
+Phone check (Xiaomi, Android 13), with the service on:
+- host with mic and music, 60 s on Home: the web listener kept hearing both
+  voice and music, and there was no `silencing record`;
+- listener only, 60 s on Home: playout kept running (`mediaPlayback` only);
+- the types went from `mediaPlayback` to `microphone|mediaPlayback` when the
+  mic was published;
+- swiping from Recents stopped the service, with no restart;
+- the notification's Leave reached Dart.
+
+With it disabled: no service and no notification, and the
+`silencing record` from the field came back.
+
+
+### Android: a headless Flutter engine no longer breaks the native side
+Field 2026-10-06 (an app in production, Xiaomi): every room-music start logged
+`voice processing not changed: PlatformException(INVALID_ARGUMENT, track is not
+a local audio track)`, so software noise suppression and AGC stayed on under
+the music. Cause: the native plugin found flutter_webrtc through
+`FlutterWebRTCPlugin.sharedSingleton`, which every new FlutterWebRTCPlugin
+overwrites in its constructor. flutter_foreground_task creates a headless
+FlutterEngine on every service start (with or without a task callback), the
+engine auto-registers all plugins, and from then on the singleton was that
+engine's instance: no local tracks, no audio device module. Affected after such
+an engine starts: `setAudioProcessingOptions` (room music's voice-processing
+relax), the audio visualizer/renderer, the engine microphone mute (Dart fell
+back to disabling the track, which stops the recorder), local recording
+start/stop and the peer-connection factory lookup. The plugin now uses the
+flutter_webrtc instance registered on its own engine and the singleton only as
+a fallback (`EnginePluginLookup`, JVM test); the music mixer's install looks on
+its own engine first as well.
+
 ## 0.4.10 — 2026-10-06
 
 Reconnect fixes from the 2026-10-05 field test, the gravix_rtc version on the

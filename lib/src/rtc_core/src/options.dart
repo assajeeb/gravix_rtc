@@ -18,6 +18,7 @@ import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 import 'constants.dart';
 import 'core/reconnect_policy.dart';
 import 'e2ee/options.dart';
+import 'managers/gravix_foreground_service.dart';
 import 'track/local/audio.dart';
 import 'track/local/video.dart';
 import 'track/options.dart';
@@ -285,6 +286,11 @@ class RoomOptions {
   /// 2700, 4800, then 7000 ms × 5, jittered). React SDK parity.
   final ReconnectPolicy? reconnectPolicy;
 
+  /// GRAVIX (2026-10-06): the Android call foreground service for this room.
+  /// Null = [GravixForegroundService.defaults] (disabled unless the app turned
+  /// it on). See [GravixForegroundService].
+  final GravixForegroundServiceOptions? foregroundService;
+
   const RoomOptions({
     this.defaultCameraCaptureOptions = const CameraCaptureOptions(),
     this.defaultScreenShareCaptureOptions = const ScreenShareCaptureOptions(),
@@ -301,6 +307,7 @@ class RoomOptions {
     this.reconnectPolicy,
     this.fastPublish = true,
     this.networkOptions = const NetworkOptions(),
+    this.foregroundService,
   });
 
   RoomOptions copyWith({
@@ -318,6 +325,7 @@ class RoomOptions {
     bool? fastPublish,
     NetworkOptions? networkOptions,
     ReconnectPolicy? reconnectPolicy,
+    GravixForegroundServiceOptions? foregroundService,
   }) {
     return RoomOptions(
       defaultCameraCaptureOptions: defaultCameraCaptureOptions ?? this.defaultCameraCaptureOptions,
@@ -335,6 +343,7 @@ class RoomOptions {
       fastPublish: fastPublish ?? this.fastPublish,
       networkOptions: networkOptions ?? this.networkOptions,
       reconnectPolicy: reconnectPolicy ?? this.reconnectPolicy,
+      foregroundService: foregroundService ?? this.foregroundService,
     );
   }
 }

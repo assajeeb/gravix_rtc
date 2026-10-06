@@ -316,6 +316,59 @@ class Native {
     });
   }
 
+  static final StreamController<String> _callServiceEvents = StreamController<String>.broadcast();
+
+  /// Events from the Android call foreground service: `leave` (the
+  /// notification's Leave action) and `stopped` (the service ended, for
+  /// example swiped from Recents).
+  @internal
+  static Stream<String> get callServiceEvents => _callServiceEvents.stream;
+
+  /// Starts the Android call foreground service (GravixCallService) and
+  /// completes once it is in the foreground, with the applied types
+  /// (`types` bit mask, `typeNames`). Throws [PlatformException]
+  /// (`callServiceFailed`) when Android refuses it.
+  @internal
+  static Future<Map<String, Object?>> startCallService({
+    String? notificationTitle,
+    String? notificationText,
+    bool showLeaveAction = false,
+    String? leaveActionLabel,
+    bool microphone = false,
+    bool camera = false,
+  }) async {
+    final reply = await channel.invokeMethod<dynamic>('startCallService', <String, dynamic>{
+      'notificationTitle': ?notificationTitle,
+      'notificationText': ?notificationText,
+      'showLeaveAction': showLeaveAction,
+      'leaveActionLabel': ?leaveActionLabel,
+      'microphone': microphone,
+      'camera': camera,
+    });
+    return reply is Map ? reply.cast<String, Object?>() : const <String, Object?>{};
+  }
+
+  /// Re-applies the call service's types. The reply carries `error` when
+  /// Android refused the new types (the service keeps its old ones).
+  @internal
+  static Future<Map<String, Object?>> updateCallService({bool? microphone, bool? camera}) async {
+    final reply = await channel.invokeMethod<dynamic>('updateCallService', <String, dynamic>{
+      'microphone': ?microphone,
+      'camera': ?camera,
+    });
+    return reply is Map ? reply.cast<String, Object?>() : const <String, Object?>{};
+  }
+
+  /// Stops the call foreground service. Never throws.
+  @internal
+  static Future<void> stopCallService() async {
+    try {
+      await channel.invokeMethod<void>('stopCallService', <String, dynamic>{});
+    } catch (error) {
+      logger.warning('stopCallService did throw $error');
+    }
+  }
+
   /// Stops the Android MediaProjection foreground service. Never throws.
   @internal
   static Future<void> stopScreenCaptureService() async {
@@ -430,6 +483,12 @@ class Native {
             isRecordingEnabled: args['isRecordingEnabled'] == true,
           );
         }
+        return null;
+      case 'callServiceLeaveRequested':
+        _callServiceEvents.add('leave');
+        return null;
+      case 'callServiceStopped':
+        _callServiceEvents.add('stopped');
         return null;
       default:
         logger.warning('Method ${call.method} is not implemented.');

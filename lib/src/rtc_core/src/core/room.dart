@@ -32,6 +32,7 @@ import '../hardware/hardware.dart';
 import '../internal/events.dart';
 import '../logger.dart';
 import '../managers/event.dart';
+import '../managers/gravix_foreground_service.dart';
 import '../options.dart';
 import '../participant/local.dart';
 import '../participant/participant.dart';
@@ -365,6 +366,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // configure audio for native platform
     await NativeAudioManagement.start();
 
+    // GRAVIX (2026-10-06): the Android call foreground service, when enabled
+    // (off by default). Not awaited: the join never waits for it.
+    unawaited(GravixForegroundService.roomConnecting(this, effectiveRoomOptions.foregroundService));
+
     var didConnect = false;
     try {
       await engine.connect(
@@ -408,6 +413,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     } finally {
       if (!didConnect) {
         await NativeAudioManagement.stop();
+        GravixForegroundService.roomReleased(this);
       }
     }
   }
@@ -1132,6 +1138,9 @@ extension RoomPrivateMethods on Room {
     await engine.cleanUp();
 
     await NativeAudioManagement.stop();
+
+    // the room is gone (disconnect, dispose, lost): its foreground-service hold too
+    GravixForegroundService.roomReleased(this);
 
     // reset params
     _roomInfo = null;

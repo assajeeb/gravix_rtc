@@ -175,9 +175,96 @@ Runner `Info.plist`:
 <string>Video in calls</string>
 ```
 
-On Android, keep the process alive in the background with your own foreground
-service (type `microphone`/`phoneCall`) if calls must survive the app being
-backgrounded for long.
+### Android background (foreground service)
+
+On Android 11 and later, an app that is not on screen loses its microphone. About
+5 s after the user presses Home, the capture goes silent
+(`App op 27 missing, silencing record`) unless a foreground service of type
+`microphone` is running. Room music goes silent with it, because the music is
+mixed into the microphone. Playback for listeners needs a `mediaPlayback`
+service.
+
+The SDK ships that service. It is **off by default**. Turn it on once, before
+the first connect:
+
+```dart
+GravixForegroundService.defaults = const GravixForegroundServiceOptions(
+  enabled: true,
+  notificationTitle: 'Live room',
+  notificationText: 'Tap to return',
+  showLeaveAction: true, // adds a "Leave" button to the notification
+);
+GravixForegroundService.leaveRequests.listen((_) => leaveTheRoom());
+```
+
+From then on:
+
+- `Room.connect` (and `GravixRoomService.connect`) starts the service as
+  `mediaPlayback`, for every role.
+- Publishing the microphone adds `microphone`.
+- Publishing the camera adds `camera`, only with `includeCamera: true`.
+- When the room disconnects or is disposed, the service stops.
+
+You can also control it per room or by hand:
+
+- one room: `RoomOptions(foregroundService: ...)` or
+  `GravixRoomService.connect(foregroundService: ...)`;
+- by hand: `GravixForegroundService.start(micPublished: ...)`, `update(...)`
+  and `stop()`.
+
+`isRunning` and `activeTypes` report the state. On iOS and the web every call
+is a no-op (`isSupported` is false). On iOS, the `audio` background mode above
+already keeps both directions alive.
+
+Android 14 rules the SDK follows:
+
+- **Start while visible.** Android refuses to start a foreground service from
+  the background. The SDK starts it at connect, while the user is in the app.
+- **`microphone` needs `RECORD_AUDIO` already granted.** Without it the service
+  runs as `mediaPlayback` only, so playback works and the microphone does not
+  in the background.
+  - Ask for the permission before the user takes a seat.
+  - A mic published while the app is in the background gets its `microphone`
+    type when the app comes back.
+- **`POST_NOTIFICATIONS` (Android 13+) only affects visibility.** Without it the
+  service still runs, but the notification is hidden (and so is its Leave
+  button). The SDK does not ask for it; request it in your app if you want the
+  notification shown.
+- **Swiping the app away from Recents stops the service.** It does not restart.
+
+The notification uses channel `gravix_call` with low importance. Its small icon
+is the app icon. To use another drawable, add this inside `<application>`:
+
+```xml
+<meta-data
+  android:name="com.gravitycompile.gravix_rtc.call_notification_icon"
+  android:resource="@drawable/ic_call_notification" />
+```
+
+The SDK's manifest declares the service, a non-exported receiver for the Leave
+action, and these permissions: `FOREGROUND_SERVICE_MICROPHONE`,
+`FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `FOREGROUND_SERVICE_CAMERA`, `WAKE_LOCK`
+and `POST_NOTIFICATIONS`. They do nothing while the service is disabled.
+
+Google Play asks every app that declares foreground-service types to explain
+them in the Play Console. If your app does not use the service, remove the
+entries in your app's `AndroidManifest.xml`:
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" tools:node="remove" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" tools:node="remove" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" tools:node="remove" />
+  <application>
+    <service android:name="com.gravitycompile.gravix_cloud.rtc.GravixCallService" tools:node="remove" />
+    <receiver android:name="com.gravitycompile.gravix_cloud.rtc.GravixCallLeaveReceiver" tools:node="remove" />
+  </application>
+</manifest>
+```
+
+If you already run your own foreground service for calls, keep the SDK's
+disabled. Two call notifications would confuse users.
 
 ### CallKit (iOS): activation and mute
 

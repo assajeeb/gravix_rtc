@@ -26,6 +26,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.annotation.NonNull
 
+import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -51,15 +52,52 @@ import java.util.concurrent.RejectedExecutionException
 /** GravixClientPlugin */
 class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
   private var audioProcessors = mutableMapOf<String, AudioProcessors>()
-  // Read on every use: flutter_webrtc sets the singleton in its own constructor,
-  // and plugin registration order is not something this class should rely on.
+  // Read on every use, and from OUR engine: flutter_webrtc sets the singleton in
+  // its own constructor, so a headless engine started later (a foreground
+  // task, an FCM handler) replaces it with an instance that has no local
+  // tracks and no audio device module (field 2026-10-06, EnginePluginLookup).
+  // Plugin registration order is not something this class relies on either.
   private val flutterWebRTCPlugin: FlutterWebRTCPlugin?
-    get() = FlutterWebRTCPlugin.sharedSingleton
+    get() = EnginePluginLookup.resolve(
+      { flutterEngine?.plugins?.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin },
+      { FlutterWebRTCPlugin.sharedSingleton },
+    )
+  private var flutterEngine: FlutterEngine? = null
   private var binaryMessenger: BinaryMessenger? = null
   private var applicationContext: Context? = null
   private var audioSwitchManager: GxAudioSwitchManager? = null
   private var audioDeviceModuleExecutor: ExecutorService? = null
   private val mainHandler = Handler(Looper.getMainLooper())
+
+  // True once an Activity attached to this plugin's engine; kept until the
+  // engine detaches (onDetachedFromActivity runs before onDetachedFromEngine).
+  // Only that engine may start or stop the call service: a headless engine
+  // (foreground task, FCM handler) detaching must not end the user's call.
+  @Volatile
+  private var isMainEngine = false
+
+  private val callServiceListener = object : GravixCallService.Listener {
+    override fun onLeaveRequested() {
+      mainHandler.post { invokeOnChannel("callServiceLeaveRequested") }
+    }
+
+    override fun onStopped() {
+      mainHandler.post { invokeOnChannel("callServiceStopped") }
+    }
+  }
+
+  private fun invokeOnChannel(method: String) {
+    try {
+      if (::channel.isInitialized) channel.invokeMethod(method, null)
+    } catch (t: Throwable) {
+      Log.w(TAG, "$method delivery failed", t)
+    }
+  }
+
+  /** From GravixCloudPlugin's ActivityAware forwarding. */
+  fun onAttachedToActivity() {
+    isMainEngine = true
+  }
 
   /// The MethodChannel that will the communication between Flutter and native Android
   ///
@@ -71,6 +109,8 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     // Gravix owns the platform audio session, so disable flutter_webrtc's own
     // native audio management. Set at registration, before any audio op.
     AudioSwitchManager.setAudioSessionManagementEnabled(false)
+    @Suppress("DEPRECATION")
+    flutterEngine = flutterPluginBinding.flutterEngine
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "gravix_client")
     channel.setMethodCallHandler(this)
     binaryMessenger = flutterPluginBinding.binaryMessenger
@@ -545,6 +585,48 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
         }
       }
 
+      // Call foreground service (GravixCallService): disabled by default, the
+      // Dart side calls these only when the app enabled it.
+      "startCallService" -> {
+        val context = applicationContext
+        if (context == null || !isMainEngine) {
+          result.error("callServiceFailed", if (context == null) "plugin is not attached" else "not the activity engine", null)
+          return
+        }
+        GravixCallService.listener = callServiceListener
+        val config = GravixCallService.Config(
+          title = call.argument<String>("notificationTitle"),
+          text = call.argument<String>("notificationText"),
+          showLeaveAction = call.argument<Boolean>("showLeaveAction") ?: false,
+          leaveLabel = call.argument<String>("leaveActionLabel"),
+          micWanted = call.argument<Boolean>("microphone") ?: false,
+          cameraWanted = call.argument<Boolean>("camera") ?: false,
+        )
+        GravixCallService.start(context, config) { outcome ->
+          mainHandler.post {
+            if (outcome.error == null) {
+              result.success(callServiceReply(outcome))
+            } else {
+              result.error("callServiceFailed", outcome.error, null)
+            }
+          }
+        }
+      }
+
+      "updateCallService" -> {
+        if (!isMainEngine) {
+          result.error("callServiceFailed", "not the activity engine", null)
+          return
+        }
+        val outcome = GravixCallService.update(call.argument<Boolean>("microphone"), call.argument<Boolean>("camera"))
+        result.success(callServiceReply(outcome))
+      }
+
+      "stopCallService" -> {
+        if (isMainEngine) applicationContext?.let { GravixCallService.stop(it) }
+        result.success(null)
+      }
+
       "stopScreenCaptureService" -> {
         applicationContext?.let { ScreenCaptureService.stop(it) }
         result.success(null)
@@ -563,6 +645,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
     channel.setMethodCallHandler(null)
+    flutterEngine = null
 
     audioSwitchManager?.dispose()
     audioSwitchManager = null
@@ -571,12 +654,24 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     audioDeviceModuleExecutor = null
 
     applicationContext?.let { ScreenCaptureService.stop(it) }
+    if (isMainEngine) {
+      // the UI engine is going away: the call it started ends with it
+      applicationContext?.let { GravixCallService.stop(it) }
+      if (GravixCallService.listener === callServiceListener) GravixCallService.listener = null
+    }
+    isMainEngine = false
     applicationContext = null
 
     // Cleanup all processors
     audioProcessors.values.forEach { it.cleanup() }
     audioProcessors.clear()
   }
+
+  private fun callServiceReply(outcome: GravixCallService.Outcome): Map<String, Any?> = mapOf(
+    "types" to outcome.types,
+    "typeNames" to CallServiceTypes.names(outcome.types),
+    "error" to outcome.error,
+  )
 
   companion object {
     private const val TAG = "GravixClientPlugin"

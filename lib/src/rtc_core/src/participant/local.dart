@@ -42,6 +42,7 @@ import '../internal/events.dart';
 import '../logger.dart';
 import '../managers/android_screen_capture.dart';
 import '../managers/broadcast_manager.dart';
+import '../managers/gravix_foreground_service.dart';
 import '../options.dart';
 import '../proto/gravixcloud_models.pb.dart' as lk_models;
 import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
@@ -275,6 +276,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
       final pub = LocalTrackPublication<LocalAudioTrack>(participant: this, info: trackInfo, track: track);
       addTrackPublication(pub);
+      if (track.source == TrackSource.microphone) {
+        // background capture needs the service's microphone type (when enabled)
+        unawaited(GravixForegroundService.roomPublished(room, microphone: true));
+      }
 
       // did publish
       await track.onPublish();
@@ -573,6 +578,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
     final pub = LocalTrackPublication<LocalVideoTrack>(participant: this, info: trackInfo, track: track);
     addTrackPublication(pub);
+    if (track.source == TrackSource.camera) {
+      unawaited(GravixForegroundService.roomPublished(room, camera: true));
+    }
     pub.backupVideoCodec = publishOptions.backupVideoCodec;
 
     // did publish

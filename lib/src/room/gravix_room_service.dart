@@ -131,8 +131,10 @@ class GravixRoomService implements GravixAudioHost {
   /// The session guard stands down while backgrounded: an app that released
   /// the audio session on purpose so other apps can record is *supposed* to be
   /// in `MODE_NORMAL`, and "repairing" that would grab the session straight
-  /// back. This SDK does not install its own lifecycle observer — call this
-  /// from the app's `didChangeAppLifecycleState`.
+  /// back. The SDK installs no lifecycle observer of its own — call this from
+  /// the app's `didChangeAppLifecycleState` — except while the Android call
+  /// foreground service is enabled for the connect ([GravixForegroundService]):
+  /// then the SDK forwards it (calling it from the app as well is harmless).
   ///
   /// No-op unless [GravixAudioRouting.v2] is on.
   void setAppBackgrounded(bool backgrounded) {
@@ -630,6 +632,12 @@ class GravixRoomService implements GravixAudioHost {
     //   quiet background music as silence (singing hosts, the music mixer), so
     //   leave it off where music matters. Kept across RED auto republishes.
     bool dtx = false,
+    // [foregroundService] the Android call foreground service for THIS connect
+    //   (2026-10-06): keeps the mic, the room playback and room music alive in
+    //   the background. Null = GravixForegroundService.defaults (disabled unless
+    //   the app enabled it). When enabled, the service also forwards app
+    //   background/foreground to [setAppBackgrounded].
+    GravixForegroundServiceOptions? foregroundService,
   }) {
     // GRAVIX(one-session, 2026-10-05): one session per room + identity. Field: a
     // second join for the same identity raced the first one's resume on another
@@ -686,6 +694,7 @@ class GravixRoomService implements GravixAudioHost {
           redLossThresholdPct: redLossThresholdPct,
           earlyMicTrack: earlyMicTrack,
           dtx: dtx,
+          foregroundService: foregroundService,
         );
         if (ok) {
           _sessionKey = key;
@@ -809,8 +818,10 @@ class GravixRoomService implements GravixAudioHost {
     //   quiet background music as silence (singing hosts, the music mixer), so
     //   leave it off where music matters. Kept across RED auto republishes.
     bool dtx = false,
+    GravixForegroundServiceOptions? foregroundService,
   }) async {
     _dtx = dtx;
+    _foregroundService = foregroundService;
     final joinWatch = Stopwatch()..start();
     // latched for this join: flipping the switch mid-join changes nothing
     final fastJoin = GravixFastJoin.enabled;
@@ -1047,6 +1058,7 @@ class GravixRoomService implements GravixAudioHost {
           // unpublish must NOT stop the local track.
           stopLocalTrackOnUnpublish: false,
           reconnectPolicy: reconnectPolicy,
+          foregroundService: foregroundService,
           // (RoomOptions.fastPublish used to be set here. Nothing reads it - not
           // in this fork and not upstream; publisher negotiation is started early
           // by the SERVER's JoinResponse.fastPublish, in engine.dart. Setting it
@@ -1168,6 +1180,10 @@ class GravixRoomService implements GravixAudioHost {
       }
       _seedRemoteFacing();
       isConnected.value = true;
+      if (GravixForegroundService.effective(_foregroundService).enabled) {
+        // the SDK's own lifecycle observer, only while the service is enabled
+        GravixForegroundService.addBackgroundSink(this, setAppBackgrounded);
+      }
 
       // Debug: periodic video stats so quality problems are diagnosable from
       // logcat (which layer viewers get, and what limits the publisher).
@@ -1620,6 +1636,8 @@ class GravixRoomService implements GravixAudioHost {
     // </candidate:earlyCallAudio>
     // see connect's `dtx`
     bool dtx = false,
+    // see connect's `foregroundService`
+    GravixForegroundServiceOptions? foregroundService,
   }) async {
     lastTokenError = null;
     final GravixJoinCredentials credentials;
@@ -1661,6 +1679,7 @@ class GravixRoomService implements GravixAudioHost {
       earlyCallAudio: earlyCallAudio,
       // </candidate:earlyCallAudio>
       dtx: dtx,
+      foregroundService: foregroundService,
     );
   }
 
@@ -1864,6 +1883,8 @@ class GravixRoomService implements GravixAudioHost {
     bool regionReprobeOnRestart = false,
     // null = the current call's (connect's `dtx`)
     bool? dtx,
+    // null = the current call's (connect's `foregroundService`)
+    GravixForegroundServiceOptions? foregroundService,
   }) async {
     if (_url == null) return false;
     // regionEntries is forwarded too. Until 2026-09-19 only the bare url strings
@@ -1882,6 +1903,7 @@ class GravixRoomService implements GravixAudioHost {
       regionDecisionCache: regionDecisionCache,
       regionReprobeOnRestart: regionReprobeOnRestart,
       dtx: dtx ?? _dtx,
+      foregroundService: foregroundService ?? _foregroundService,
     );
   }
 
@@ -2447,6 +2469,10 @@ class GravixRoomService implements GravixAudioHost {
 
   /// DTX for this call's microphone (connect's `dtx`); kept by every republish.
   bool _dtx = false;
+
+  /// connect's `foregroundService` (null = GravixForegroundService.defaults),
+  /// kept for reconnectWithToken.
+  GravixForegroundServiceOptions? _foregroundService;
   bool get dtx => _dtx;
 
   GravixRedMode _redMode = GravixRedMode.on;
@@ -2917,6 +2943,7 @@ class GravixRoomService implements GravixAudioHost {
       if (early != null) await _disposeEarlyMic(early);
       _room = null;
       _joinWatch = null;
+      GravixForegroundService.removeBackgroundSink(this);
       cameraPosition = CameraPosition.front;
       // the mic may have been muted in the audio device module (engine-wide);
       // the next room's microphone must not start silent
