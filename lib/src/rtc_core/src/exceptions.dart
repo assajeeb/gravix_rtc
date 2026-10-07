@@ -44,6 +44,18 @@ class MediaConnectException extends GravixRtcException {
   MediaConnectException([String msg = 'Ice connection failed']) : super._(msg);
 }
 
+/// GRAVIX(0.4.13): whether a failed join may be tried again with the same url
+/// and token (`ConnectOptions.joinRetries`): only when the server accepted the
+/// join (its JoinResponse came) and the peer connection then did not connect
+/// ([MediaConnectException]). Everything else is final, the JoinResponse
+/// timeout included: a server refuses a join it accepted at the WebSocket
+/// (room full, a failed join) with a Leave and no JoinResponse, which the client
+/// sees as that timeout. Also final: a refusal at the WebSocket
+/// ([ConnectionErrorReason.NotAllowed]: 401/403, expired token), no
+/// connectivity, a certificate pinning failure, a superseded or refused
+/// WebSocket.
+bool gravixIsJoinRetryable(Object error) => error is MediaConnectException;
+
 /// Certificate pinning validation failed for an SDK-owned TLS connection.
 class CertificatePinningException extends GravixRtcException {
   final String host;

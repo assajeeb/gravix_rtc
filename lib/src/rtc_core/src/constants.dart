@@ -21,6 +21,21 @@ class Timeouts {
   final Duration peerConnection;
   final Duration iceRestart;
 
+  /// GRAVIX(0.4.13): how long a FRESH join waits for its primary peer
+  /// connection to connect after the JoinResponse before it fails with
+  /// `MediaConnectException`. Up to 0.4.12 this wait used [connection] (10 s).
+  /// Field 2026-10-06/07: a phone in a transient stall (ICE RTT 3.9 s) failed
+  /// this wait; ICE + DTLS on a fresh join take about four to five round trips
+  /// (offer/answer, connectivity checks + nomination, two DTLS flights), ~16-20
+  /// s at that RTT, so 10 s caps a join at an RTT of ~2-2.5 s. The SFU gives a
+  /// fresh transport ~15 s of ICE checking and then 10-20 s for DTLS after ICE,
+  /// so a client wait of 20 s is not cut short by the server. Resumes and full
+  /// reconnects keep [connection]. Set it to 10 s for the 0.4.12 wait.
+  final Duration mediaConnect;
+
+  /// The [mediaConnect] default.
+  static const Duration defaultMediaConnect = Duration(seconds: 20);
+
   const Timeouts({
     required this.connection,
     required this.debounce,
@@ -28,6 +43,7 @@ class Timeouts {
     required this.subscribe,
     required this.peerConnection,
     required this.iceRestart,
+    this.mediaConnect = defaultMediaConnect,
   });
 
   static const Timeouts defaultTimeouts = Timeouts(
@@ -37,5 +53,24 @@ class Timeouts {
     subscribe: Duration(seconds: 10),
     peerConnection: Duration(seconds: 10),
     iceRestart: Duration(seconds: 10),
+    mediaConnect: defaultMediaConnect,
+  );
+
+  Timeouts copyWith({
+    Duration? connection,
+    Duration? debounce,
+    Duration? publish,
+    Duration? subscribe,
+    Duration? peerConnection,
+    Duration? iceRestart,
+    Duration? mediaConnect,
+  }) => Timeouts(
+    connection: connection ?? this.connection,
+    debounce: debounce ?? this.debounce,
+    publish: publish ?? this.publish,
+    subscribe: subscribe ?? this.subscribe,
+    peerConnection: peerConnection ?? this.peerConnection,
+    iceRestart: iceRestart ?? this.iceRestart,
+    mediaConnect: mediaConnect ?? this.mediaConnect,
   );
 }

@@ -99,7 +99,18 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   bool get gravixLeaving => _gravixLeaving;
 
   @internal
-  void gravixMarkLeaving() => _gravixLeaving = true;
+  void gravixMarkLeaving() {
+    _gravixLeaving = true;
+    _gravixWakeJoinRetry();
+  }
+
+  /// GRAVIX(0.4.13): completes the wait before a join retry early (a leave).
+  Completer<void>? _gravixJoinRetryWake;
+
+  void _gravixWakeJoinRetry() {
+    final wake = _gravixJoinRetryWake;
+    if (wake != null && !wake.isCompleted) wake.complete();
+  }
 
   /// GRAVIX(0.4.12): whether the local microphone may still be republished (a
   /// room-music DTX swap, RED auto). False from the moment a leave starts:
@@ -239,6 +250,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
     onDispose(() async {
       _gravixLeaving = true;
+      _gravixWakeJoinRetry();
       // GRAVIX: disposed while still connected: the leave goes out before the
       // cleanup below (which unpublishes tracks and closes the socket without one)
       this.engine.gravixLeaveBestEffort();
@@ -392,16 +404,80 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     unawaited(GravixForegroundService.roomConnecting(this, effectiveRoomOptions.foregroundService));
 
     var didConnect = false;
+    // GRAVIX(0.4.13): a join that failed on the way to the media connection is
+    // joined again (ConnectOptions.joinRetries). Field 2026-10-06/07: a phone in
+    // a transient network stall (ICE RTT 3.9 s) timed out its peer connection
+    // and the join gave up at once. joinRetries 0 = exactly the 0.4.12 path.
+    // Not with a fast connect or a recording pre-connect buffer: those publish a
+    // microphone inside the join (its capture can be live before the publish
+    // lands), and a retry must never leave a capture behind (0.4.12 lesson).
+    final maxRetries = connectOptions.joinRetries < 0 || fastConnectOptions != null || preConnectAudioBuffer.isRecording
+        ? 0
+        : connectOptions.joinRetries;
+    try {
+      for (var attempt = 0; ; attempt++) {
+        final mayRetry = attempt < maxRetries;
+        engine.gravixDeferJoinFailure = mayRetry;
+        try {
+          await _gravixConnectAttempt(url, token, connectOptions, effectiveRoomOptions, fastConnectOptions);
+          didConnect = true;
+          return;
+        } catch (e) {
+          // the last attempt: the engine reported the failure itself, as before
+          if (!mayRetry) rethrow;
+          final retry = attempt + 1;
+          // not a media-connect failure, a leave (ours, or the server's Leave,
+          // which closes the engine), or an attempt that published a local
+          // track: no retry, the join fails as it always did
+          if (!gravixIsJoinRetryable(e) ||
+              _gravixLeaving ||
+              isDisposed ||
+              engine.isClosed ||
+              (_localParticipant?.trackPublications.isNotEmpty ?? false)) {
+            _gravixGiveUpJoin(e);
+            rethrow;
+          }
+          await _gravixCleanUpFailedJoinAttempt();
+          final delay = connectOptions.joinRetryDelay(retry);
+          logger.warning(
+            'join attempt ${attempt + 1} failed ($e); joining again in ${delay.inMilliseconds} ms '
+            '(retry $retry of $maxRetries)',
+          );
+          events.emit(RoomJoinRetryEvent(retry: retry, maxRetries: maxRetries, delay: delay, error: e));
+          if (!await _gravixWaitJoinRetry(delay)) {
+            // left (disconnect / dispose) while waiting: nothing is retried
+            _gravixGiveUpJoin(e);
+            rethrow;
+          }
+        }
+      }
+    } finally {
+      engine.gravixDeferJoinFailure = false;
+      if (!didConnect) {
+        await NativeAudioManagement.stop();
+        GravixForegroundService.roomReleased(this);
+      }
+    }
+  }
+
+  /// One join attempt: the url (or the region the provider picked), and on a
+  /// cloud url one other region when that refuses (the core's own fallback).
+  Future<void> _gravixConnectAttempt(
+    String url,
+    String token,
+    ConnectOptions connectOptions,
+    RoomOptions roomOptions,
+    FastConnectOptions? fastConnectOptions,
+  ) async {
     try {
       await engine.connect(
         _regionUrl ?? url,
         token,
         connectOptions: connectOptions,
-        roomOptions: effectiveRoomOptions,
+        roomOptions: roomOptions,
         fastConnectOptions: fastConnectOptions,
         regionUrlProvider: _regionUrlProvider,
       );
-      didConnect = true;
     } catch (e) {
       logger.warning('could not connect to $url $e');
       if (_regionUrlProvider != null &&
@@ -416,27 +492,77 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         }
         if (nextUrl != null) {
           logger.fine('Initial connection failed with ConnectionError: $e. Retrying with another region: ${nextUrl}');
+          // a deferred failure was not cleaned up by the event handler
+          if (engine.gravixDeferJoinFailure) await _gravixCleanUpFailedJoinAttempt();
           await engine.connect(
             nextUrl,
             token,
             connectOptions: connectOptions,
-            roomOptions: effectiveRoomOptions,
+            roomOptions: roomOptions,
             fastConnectOptions: fastConnectOptions,
             regionUrlProvider: _regionUrlProvider,
           );
-          didConnect = true;
         } else {
           rethrow;
         }
       } else {
         rethrow;
       }
-    } finally {
-      if (!didConnect) {
-        await NativeAudioManagement.stop();
-        GravixForegroundService.roomReleased(this);
-      }
     }
+  }
+
+  /// GRAVIX(0.4.13): undoes a failed join attempt before the next one, without
+  /// touching what the join as a whole holds (audio session, foreground service,
+  /// the local participant object): the leave on the attempt's socket (the
+  /// server may already have the participant; the next join must not meet it as
+  /// a duplicate identity), then its remote participants, socket and peer
+  /// connections. Awaited, so nothing of it can close the next attempt's dial.
+  Future<void> _gravixCleanUpFailedJoinAttempt() async {
+    final signal = engine.signalClient;
+    if (signal.connectionState == ConnectionState.connected) {
+      try {
+        await signal.sendLeave();
+      } catch (_) {}
+    }
+    final participants = _remoteParticipants.toList();
+    _remoteParticipants.clear();
+    for (final participant in participants) {
+      await participant.removeAllPublishedTracks(notify: false);
+      await participant.dispose();
+    }
+    _pendingTrackQueue.clear();
+    _activeSpeakers.clear();
+    await engine.cleanUp();
+  }
+
+  /// GRAVIX(0.4.13): a retryable join gives up: the leave on its socket (best
+  /// effort), then the failure the engine deferred, so the room cleans up and
+  /// emits RoomDisconnectedEvent exactly as for a join that is never retried.
+  void _gravixGiveUpJoin(Object error) {
+    final signal = engine.signalClient;
+    if (signal.connectionState == ConnectionState.connected) {
+      try {
+        unawaited(signal.sendLeave());
+      } catch (_) {}
+    }
+    engine.events.emit(EngineDisconnectedEvent(reason: Engine.gravixJoinFailureReason(error)));
+  }
+
+  /// Waits [delay] before a join retry; false when the room was left
+  /// (disconnect / dispose) meanwhile, which ends the wait at once.
+  Future<bool> _gravixWaitJoinRetry(Duration delay) async {
+    if (_gravixLeaving || isDisposed) return false;
+    final wake = _gravixJoinRetryWake = Completer<void>();
+    final timer = Timer(delay, () {
+      if (!wake.isCompleted) wake.complete();
+    });
+    try {
+      await wake.future;
+    } finally {
+      timer.cancel();
+      if (identical(_gravixJoinRetryWake, wake)) _gravixJoinRetryWake = null;
+    }
+    return !_gravixLeaving && !isDisposed;
   }
 
   void _setUpSignalListeners() => _signalListener
@@ -540,9 +666,14 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         'serverVersion: ${event.response.serverVersion}',
       );
 
+      final existingLocal = _localParticipant;
       _localParticipant ??= await LocalParticipant.createFromInfo(room: this, info: event.response.participant);
 
-      if (engine.fullReconnectOnNext) {
+      // GRAVIX(0.4.13): a join again on the same Room after a failed attempt
+      // (join retry, region fallback, the service's connect ladder) gets a new
+      // participant sid; the kept local participant takes it over.
+      if (engine.fullReconnectOnNext ||
+          (existingLocal != null && existingLocal.sid != event.response.participant.sid)) {
         await _localParticipant!.updateFromInfo(event.response.participant);
       }
 
@@ -822,15 +953,22 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
     _gravixLeaving = true;
+    _gravixWakeJoinRetry();
     final bool isPendingReconnect = engine.isPendingReconnect;
     if (engine.isClosed && !isPendingReconnect && engine.connectionState == ConnectionState.disconnected) {
       logger.warning('Engine is already closed');
       return;
     }
+    // GRAVIX(0.4.13): listening starts before the engine disconnects. An engine
+    // that is not connected (a failed or retrying join) emits the event inside
+    // engine.disconnect(), before a listener added after it could see it: the
+    // leave then waited 10 s and threw TimeoutException.
+    final disconnected = isPendingReconnect
+        ? null
+        : _engineListener.waitFor<EngineDisconnectedEvent>(duration: const Duration(seconds: 10));
+    disconnected?.ignore();
     await engine.disconnect();
-    if (!isPendingReconnect) {
-      await _engineListener.waitFor<EngineDisconnectedEvent>(duration: const Duration(seconds: 10));
-    }
+    if (disconnected != null) await disconnected;
     await _cleanUp();
   }
 

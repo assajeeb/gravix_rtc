@@ -109,6 +109,32 @@ class RoomAttemptReconnectEvent with RoomEvent {
       'nextRetryDelaysInMs: ${nextRetryDelaysInMs})';
 }
 
+/// GRAVIX(0.4.13): the initial join failed on the way to the media connection
+/// and `Room.connect` joins again (`ConnectOptions.joinRetries`). Emitted once
+/// per retry, before its [delay]. Show "reconnecting" / "still connecting" while
+/// a connect is in flight and one of these has come in; the connect's own
+/// future still decides the outcome (it completes once, after the last
+/// attempt). Emitted by [Room].
+class RoomJoinRetryEvent with RoomEvent {
+  /// The retry about to run, 1-based (1 = the second join attempt).
+  final int retry;
+
+  /// Retries this connect allows (`ConnectOptions.joinRetries`).
+  final int maxRetries;
+
+  /// The wait before this retry.
+  final Duration delay;
+
+  /// Why the previous attempt failed (a `MediaConnectException`).
+  final Object error;
+
+  const RoomJoinRetryEvent({required this.retry, required this.maxRetries, required this.delay, required this.error});
+
+  @override
+  String toString() =>
+      '${runtimeType}(retry: ${retry}/${maxRetries}, delay: ${delay.inMilliseconds}ms, error: ${error})';
+}
+
 /// Connection to room is re-established. All existing state is preserved.
 /// Emitted by [Room].
 class RoomReconnectedEvent with RoomEvent {

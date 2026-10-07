@@ -212,13 +212,65 @@ class ConnectOptions {
 
   final Timeouts timeouts;
 
+  /// GRAVIX(0.4.13): how many times `Room.connect` joins again when the server
+  /// accepted the join (JoinResponse) but the peer connection did not connect
+  /// (`MediaConnectException`). See `gravixIsJoinRetryable`. Each retry is a
+  /// complete new join with the same url and token, after the failed attempt
+  /// has sent its leave and closed its socket and peer connections. Never on any
+  /// other error (a refusal, room full, an expired token, the JoinResponse
+  /// timeout, no connectivity, certificate pinning); never after the server
+  /// ended the attempt with a Leave; never after `disconnect()`/`dispose()`;
+  /// never for a connect with `fastConnectOptions` or a recording pre-connect
+  /// audio buffer (those publish a microphone during the join: that join gives
+  /// up as before). A `RoomJoinRetryEvent` is emitted before each retry, and a
+  /// failed connect still emits exactly one `RoomDisconnectedEvent(joinFailure)`.
+  ///
+  /// Default 2. `0` = the 0.4.12 behaviour (one attempt), the rollback.
+  final int joinRetries;
+
+  /// The wait before each retry (the last entry repeats). Default 0.5 s, 1.5 s.
+  final List<Duration> joinRetryDelays;
+
+  /// The [joinRetries] default.
+  static const int defaultJoinRetries = 2;
+
+  /// The [joinRetryDelays] default.
+  static const List<Duration> defaultJoinRetryDelays = [Duration(milliseconds: 500), Duration(milliseconds: 1500)];
+
   const ConnectOptions({
     this.autoSubscribe = true,
     this.rtcConfiguration = const RTCConfiguration(),
     this.protocolVersion = ProtocolVersion.v16,
     this.clientProtocolVersion = ClientProtocolVersion.current,
     this.timeouts = Timeouts.defaultTimeouts,
+    this.joinRetries = defaultJoinRetries,
+    this.joinRetryDelays = defaultJoinRetryDelays,
   });
+
+  /// The wait before retry number [retry] (1-based).
+  Duration joinRetryDelay(int retry) {
+    if (joinRetryDelays.isEmpty) return Duration.zero;
+    final i = retry - 1;
+    return joinRetryDelays[i < 0 ? 0 : (i >= joinRetryDelays.length ? joinRetryDelays.length - 1 : i)];
+  }
+
+  ConnectOptions copyWith({
+    bool? autoSubscribe,
+    RTCConfiguration? rtcConfiguration,
+    ProtocolVersion? protocolVersion,
+    ClientProtocolVersion? clientProtocolVersion,
+    Timeouts? timeouts,
+    int? joinRetries,
+    List<Duration>? joinRetryDelays,
+  }) => ConnectOptions(
+    autoSubscribe: autoSubscribe ?? this.autoSubscribe,
+    rtcConfiguration: rtcConfiguration ?? this.rtcConfiguration,
+    protocolVersion: protocolVersion ?? this.protocolVersion,
+    clientProtocolVersion: clientProtocolVersion ?? this.clientProtocolVersion,
+    timeouts: timeouts ?? this.timeouts,
+    joinRetries: joinRetries ?? this.joinRetries,
+    joinRetryDelays: joinRetryDelays ?? this.joinRetryDelays,
+  );
 }
 
 /// Options used to modify the behavior of the [Room].

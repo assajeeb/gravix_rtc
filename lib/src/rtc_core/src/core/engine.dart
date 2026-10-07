@@ -332,6 +332,10 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     //reset state
     _isClosed = false;
 
+    // GRAVIX(0.4.13): a fresh join waits longer for its peer connection than a
+    // resume or a full reconnect does (Timeouts.mediaConnect; see there).
+    final freshJoin = !_inRestart && !_isReconnecting && !_attemptingReconnect;
+
     try {
       // wait for socket to connect rtc server
       await signalClient.connect(url, token, connectOptions: this.connectOptions, roomOptions: this.roomOptions);
@@ -350,7 +354,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       // wait until primary pc is connected
       await events.waitFor<EnginePeerStateUpdatedEvent>(
         filter: (event) => event.isPrimary && event.state.isConnected(),
-        duration: this.connectOptions.timeouts.connection,
+        duration: freshJoin ? this.connectOptions.timeouts.mediaConnect : this.connectOptions.timeouts.connection,
         onTimeout: () => throw MediaConnectException(
           'Timed out waiting for PeerConnection to connect, please check your network for ice connectivity',
         ),
@@ -362,18 +366,27 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       // during a reconnect this connect() runs inside restartConnection and
       // attemptReconnect owns disconnect emission, emitting here as well
       // would produce two events for one failure
-      if (!_isReconnecting && !_attemptingReconnect) {
-        events.emit(
-          EngineDisconnectedEvent(
-            reason: error is CertificatePinningException
-                ? DisconnectReason.signalingConnectionFailure
-                : DisconnectReason.joinFailure,
-          ),
-        );
+      // GRAVIX(0.4.13): an attempt Room.connect may retry defers the event to
+      // the room, which emits it itself when it gives up (one joinFailure per
+      // failed connect, none for an attempt that is retried).
+      if (!_isReconnecting && !_attemptingReconnect && !gravixDeferJoinFailure) {
+        events.emit(EngineDisconnectedEvent(reason: gravixJoinFailureReason(error)));
       }
       rethrow;
     }
   }
+
+  /// GRAVIX(0.4.13): set by Room.connect around a join attempt it may retry
+  /// (ConnectOptions.joinRetries). A failed [connect] then emits no
+  /// EngineDisconnectedEvent; the room cleans the attempt up and either retries
+  /// or emits the event itself.
+  @internal
+  bool gravixDeferJoinFailure = false;
+
+  /// The DisconnectReason a failed fresh [connect] reports for [error].
+  @internal
+  static DisconnectReason gravixJoinFailureReason(Object error) =>
+      error is CertificatePinningException ? DisconnectReason.signalingConnectionFailure : DisconnectReason.joinFailure;
 
   // resets internal state to a re-usable state
   Future<void> cleanUp() async {

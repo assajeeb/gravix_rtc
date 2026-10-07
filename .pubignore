@@ -1,2 +1,4 @@
 build/
 .dart_tool/
+# Internal note for the apps (0.4.13), not shipped
+APP_NOTES_0413.md

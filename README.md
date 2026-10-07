@@ -29,6 +29,11 @@ plays (mic volume and ducking are Android-only) and is not yet verified on a dev
 - **Reconnect policy** — `GravixRoomService(reconnectPolicy: …)` /
   `RoomOptions(reconnectPolicy: …)`: your own back-off and give-up rule
   (`DefaultReconnectPolicy` is the SDK table).
+- **Join retry** (0.4.13) — a join whose peer connection did not connect is
+  joined again, up to 2 times (`ConnectOptions(joinRetries: …)`, on
+  `GravixRoomService(connectOptions: …)` or `room.connect`); never on a refusal
+  (token, room full) or after a leave. `isJoining`, `joinRetry` / `onJoinRetry` (`RoomJoinRetryEvent`) for the
+  UI. `joinRetries: 0` is the single attempt of 0.4.12.
 - **Join diagnostics** — `lastConnectionReport`, split region / first-audio
   reports, and an opt-in step-by-step join timeline
   (`connect(joinTimeline: …)`, `doc/JOIN_TIMELINE.md`).

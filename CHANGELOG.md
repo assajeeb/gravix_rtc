@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.4.13 — 2026-10-08
+
+### Fix: a join that hit a short network stall failed at once (join retry)
+Field 2026-10-06/07 (an app on 0.4.12, Android, mobile data): one join failed.
+The phone's network stalled for a few seconds (ICE round trip 3.9 s), the peer
+connection did not connect within 10 s, `Room.connect` threw
+`MediaConnectException` on its first attempt and the join gave up. Nothing
+retried it.
+
+- **Join retry.** `Room.connect` (and so `GravixRoomService.connect`) joins
+  again when the server accepted the join (its JoinResponse came) but the peer
+  connection did not connect (`MediaConnectException`). See
+  `gravixIsJoinRetryable`.
+  - `ConnectOptions(joinRetries: 2, joinRetryDelays: [0.5 s, 1.5 s])` are the
+    defaults. Each retry is a complete new join with the same url and token.
+  - Before a retry, the failed attempt sends its leave on its socket (the server
+    may already have the participant, and the next join must not meet it as a
+    duplicate identity), then closes its socket and peer connections and drops
+    its remote participants. The audio session and the foreground service stay
+    up for the retry.
+  - **Never retried:**
+    - any other error: a refusal at the WebSocket
+      (`ConnectionErrorReason.NotAllowed`: 401/403, expired token), no
+      connectivity, a certificate pinning failure, a refused or superseded
+      WebSocket;
+    - the JoinResponse timeout (`ConnectException`, reason `Timeout`): a server
+      refuses a join it accepted at the WebSocket (room full, a failed join)
+      with a Leave and no JoinResponse, and a lost Leave looks exactly like
+      that timeout;
+    - an attempt the server ended with a Leave;
+    - after `disconnect()` / `dispose()`, which also cut the wait before a
+      retry short;
+    - a connect with `fastConnectOptions`, or with a recording pre-connect audio
+      buffer. Those publish a microphone inside the join and fail as before, so
+      a retry never leaves a capture behind. An attempt that published any
+      local track is not retried either.
+  - `RoomJoinRetryEvent(retry, maxRetries, delay, error)` before each retry.
+  - Intermediate failures are not reported: a failed connect still emits
+    exactly one `RoomDisconnectedEvent(joinFailure)` and throws the last
+    attempt's error, as before.
+  - **Rollback:** `ConnectOptions(joinRetries: 0)` is the 0.4.12 path (one
+    attempt, the engine reports the failure itself).
+- **A fresh join waits 20 s for its peer connection** (`Timeouts.mediaConnect`,
+  new; it was `Timeouts.connection`, 10 s).
+  - Why 20 s: ICE + DTLS on a fresh join take about four to five round trips
+    (offer/answer, connectivity checks and nomination, two DTLS flights). That
+    is ~16-20 s at the field's 3.9 s RTT, so 10 s capped a join at an RTT of
+    ~2-2.5 s. A retry repeats all of those round trips, so on a uniformly slow
+    network only a longer wait helps.
+  - The SFU allows a new transport ~15 s of ICE checking, then 10-20 s for DTLS
+    after ICE, so 20 s is not cut short by the server.
+  - The WebSocket dial, the JoinResponse wait, resumes and full reconnects keep
+    `Timeouts.connection` (10 s).
+  - For the 0.4.12 wait:
+    `Timeouts.defaultTimeouts.copyWith(mediaConnect: Duration(seconds: 10))`.
+  - Worst case for a join that never connects: 3 attempts x (JoinResponse +
+    20 s) + 2 s of waits, ~65 s, instead of ~12 s. Apps should show the retry.
+- **`GravixRoomService`:**
+  - `connectOptions:` (constructor) for the core's connect options.
+  - With a region ladder, only the LAST url retries its join; earlier urls hand
+    a failure to the next url at once, as before.
+  - `isJoining` (`ValueListenable<bool>`): true while a connect is in flight.
+  - `joinRetry` (the retry in progress, null otherwise) and `onJoinRetry`, for
+    a "Reconnecting…" state.
+  - `disconnect()` while a connect is still joining now ends that join. It
+    stops retrying and tries no further region (nothing at all when it is still
+    probing). A join that connects anyway is disconnected and disposed and
+    `connect` returns false. Nothing is published: no microphone. Up to 0.4.12,
+    `disconnect()` could not reach a room that was still joining, and that join
+    went on to publish the mic.
+  - A `connect()` for another session while one is joining ends that join the
+    same way, so its wait lasts the current attempt at most, not every retry.
+- **`Room.disconnect()` on a room that is not connected** (a failed or retrying
+  join) returns at once. It used to wait 10 s and throw `TimeoutException`: the
+  engine's disconnect event fired before the room listened for it.
+- **A join again on the same `Room`** (join retry, the core's region fallback,
+  the service's ladder) gives the kept local participant the new participant
+  sid from the JoinResponse. It kept the failed attempt's sid.
+
+No breaking API change: `Timeouts` gains an optional `mediaConnect` and
+`copyWith`, and `ConnectOptions` gains `joinRetries`, `joinRetryDelays` and
+`copyWith`.
+
 ## 0.4.12 — 2026-10-06
 
 ### Fix (privacy): the microphone could stay open after leaving a room while room music played (Android)

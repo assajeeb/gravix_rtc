@@ -95,6 +95,7 @@ class GravixRoomService implements GravixAudioHost {
     GravixRoomMusic? roomMusic,
     this.analytics,
     this.reconnectPolicy,
+    this.connectOptions,
     GravixRegionProber? regionProber,
     GravixRegionDecisionCache? regionDecisionCache,
     @visibleForTesting Future<void> Function(Room room, String url, String token)? connectRoom,
@@ -110,7 +111,7 @@ class GravixRoomService implements GravixAudioHost {
        roomMusic = roomMusic ?? GravixRoomMusic(null),
        _regionProber = regionProber ?? GravixRegionProber(),
        _regionCache = regionDecisionCache ?? GravixRegionDecisionCache.shared,
-       _connectRoom = connectRoom ?? ((room, url, token) => room.connect(url, token));
+       _connectRoomSeam = connectRoom;
 
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
   StreamSubscription<void>? _becomingNoisySub;
@@ -270,7 +271,43 @@ class GravixRoomService implements GravixAudioHost {
 
   /// The one place a url becomes a connection. A seam so the connect ladder can be
   /// tested without a transport.
-  final Future<void> Function(Room room, String url, String token) _connectRoom;
+  final Future<void> Function(Room room, String url, String token)? _connectRoomSeam;
+
+  Future<void> _connectRoom(Room room, String url, String token) =>
+      _connectRoomSeam?.call(room, url, token) ??
+      room.connect(url, token, connectOptions: _attemptConnectOptions ?? connectOptions);
+
+  /// The core's connect options for every join of this service: timeouts and
+  /// the join retry (`ConnectOptions.joinRetries`, default 2 retries;
+  /// `ConnectOptions(joinRetries: 0)` = the 0.4.12 single attempt). Null = the
+  /// defaults. With a region ladder (several urls) only the LAST url retries;
+  /// the urls before it hand a failure to the next url instead.
+  final ConnectOptions? connectOptions;
+
+  /// The options of the ladder attempt in flight (null = [connectOptions]).
+  ConnectOptions? _attemptConnectOptions;
+
+  @visibleForTesting
+  ConnectOptions? get debugAttemptConnectOptions => _attemptConnectOptions;
+
+  /// GRAVIX(0.4.13): the Room a connect() is joining, until it is connected or
+  /// has failed; disconnect() marks it as left so its join stops retrying.
+  Room? _joiningRoom;
+
+  /// disconnect() (or a connect() for another session) came while the current
+  /// connect() was joining.
+  bool _joinLeaveRequested = false;
+
+  void _abandonJoining() {
+    // also before the join has a Room (region probe, audio session): its ladder
+    // then dials nothing (the connect's own leading disconnect() clears this)
+    if (_connectInFlight != null) _joinLeaveRequested = true;
+    final joining = _joiningRoom;
+    if (joining != null && !identical(joining, _room)) {
+      _joinLeaveRequested = true;
+      joining.gravixMarkLeaving();
+    }
+  }
 
   /// True while (and after) a connect() that has more than one url to try. A
   /// failed ladder attempt makes the core emit RoomDisconnectedEvent(joinFailure);
@@ -412,6 +449,20 @@ class GravixRoomService implements GravixAudioHost {
 
   /// True once connected to a room.
   final ValueNotifier<bool> isConnected = ValueNotifier<bool>(false);
+
+  /// 0.4.13: true while a [connect] is joining (from the call until it
+  /// returns). Gate join-dependent UI ("Take seat", the mic button) on
+  /// [isConnected], and show a spinner on this.
+  final ValueNotifier<bool> isJoining = ValueNotifier<bool>(false);
+
+  /// 0.4.13: the join retry in progress, null otherwise. Set when an attempt of
+  /// the current [connect] failed on the way to the media connection and the
+  /// SDK joins again (`ConnectOptions.joinRetries`); cleared when the connect
+  /// returns. Show "Reconnecting… (retry n of m)" while it is non-null.
+  final ValueNotifier<RoomJoinRetryEvent?> joinRetry = ValueNotifier<RoomJoinRetryEvent?>(null);
+
+  /// 0.4.13: called once per join retry (same value as [joinRetry]).
+  void Function(RoomJoinRetryEvent event)? onJoinRetry;
 
   /// Local mic muted (not publishing audio).
   final ValueNotifier<bool> isMicMuted = ValueNotifier<bool>(true);
@@ -667,8 +718,13 @@ class GravixRoomService implements GravixAudioHost {
       debugPrint('Gravix connect: already in this room as this identity (${room?.connectionState.name}); session kept');
       return Future<bool>.value(true);
     }
+    // 0.4.13: a connect for another session supersedes the one still joining:
+    // that join stops retrying, so this wait lasts one attempt at most (a join
+    // can now take several attempts).
+    if (inFlight != null) _abandonJoining();
     final mine = _ConnectInFlight(key, token);
     _connectInFlight = mine;
+    if (!_disposed) isJoining.value = true;
     () async {
       try {
         if (inFlight != null) await inFlight.done.future.then((_) {}, onError: (Object _) {});
@@ -704,7 +760,13 @@ class GravixRoomService implements GravixAudioHost {
       } catch (e, st) {
         mine.done.completeError(e, st);
       } finally {
-        if (identical(_connectInFlight, mine)) _connectInFlight = null;
+        if (identical(_connectInFlight, mine)) {
+          _connectInFlight = null;
+          if (!_disposed) {
+            isJoining.value = false;
+            joinRetry.value = null;
+          }
+        }
       }
     }();
     return mine.done.future;
@@ -877,6 +939,8 @@ class GravixRoomService implements GravixAudioHost {
     );
     try {
       await disconnect(); // tear down any prior room (re-entry / minimize safety)
+      _joinLeaveRequested = false;
+      if (!_disposed) joinRetry.value = null;
       // Latched for the whole connect/disconnect cycle: flipping the flag
       // mid-room must not leave v2 started and torn down on the v1 path.
       _v2Active = GravixAudioRouting.v2;
@@ -1100,6 +1164,7 @@ class GravixRoomService implements GravixAudioHost {
         unawaited(_joinPhases?.dispose());
         _joinPhases = room.watchJoinPhases(startedAt: joinTimeline?.tapAt ?? _connectStartedAt, onPhase: phaseSink);
       }
+      _joiningRoom = room;
       _listener = room.createListener();
       _bindEvents(room, _listener!);
       if (timeline != null) _attachTimeline(room, timeline);
@@ -1112,14 +1177,23 @@ class GravixRoomService implements GravixAudioHost {
       final winnerUrl = connectUrl;
       attemptedUrl = connectUrl;
       _ignoreJoinFailureEvents = connectLadder.isNotEmpty;
+      final ladderUrls = [connectUrl, ...connectLadder];
+      var rung = 0;
       try {
         connectUrl = await gravixConnectWithLadder(
-          urls: [connectUrl, ...connectLadder],
+          urls: ladderUrls,
           attempt: (candidate) {
+            if (_joinLeaveRequested) throw StateError('left (disconnect) while joining');
             attemptedUrl = candidate;
             timeline?.beginAttempt();
+            // 0.4.13: only the last url retries its join (ConnectOptions.joinRetries);
+            // a failure on an earlier one moves down the ladder at once
+            final isLast = ++rung >= ladderUrls.length;
+            final base = connectOptions ?? const ConnectOptions();
+            _attemptConnectOptions = isLast ? base : base.copyWith(joinRetries: 0);
             return _connectRoom(room, candidate, token);
           },
+          isRetryable: (e) => !_joinLeaveRequested && gravixIsRegionRetryable(e),
         );
       } catch (_) {
         // Whatever was remembered for this pin just refused; keep the refuser
@@ -1149,6 +1223,18 @@ class GravixRoomService implements GravixAudioHost {
         }
       }
 
+      // 0.4.13: disconnect() came while this join was in flight (a retry made
+      // that window longer): the join is not used. Nothing is published yet.
+      if (_joinLeaveRequested) {
+        try {
+          await room.disconnect();
+        } catch (_) {}
+        try {
+          await room.dispose();
+        } catch (_) {}
+        throw StateError('left (disconnect) while joining');
+      }
+
       // Everything after this point (mic, routing) needs the session. Normally it
       // finished long ago: the transport above took hundreds of ms.
       if (parallelAudioSession) await audioReady;
@@ -1169,6 +1255,8 @@ class GravixRoomService implements GravixAudioHost {
       }
 
       _room = room;
+      _joiningRoom = null;
+      _attemptConnectOptions = null;
       roomMusic.attach(room);
       if (regionProbe && regionReprobeOnRestart && effectiveRegionUrls.isNotEmpty) {
         room.engine.restartRegionStrategy = GravixProbeRestartStrategy(
@@ -1315,6 +1403,8 @@ class GravixRoomService implements GravixAudioHost {
       return true;
     } catch (e) {
       debugPrint('❌ Gravix connect error: $e');
+      _joiningRoom = null;
+      _attemptConnectOptions = null;
       // earlyMicTrack: a join that failed before its mic step must not leave the
       // capture running (the app may not call disconnect() after a failed join)
       final early = _earlyMic;
@@ -1344,8 +1434,8 @@ class GravixRoomService implements GravixAudioHost {
       _emitTimeline(GravixJoinTimelineEnd.disconnect);
       connectionReport.value = report;
       isConnected.value = false;
-      if (_ignoreJoinFailureEvents) {
-        // Every url on the ladder refused. The per-attempt joinFailure events were
+      if (_ignoreJoinFailureEvents && !_joinLeaveRequested) {
+        // Every url on the ladder refused (a join the app left is not reported). The per-attempt joinFailure events were
         // swallowed so the app was not told "disconnected" mid-retry; tell it now,
         // ONCE - which is what a single failed attempt always did.
         onDisconnected?.call();
@@ -1948,6 +2038,12 @@ class GravixRoomService implements GravixAudioHost {
   void _bindEvents(Room room, EventsListener<RoomEvent> listener) {
     _restartDropped = null; // a new room never inherits a restart in progress
     listener
+      ..on<RoomJoinRetryEvent>((e) {
+        debugPrint('Gravix join: attempt failed (${e.error}); joining again, retry ${e.retry}/${e.maxRetries}');
+        _timeline?.notePath('svc:joinRetry', detail: e.retry);
+        if (!_disposed) joinRetry.value = e;
+        onJoinRetry?.call(e);
+      })
       ..on<ParticipantConnectedEvent>((e) {
         final uid = e.participant.identity;
         // re-announced after a full restart and never really gone: no callback
@@ -2905,6 +3001,8 @@ class GravixRoomService implements GravixAudioHost {
     // republish the microphone into the disconnect (a failed republish left
     // the microphone open after the leave). RED auto stops here, not at the end.
     _room?.gravixMarkLeaving();
+    // 0.4.13: a connect() still joining stops retrying and is not used
+    _abandonJoining();
     _redAutoTimer?.cancel();
     _redAutoTimer = null;
     // a publication still running behind connect() finishes first: tearing the
@@ -2984,6 +3082,8 @@ class GravixRoomService implements GravixAudioHost {
     lowDataActive.dispose();
     activeSpeakers.dispose();
     isConnected.dispose();
+    isJoining.dispose();
+    joinRetry.dispose();
     isMicMuted.dispose();
     isCameraEnabled.dispose();
     remoteFacing.dispose();
