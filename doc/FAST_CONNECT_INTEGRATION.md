@@ -115,7 +115,7 @@ real mobile networks.
 
 ## Single peer connection: not available in this SDK
 
-The vendored core is upstream `livekit_client` 2.11.0: v0 signalling (`/rtc`),
+The vendored core is the upstream client SDK 2.11.0: v0 signalling (`/rtc`),
 two peer connections, the SERVER offers on the subscriber one. It has **no**
 single-PC / `/rtc/v1` mode — no code path, only the regenerated protobuf messages
 (`JoinRequest`, `WrappedJoinRequest`, `MediaSectionsRequirement`). Neither does
@@ -147,7 +147,7 @@ inside its own `setRemoteDescription`/`setLocalDescription` — single PC moves
 that work earlier (it overlaps ICE + DTLS); it does not delete it.
 
 Compatibility cost: needs a server with the v1 signal path (stock v1.13.7 has
-it; an older stock LiveKit answers 404 and the client pays one failed WebSocket
+it; an older stock server answers 404 and the client pays one failed WebSocket
 attempt before falling back to v0 on every join unless it remembers); Firefox is
 excluded from offer-with-join in the JS SDK (upstream issue #1919); publishing
 renegotiates the same PC that carries every subscription, so a publish glitch is

@@ -64,7 +64,9 @@ class _MeetingHome extends StatefulWidget {
 class _MeetingHomeState extends State<_MeetingHome> {
   final _room = GravixRoomService();
 
-  final _urlCtrl = TextEditingController(text: 'wss://rtc.example.com');
+  // Empty on purpose: the server url comes from the token response
+  // ({token, url}). Only a pasted token needs one typed here.
+  final _urlCtrl = TextEditingController();
   final _roomCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
   final _tokenUrlCtrl = TextEditingController();
@@ -133,11 +135,15 @@ class _MeetingHomeState extends State<_MeetingHome> {
 
       // No secret on the device: either a token you pasted, or a token from
       // YOUR backend's endpoint (it holds the gateway secret and answers with
-      // the gateway's /v1/token response). See doc/MIGRATION_TOKEN_PROVIDER.md.
+      // {token, url}; the server url comes from that response). See
+      // doc/MIGRATION_TOKEN_PROVIDER.md.
       final token = _tokenCtrl.text.trim();
       final tokenUrl = _tokenUrlCtrl.text.trim();
       final GravixTokenProvider provider;
       if (token.isNotEmpty) {
+        if (url.isEmpty) {
+          throw StateError('Enter the server url with a pasted token.');
+        }
         provider = GravixTokenProvider.literal(token: token, url: url);
       } else if (tokenUrl.isNotEmpty) {
         provider = GravixTokenProvider.endpoint(Uri.parse(tokenUrl));
@@ -333,9 +339,10 @@ class _Lobby extends StatelessWidget {
                     keyboardType: TextInputType.url,
                     decoration: const InputDecoration(
                       labelText: 'RTC server url',
+                      hintText: 'From your token endpoint',
                       border: OutlineInputBorder(),
                       helperText:
-                          'May be overridden by the token response url.',
+                          'Needed only with a pasted token.',
                     ),
                   ),
                   const SizedBox(height: 12),

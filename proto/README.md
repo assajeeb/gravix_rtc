@@ -5,7 +5,7 @@ Sources used to regenerate the Dart protobuf output at
 
 ## Why the package rename
 
-The upstream wire protos declare `package livekit;`. Dart's protobuf runtime
+The upstream wire protos declare the upstream vendor's package name. Dart's protobuf runtime
 embeds the package name as a string (`PackageName(..)`) that **survives AOT
 compilation** — that would leak the upstream brand into the release binary.
 Therefore the package is renamed to **`gravixcloud`** before every

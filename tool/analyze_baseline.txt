@@ -1,7 +1,7 @@
 # Baselined `flutter analyze` issues.
 #
 # These two predate the Gravix fork: they are in vendored upstream
-# livekit_client 2.11.0 code under lib/src/rtc_core/, which is re-synced from
+# client SDK 2.11.0 code under lib/src/rtc_core/, which is re-synced from
 # upstream rather than edited here, so fixing them locally would be undone by
 # the next sync.
 #

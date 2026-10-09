@@ -27,9 +27,9 @@ abstract final class GravixViewerFastStart {
   /// edited the same way, so a renegotiation never asks libwebrtc to change a
   /// negotiated DTLS role. The publisher connection (the phone offers) is not
   /// touched. Default on; `false` = the libwebrtc default (`a=setup:active`).
-  /// Not gated by server: a LiveKit server's join response cannot be told from
-  /// a Gravix one (both report edition Standard and the same version), and
-  /// stock livekit-server 1.4.5 / 1.6.2 / 1.7.2 / 1.8.4 / 1.13.7 all accepted a
+  /// Not gated by server: a stock upstream server's join response cannot be told
+  /// from a Gravix one (both report edition Standard and the same version), and
+  /// stock upstream server 1.4.5 / 1.6.2 / 1.7.2 / 1.8.4 / 1.13.7 all accepted a
   /// passive answer and sent media (pion offerer: a passive answer makes it the
   /// DTLS client; tested 2026-10-05).
   static bool passiveSubscriberDtls = true;

@@ -57,21 +57,33 @@ plays (mic volume and ducking are Android-only) and is not yet verified on a dev
 
 ## Quick start
 
+Full guides: [Gravix Cloud docs](https://www.gravixcloud.com/docs) ·
+[Live streaming quick start](https://www.gravixcloud.com/docs/live-streaming).
+
+1. Add the package: `flutter pub add gravix_rtc`.
+2. Your server mints the join token (the API secret stays on your server). The
+   SDK POSTs `{room, identity, name, can_publish}` as JSON to your token
+   endpoint, which answers `{token, url}`.
+3. Connect with the returned url: `GravixTokenProvider.endpoint` +
+   `GravixRoomService.connectWithTokenProvider` do the request and the connect.
+
 ```dart
 import 'package:gravix_rtc/gravix_rtc.dart';
 
-// Once, at app start (optional): measure the regions.
-gravixStartRegionMeasurement(regionsUrl: 'https://console.example.com/v1/regions');
-
 final room = GravixRoomService();
 final tokens = GravixTokenProvider.endpoint(
-  Uri.parse('https://api.example.com/rtc/token'),
+  Uri.parse('https://api.example.com/rtc/token'), // your server
   headers: {'Authorization': 'Bearer $session'},
 );
 
 final ok = await room.connectWithTokenProvider(
   tokenProvider: tokens,
-  request: GravixTokenRequest(room: roomId, identity: uid, name: name),
+  request: GravixTokenRequest(
+    room: roomId,
+    identity: uid,
+    name: name,
+    canPublish: isHost,
+  ),
   publishMic: isHost,
   enableVideo: isVideoRoom,
 );
@@ -85,7 +97,11 @@ await room.disconnect();
 await room.dispose();
 ```
 
-A pasted token works too: `room.connect(url: 'wss://rtc.example.com', token: jwt)`.
+A token you already hold works too: `room.connect(url: url, token: token)`, with
+the `url` from the same `{token, url}` response.
+
+Optional, once at app start: `gravixStartRegionMeasurement(regionsUrl: …)`
+measures the regions so joins go straight to the fastest one.
 
 ## Video effects
 
@@ -125,7 +141,7 @@ doc/                       # integration guides
 ```
 
 The protobuf package is renamed to `gravixcloud` before regeneration; see
-`proto/` and `doc/UPSTREAM_FORK.md`.
+`proto/`.
 
 ## Native platform setup
 

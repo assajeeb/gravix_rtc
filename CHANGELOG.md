@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.14 — 2026-10-09
+
+No SDK behaviour change.
+
+### Example: no default server url
+- The example app's server url field is empty by default. The url comes from
+  the token response (`{token, url}`); the field is needed only with a pasted
+  token, and a join without any url now says so instead of failing in connect.
+
+### Package metadata and README
+- `homepage` is the Gravix Cloud docs (https://www.gravixcloud.com/docs);
+  `repository` and `issue_tracker` are removed.
+- README quick start follows the documented flow: `flutter pub add gravix_rtc`,
+  your server mints the token (POST `{room, identity, name, can_publish}` →
+  `{token, url}`), `GravixTokenProvider.endpoint` +
+  `GravixRoomService.connectWithTokenProvider` connect with the returned url.
+- Package text names no upstream vendor: older CHANGELOG entries, one API doc
+  comment and the shipped docs say "upstream client SDK" / "stock upstream
+  server" instead. `doc/UPSTREAM_FORK.md` (a maintainers' report) is no longer
+  in the published package.
+
+### Other
+- `example/ios/Podfile` is committed (the example builds iOS through CocoaPods
+  since 0.4.10).
+
 ## 0.4.13 — 2026-10-08
 
 ### Fix: a join that hit a short network stall failed at once (join retry)
@@ -444,9 +469,9 @@ median, warm tap -> first frame 941-1029 -> 814 ms.
   in every join; the phone's own server flight can still be retransmitted once
   (2 of 10 viewer joins on 2026-10-05, DTLS 270-301 ms, no +464 ms tail). On its own it removes the retransmit tail, not the
   median (DTLS writable -> complete 384 ms before, 383/407 ms after, n=2): the
-  SFU's hello then still waits for its nomination tick. Works against stock
-  LiveKit servers as well: a pion client answering `a=setup:passive` connected
-  and received media from stock livekit-server 1.4.5, 1.6.2, 1.7.2, 1.8.4 and
+  SFU's hello then still waits for its nomination tick. Works against the stock
+  upstream server as well: a pion client answering `a=setup:passive` connected
+  and received media from stock upstream server 1.4.5, 1.6.2, 1.7.2, 1.8.4 and
   1.13.7 (pion v3.2.16 to v4.2.18), renegotiation answers included.
 - `subscriberConnectPingIntervalMs` (**default off**, `null`; 0.4.9 opt-in, the
   branch had 100): libwebrtc's stable-writable / strong-connectivity ping
@@ -1338,7 +1363,7 @@ unrelated edits cannot flip the job.
   behavioural divergences that remain.
 - `doc/AUDIO_SESSION_MIGRATION.md` — new. What breaks upgrading `audio_session`
   0.1.25 → 0.2.4, measured rather than guessed. **Not upgraded.**
-- `doc/UPSTREAM_FORK.md` — new. Which upstream `livekit_client` version
+- `doc/UPSTREAM_FORK.md` — new. Which upstream client SDK version
   `lib/src/rtc_core/` is forked from (2.11.0) and what a resync costs.
 - Corrected a false claim in `gravix_audio_platform.dart`:
   `AndroidAudioHardwareMode` is a const-class in **both** `audio_session`
