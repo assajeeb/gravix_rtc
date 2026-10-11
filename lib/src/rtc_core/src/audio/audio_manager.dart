@@ -15,12 +15,14 @@
 
 import 'dart:async';
 
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:meta/meta.dart';
 
 import '../logger.dart';
 import '../support/native.dart';
 import '../support/platform.dart';
 import 'android_audio_session_adapter.dart';
+import 'audio_engine_error.dart';
 import 'audio_engine_availability.dart';
 import 'audio_processing_state.dart';
 import 'audio_session.dart';
@@ -206,16 +208,23 @@ class AudioManager {
   /// cross-platform code.
   ///
   /// Throws if the native side rejects the change, so callers never assume
-  /// the engine is gated when it is not.
+  /// the engine is gated when it is not. Enabling input requires microphone
+  /// permission, which is not requested here: a `TrackCreateException` is
+  /// thrown when it is missing, and an `AudioSessionException` when the audio
+  /// session does not permit recording (iOS only; 0.4.15).
   ///
   /// Experimental: this API may change in a future release.
   @experimental
   Future<void> setEngineAvailability(AudioEngineAvailability availability) async {
     if (!lkPlatformIsApple()) return;
-    await Native.setEngineAvailability(
-      isInputAvailable: availability.isInputAvailable,
-      isOutputAvailable: availability.isOutputAvailable,
-    );
+    try {
+      await Native.setEngineAvailability(
+        isInputAvailable: availability.isInputAvailable,
+        isOutputAvailable: availability.isOutputAvailable,
+      );
+    } on PlatformException catch (error) {
+      throw audioEngineExceptionFrom(error) ?? error;
+    }
   }
 
   /// Selects whether GravixRtc manages the platform audio session automatically.
@@ -321,6 +330,25 @@ class AudioManager {
     }
   }
 
+  /// Pushes the current resolved policy to native before a local recording
+  /// starts (pre-connect audio, pre-join microphone), so the session comes
+  /// from the real Dart policy instead of the native built-in preset.
+  ///
+  /// GRAVIX 0.4.15 (ported from the upstream client SDK 2.12.0, the iOS audio
+  /// engine error -9001 fix): a recording started before any policy push ran
+  /// the engine against whatever category the session had. In automatic mode
+  /// with the engine idle this only caches the policy natively; it is applied
+  /// on engine start. iOS only: manual mode (app owns the session) and other
+  /// platforms are untouched.
+  @internal
+  Future<void> ensureAppleAudioSessionPolicy() async {
+    if (!lkPlatformIs(PlatformType.iOS)) return;
+    await _syncAppleAudioSessionManagementMode();
+    if (_isAutomaticConfigurationEnabled) {
+      await _configureAppleAudioSession(_options);
+    }
+  }
+
   @internal
   Future<void> applyOptionsForConnect() async {
     await _syncAppleAudioSessionManagementMode();
@@ -410,7 +438,13 @@ class AudioManager {
   Future<void> setMicrophoneMuteMode(MicrophoneMuteMode mode) async {
     if (mode == MicrophoneMuteMode.unknown) return;
     if (!lkPlatformIsApple()) return;
-    await Native.setMicrophoneMuteMode(mode.name);
+    // A mode change can rebuild the engine and hit the same permission /
+    // audio session checks as a recording start (0.4.15).
+    try {
+      await Native.setMicrophoneMuteMode(mode.name);
+    } on PlatformException catch (error) {
+      throw audioEngineExceptionFrom(error) ?? error;
+    }
   }
 
   /// Diagnostic snapshot of the resolved audio processing state.

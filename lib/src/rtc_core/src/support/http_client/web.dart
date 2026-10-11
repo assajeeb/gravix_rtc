@@ -17,7 +17,9 @@ import 'package:http/http.dart' as http;
 
 import '../../options.dart';
 
-http.Client createSdkHttpClient(NetworkOptions networkOptions) {
+/// [connectionTimeout] is ignored: the browser owns the sockets (callers bound
+/// the request itself).
+http.Client createSdkHttpClient(NetworkOptions networkOptions, {Duration? connectionTimeout}) {
   if (networkOptions.certificatePinning?.isEnabled ?? false) {
     throw UnsupportedError('Certificate pinning is not supported on Flutter web');
   }

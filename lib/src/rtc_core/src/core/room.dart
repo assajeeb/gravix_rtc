@@ -17,6 +17,7 @@ import 'dart:async';
 import 'dart:typed_data' show Uint8List;
 
 import 'package:collection/collection.dart';
+import 'package:logging/logging.dart' show Level;
 import 'package:meta/meta.dart';
 
 import '../audio/audio_manager.dart';
@@ -42,6 +43,7 @@ import '../proto/gravixcloud_models.pb.dart' as lk_models;
 import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 import '../rpc/rpc_client_manager.dart';
 import '../rpc/rpc_server_manager.dart';
+import '../stats/stats.dart';
 import '../support/disposable.dart';
 import '../support/http_client.dart';
 import '../support/platform.dart';
@@ -58,6 +60,14 @@ import '../types/rpc.dart';
 import '../types/transcription_segment.dart';
 import '../utils.dart' show isSVCCodec, unpackStreamId;
 import '../participant/gravix_publish_runners.dart'; // GRAVIX (0.4.8)
+import '../../../connect/gravix_region_failover.dart' show gravixRegionOfUrl; // GRAVIX (0.4.15)
+import '../../../connect/gravix_region_report.dart' show GravixRegionUrl; // GRAVIX (0.4.15)
+import '../publication/local.dart';
+import '../publication/remote.dart';
+import '../track/remote/audio.dart';
+import '../track/remote/video.dart';
+import 'gravix_media_watchdog.dart';
+import 'gravix_uplink_watch.dart';
 import 'engine.dart';
 import 'participant_collection.dart';
 import 'pending_track_queue.dart';
@@ -114,8 +124,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   /// GRAVIX(0.4.12): whether the local microphone may still be republished (a
   /// room-music DTX swap, RED auto). False from the moment a leave starts:
-  /// field 2026-10-06, a republish racing the leave failed three times and
-  /// left a capture running after the room was gone.
+  /// a republish racing the leave could fail repeatedly and leave a capture
+  /// running after the room was gone.
   @internal
   bool get gravixCanRepublish =>
       !_gravixLeaving && !isDisposed && _localParticipant != null && connectionState == ConnectionState.connected;
@@ -136,6 +146,66 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   String? get serverRegion => _serverRegion;
   String? _serverRegion;
 
+  /// The url the session is connected to --
+  /// after a region failover or a full rejoin to another region, NOT the url
+  /// passed to [connect]. Kept through a resume (which reuses it) and while
+  /// reconnecting; null when not connected. An app's server indicator should read
+  /// this (or follow [RoomConnectedUrlChangedEvent]).
+  ///
+  /// A reconnect under way keeps the url, although the signal connection reads
+  /// `disconnected` while a resume dials.
+  String? get connectedUrl =>
+      connectionState == ConnectionState.disconnected && !engine.gravixReconnectInProgress ? null : _connectedUrl;
+  String? _connectedUrl;
+
+  /// GRAVIX (0.4.15): the region of [connectedUrl] when known: the region the
+  /// server named in its JoinResponse, else the entry for the url in the region
+  /// list the SDK has (the server's `/settings/regions`, [gravixRegionHints]),
+  /// else the start-up measurement (`gravixStartRegionMeasurement`). Null when
+  /// unknown or not connected.
+  String? get connectedRegion => connectedUrl == null ? null : _connectedRegion;
+  String? _connectedRegion;
+
+  /// GRAVIX (0.4.15): region / url pairs this room may connect to (e.g. the
+  /// token's region list), used to name [connectedRegion]. GravixRoomService
+  /// sets it from its region entries.
+  List<GravixRegionUrl> gravixRegionHints = const [];
+
+  String? _gravixRegionFor(String url) {
+    final server = _serverRegion;
+    if (server != null && server.isNotEmpty) return server;
+    final known = <GravixRegionUrl>[
+      ...gravixRegionHints,
+      for (final r in _regionUrlProvider?.regionSettings?.regions ?? const <lk_rtc.RegionInfo>[])
+        GravixRegionUrl(region: r.region, url: r.url),
+    ];
+    return gravixRegionOfUrl(url, known: known);
+  }
+
+  /// Records the url the engine is connected to now; emits
+  /// [RoomConnectedUrlChangedEvent] when it differs from the previous one.
+  void _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason reason) {
+    final url = engine.url;
+    if (url == null) return;
+    final region = _gravixRegionFor(url);
+    final previousUrl = _connectedUrl;
+    final previousRegion = _connectedRegion;
+    _connectedUrl = url;
+    _connectedRegion = region;
+    if (previousUrl == url && previousRegion == region) return;
+    if (previousUrl == url && reason == RoomConnectedUrlChangeReason.rejoin) return; // same server, region named late
+    logger.info('connected url: $url (region ${region ?? 'unknown'}; was ${previousUrl ?? 'none'})');
+    events.emit(
+      RoomConnectedUrlChangedEvent(
+        url: url,
+        region: region,
+        previousUrl: previousUrl,
+        previousRegion: previousRegion,
+        reason: reason,
+      ),
+    );
+  }
+
   E2EEManager? get e2eeManager => _e2eeManager;
 
   E2EEManager? _e2eeManager;
@@ -149,7 +219,14 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// after a full reconnect an app that keeps its participant list from these
   /// events ended up with an empty list while everyone was still in the room
   /// (emulator proof 2026-10-02: participant_left for the observer, no join).
-  Set<String>? _restartAnnounced;
+  ///
+  /// The state of the full
+  /// restart in progress, one object per restart; null outside one. Handlers
+  /// capture it and touch only their own: a restart that started while the
+  /// previous one was still finishing used to have its state nulled by the old
+  /// one's tail (an unhandled null-check crash, and the host announced as
+  /// joined although it never left).
+  _GravixRestartState? _restart;
   bool _audioEnabled = true;
 
   // Whether the one-time RoomOptions speaker preference bridge has run.
@@ -176,6 +253,131 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   RegionUrlProvider? _regionUrlProvider;
   String? _regionUrl;
+
+  /// GRAVIX (0.4.15, R1 + S4): see GravixVideoStallWatch.
+  late final GravixVideoStallWatch _gravixStallWatch = GravixVideoStallWatch(options: roomOptions.recovery);
+
+  /// GRAVIX (2026-10-11, uplinkFeedbackStallFor): see GravixUplinkFeedbackWatch.
+  final GravixUplinkFeedbackWatch _gravixUplinkWatch = GravixUplinkFeedbackWatch();
+
+  /// The sender-stats listener of each published local track (one per track
+  /// object: a republish after a full rejoin reuses the track) and the track's
+  /// current publication (a republish makes a new one).
+  final Map<Track, EventsListener<TrackEvent>> _gravixUplinkListeners = {};
+  final Map<Track, LocalTrackPublication> _gravixUplinkPubs = {};
+
+  /// GRAVIX (2026-10-11, uplinkFeedbackStallFor): every published local track
+  /// feeds the uplink watch from the sender stats it already polls: a host whose
+  /// uplink the server stopped answering (RTCP into a dead UDP pair after
+  /// libwebrtc moved to ICE-TCP) stayed black for its viewers; a resume makes the
+  /// server select again.
+  void _gravixWatchUplink(LocalTrackPublication pub) {
+    final track = pub.track;
+    if (track == null) return;
+    _gravixUplinkPubs[track] = pub; // a republish: the new publication counts
+    if (_gravixUplinkListeners.containsKey(track)) return;
+    final listener = track.createListener();
+    _gravixUplinkListeners[track] = listener;
+    bool eligible() {
+      final p = _gravixUplinkPubs[track];
+      return p != null &&
+          connectionState == ConnectionState.connected &&
+          identical(localParticipant?.trackPublications[p.sid], p) &&
+          !p.muted &&
+          track.isActive;
+    }
+
+    void feed(String key, SenderStats s) {
+      final stall = roomOptions.recovery.uplinkFeedbackStallFor;
+      if (_gravixUplinkWatch.sample(
+        key,
+        eligible: eligible(),
+        packetsSent: s.packetsSent,
+        feedback: s.remoteReportMarker,
+        stallFor: stall,
+      )) {
+        engine.gravixRequestResume(
+          'uplink ${track.source.name}: no receiver report from the server for ${stall.inSeconds} s while sending',
+          uplink: true,
+        );
+      }
+    }
+
+    if (track is LocalAudioTrack) {
+      listener.on<AudioSenderStatsEvent>((e) => feed(track.objectId.toString(), e.stats));
+    } else if (track is LocalVideoTrack) {
+      listener.on<VideoSenderStatsEvent>((e) {
+        e.stats.forEach((rid, s) => feed('${track.objectId}:$rid', s));
+      });
+    }
+    track.onDispose(() async {
+      _gravixUplinkListeners.remove(track);
+      _gravixUplinkPubs.remove(track);
+      await listener.dispose();
+    });
+  }
+
+  /// Whether subscribed [pub] of [participant] should be receiving media now:
+  /// the session connected, the publisher still in the room publishing it,
+  /// subscribed, enabled (adaptiveStream disables an invisible one), unmuted,
+  /// and not paused by the server (a paused stream sends nothing; a stream
+  /// whose state the server never reported counts as flowing).
+  /// Video: camera only (a static screen share may legitimately send nothing).
+  bool _gravixShouldFlow(RemoteParticipant participant, RemoteTrackPublication pub) =>
+      connectionState == ConnectionState.connected &&
+      identical(_remoteParticipants.byIdentity[participant.identity], participant) &&
+      identical(participant.trackPublications[pub.sid], pub) &&
+      pub.subscribed &&
+      pub.enabled &&
+      !pub.muted &&
+      !pub.gravixServerPaused &&
+      (pub.kind == TrackType.AUDIO || pub.source == TrackSource.camera);
+
+  void _gravixWatchTrack(RemoteParticipant participant, RemoteTrackPublication pub, Track track) {
+    if (!_gravixStallWatch.enabled) return;
+    final sid = pub.sid;
+    void act(GravixStallAction action) {
+      switch (action) {
+        case GravixStallAction.resume:
+          engine.gravixRequestResume('${participant.identity}/${pub.source.name}: no packet');
+        case GravixStallAction.rejoin:
+          engine.gravixRequestRejoin('${participant.identity}/${pub.source.name}: no new frame');
+        case GravixStallAction.none:
+          break;
+      }
+    }
+
+    final listener = track.createListener();
+    if (track is RemoteVideoTrack) {
+      listener.on<VideoReceiverStatsEvent>((e) {
+        _gravixStallWatch.options = roomOptions.recovery;
+        act(
+          _gravixStallWatch.sample(
+            sid,
+            video: true,
+            eligible: _gravixShouldFlow(participant, pub),
+            packetsReceived: e.stats.packetsReceived,
+            framesDecoded: e.stats.framesDecoded,
+          ),
+        );
+      });
+    } else if (track is RemoteAudioTrack) {
+      listener.on<AudioReceiverStatsEvent>((e) {
+        act(
+          _gravixStallWatch.sample(
+            sid,
+            video: false,
+            eligible: _gravixShouldFlow(participant, pub),
+            packetsReceived: e.stats.packetsReceived,
+          ),
+        );
+      });
+    }
+    track.onDispose(() async {
+      _gravixStallWatch.forget(sid);
+      await listener.dispose();
+    });
+  }
 
   // Agents
   final Map<String, DateTime> _transcriptionReceivedTimes = {};
@@ -226,6 +428,12 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     _signalListener = this.engine.signalClient.createListener();
     _setUpSignalListeners();
 
+    // GRAVIX (0.4.15, S3): what the resume needs to know to call the subscriber
+    // connection enough (nothing live on the wire: a voice-only mute for room
+    // music is live, so wireMuted, not the publication's mute)
+    this.engine.gravixHasUnmutedLocalMedia = () =>
+        _localParticipant?.trackPublications.values.any((p) => !(p.track?.wireMuted ?? p.muted)) ?? false;
+
     _rpcClientManager = RpcClientManager(this);
     _rpcServerManager = RpcServerManager(this);
 
@@ -236,11 +444,22 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
     // Any event emitted will trigger ChangeNotifier
     events.listen((event) {
-      logger.finer('[RoomEvent] $event, will notifyListeners()');
+      // GRAVIX (2026-10-11, perf): guarded; the interpolation ran every room
+      // event's toString() even when FINER is off (the default).
+      if (logger.isLoggable(Level.FINER)) logger.finer('[RoomEvent] $event, will notifyListeners()');
       notifyListeners();
     });
     // Keep a connected flush as a fallback in case tracks arrive pre-connected but before metadata.
     events.on<RoomConnectedEvent>((event) => _flushPendingTracks());
+
+    // GRAVIX (0.4.15, R1 + S4): every subscribed remote track feeds the stall
+    // watch from the receiver stats it already polls
+    events.on<TrackSubscribedEvent>((event) {
+      final pub = event.publication;
+      _gravixWatchTrack(event.participant, pub, event.track);
+    });
+    // GRAVIX (2026-10-11, uplinkFeedbackStallFor)
+    events.on<LocalTrackPublishedEvent>((event) => _gravixWatchUplink(event.publication));
 
     _setupRpcListeners();
 
@@ -296,7 +515,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     try {
       if (isCloudUrl(Uri.parse(url)) && token != null) {
         _regionUrlProvider = RegionUrlProvider(token: token, url: url, networkOptions: roomOptions.networkOptions);
-        final regionUrl = await _regionUrlProvider!.getNextBestRegionUrl();
+        final regionUrl = await _regionUrlProvider!.getNextBestRegionUrl(
+          measuredOrder: roomOptions.recovery.measuredRegionFailover,
+        );
         // we will not replace the regionUrl if an attempt had already started
         // to avoid overriding regionUrl after a new connection attempt had started
         if (regionUrl != null && connectionState == ConnectionState.disconnected) {
@@ -376,7 +597,15 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       // on subsequent runs
       unawaited(
         _regionUrlProvider
-            ?.fetchRegionSettings()
+            // GRAVIX (2026-10-11, boundedSignalConnect): bounded like the dial.
+            // signalDialCap: given as long as the join's dial (nothing waits for
+            // it; device recheck "Very Bad Network": a 10 s bound dropped a list
+            // a later failover could use)
+            ?.fetchRegionSettings(
+              timeout: effectiveRoomOptions.recovery.boundedSignalConnect
+                  ? _gravixLonger(effectiveRoomOptions.recovery.signalDialCap, connectOptions.timeouts.connection)
+                  : null,
+            )
             .then((settings) {
               _regionUrlProvider?.setServerReportedRegions(settings);
             })
@@ -421,6 +650,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         try {
           await _gravixConnectAttempt(url, token, connectOptions, effectiveRoomOptions, fastConnectOptions);
           didConnect = true;
+          _connectedUrl = null; // a new connect: its first url is a change
+          _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.connect);
           return;
         } catch (e) {
           // the last attempt: the engine reported the failure itself, as before
@@ -484,7 +715,17 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           (e is WebSocketException || (e is ConnectException && e.reason != ConnectionErrorReason.NotAllowed))) {
         String? nextUrl;
         try {
-          nextUrl = await _regionUrlProvider!.getNextBestRegionUrl();
+          nextUrl = await _regionUrlProvider!.getNextBestRegionUrl(
+            currentUrl: _regionUrl ?? url,
+            measuredOrder: roomOptions.recovery.measuredRegionFailover,
+            // GRAVIX (2026-10-11, boundedSignalConnect): bounded like the dial
+            fetchTimeout: roomOptions.recovery.boundedSignalConnect ? connectOptions.timeouts.connection : null,
+            // GRAVIX (2026-10-11, lastGoodRegionList): a list kept from an
+            // earlier connect of this room to the same url
+            lastGoodFallback: roomOptions.recovery.lastGoodRegionList,
+            // (a WebSocketException or a non-refusal ConnectException at that url)
+            currentUrlFailed: true,
+          );
         } catch (error) {
           if (error is ConnectException && (error.statusCode == 401)) {
             rethrow;
@@ -672,7 +913,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       // GRAVIX(0.4.13): a join again on the same Room after a failed attempt
       // (join retry, region fallback, the service's connect ladder) gets a new
       // participant sid; the kept local participant takes it over.
-      if (engine.fullReconnectOnNext ||
+      if (engine.gravixFullReconnectInProgress ||
           (existingLocal != null && existingLocal.sid != event.response.participant.sid)) {
         await _localParticipant!.updateFromInfo(event.response.participant);
       }
@@ -688,7 +929,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
       if (connectOptions.protocolVersion.index >= ProtocolVersion.v8.index &&
           engine.fastConnectOptions != null &&
-          !engine.fullReconnectOnNext) {
+          !engine.gravixFullReconnectInProgress) {
         final options = engine.fastConnectOptions!;
         final local = _localParticipant!;
         // GRAVIX (0.4.8): collected as steps and run by gravixRunJoinPublishes --
@@ -761,12 +1002,43 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         if (sequential != null) await sequential;
       }
 
+      final restart = _restart;
+      final kept = restart?.kept;
+      restart?.kept = null;
       for (final info in event.response.otherParticipants) {
+        // GRAVIX (0.4.15, S5): a participant kept across the rejoin is updated in
+        // place (sid, tracks); its publications stay the same objects.
+        final keptParticipant = kept != null && kept.contains(info.identity)
+            ? _remoteParticipants.byIdentity[info.identity]
+            : null;
+        if (keptParticipant != null) {
+          final oldSid = keptParticipant.sid;
+          await keptParticipant.updateFromInfo(info);
+          _remoteParticipants.rekey(keptParticipant, oldSid);
+          await _flushPendingTracks(participant: keptParticipant);
+          continue;
+        }
         logger.fine(
           'Creating RemoteParticipant: sid = ${info.sid}(identity:${info.identity}) '
           'tracks:${info.tracks.map((e) => e.sid)}',
         );
         await _getOrCreateRemoteParticipant(info);
+      }
+      if (kept != null) {
+        // the ones the new session does not list left during the outage -- or,
+        // on a node where the room was just created, arrive through the relay a
+        // moment later (F6, device r127 / r149: the host reported left, then
+        // joined, 2 ms apart): they get rejoinAbsentGrace to reappear
+        final present = {for (final info in event.response.otherParticipants) info.identity};
+        final grace = roomOptions.recovery.rejoinAbsentGrace;
+        for (final identity in kept.where((i) => !present.contains(i)).toList()) {
+          if (grace > Duration.zero) {
+            _gravixAbsentAfterRejoin[identity]?.cancel();
+            _gravixAbsentAfterRejoin[identity] = Timer(grace, () => unawaited(_gravixDropAbsent(identity)));
+          } else {
+            await _gravixDropAbsent(identity);
+          }
+        }
       }
 
       if (e2eeManager != null && event.response.sifTrailer.isNotEmpty) {
@@ -778,13 +1050,18 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       events.emit(RoomConnectedEvent(room: this, metadata: _metadata));
     })
     ..on<EngineResumedEvent>((event) async {
+      _gravixStallWatch.noteResumed(); // GRAVIX (0.4.15, S4): the no-video window starts
+      _gravixUplinkWatch.reset(); // GRAVIX (2026-10-11): restarted connections, fresh clocks
       // re-send tracks permissions
       localParticipant?.sendTrackSubscriptionPermissions();
       events.emit(const RoomReconnectedEvent());
       notifyListeners();
     })
     ..on<EngineFullRestartingEvent>((event) async {
-      _restartAnnounced = <String>{};
+      _gravixStallWatch.reset(); // GRAVIX (0.4.15): new receivers follow
+      _gravixUplinkWatch.reset(); // GRAVIX (2026-10-11): new senders follow
+      _gravixCancelAbsent(); // still kept: the new JoinResponse decides again
+      final restart = _restart = _GravixRestartState();
       events.emit(const RoomReconnectingEvent());
 
       // reset params
@@ -793,21 +1070,57 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       _serverVersion = null;
       _serverRegion = null;
 
-      final participants = _remoteParticipants.toList();
-      _remoteParticipants.clear();
       _activeSpeakers.clear();
-      for (final participant in participants) {
-        _rpcClientManager.onParticipantDisconnected(participant.identity);
-        events.emit(ParticipantDisconnectedEvent(participant: participant));
-        await participant.removeAllPublishedTracks(notify: false);
-        await participant.dispose();
+      if (roomOptions.recovery.keepParticipantsOnRejoin) {
+        // GRAVIX (0.4.15, S5, field 2026-10-09: the app logged the host as
+        // "left / offline" on every full rejoin): keep the participants. Their
+        // tracks belong to the old subscriber connection: unsubscribe them; the
+        // new connection's tracks are subscribed on the same publications.
+        // Who really left is decided by the new JoinResponse.
+        // decided before any await: the new JoinResponse may arrive meanwhile
+        final participants = _remoteParticipants.toList();
+        final kept = {for (final p in participants) p.identity};
+        restart.kept = kept;
+        restart.announced.addAll(kept); // never re-announced
+        for (final participant in participants) {
+          for (final pub in participant.trackPublications.values.toList()) {
+            final track = pub.track;
+            if (track != null) {
+              await track.stop();
+              [
+                participant.events,
+                events,
+              ].emit(TrackUnsubscribedEvent(participant: participant, track: track, publication: pub));
+              await pub.updateTrack(null);
+            }
+            pub.gravixResetStreamState();
+          }
+        }
+        _pendingTrackQueue.clear();
+      } else {
+        final participants = _remoteParticipants.toList();
+        _remoteParticipants.clear();
+        for (final participant in participants) {
+          _rpcClientManager.onParticipantDisconnected(participant.identity);
+          events.emit(ParticipantDisconnectedEvent(participant: participant));
+          await participant.removeAllPublishedTracks(notify: false);
+          await participant.dispose();
+        }
       }
 
       notifyListeners();
     })
     ..on<EngineRestartedEvent>((event) async {
+      final restart = _restart;
       // re-publish all tracks
       await localParticipant?.rePublishAllTracks();
+      if (restart != null && !identical(_restart, restart)) {
+        // GRAVIX (0.4.15, F5): a newer full restart began while this one was
+        // finishing (its republish was abandoned): that one announces and
+        // reports "reconnected"; this tail must not touch its state
+        logger.info('restart superseded by a newer one; not reporting it as reconnected');
+        return;
+      }
 
       for (var participant in _remoteParticipants.toList()) {
         for (var pub in participant.trackPublications.values.toList()) {
@@ -820,8 +1133,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       // restart: announce the ones not announced yet, before RoomReconnectedEvent,
       // so a list kept from the events is whole again when "reconnected" arrives.
       // They are NEW objects; whoever held the old ones must take these.
-      final announced = _restartAnnounced;
-      _restartAnnounced = null;
+      // GRAVIX (0.4.15): the rejoin may have landed on another region.
+      _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.rejoin);
+      final announced = restart?.announced;
+      if (identical(_restart, restart)) _restart = null;
       if (announced != null) {
         for (final participant in _remoteParticipants.toList()) {
           if (announced.contains(participant.identity)) continue;
@@ -849,8 +1164,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       notifyListeners();
     })
     ..on<EngineDisconnectedEvent>((event) async {
-      if (!engine.fullReconnectOnNext || event.reason == DisconnectReason.clientInitiated) {
-        _restartAnnounced = null;
+      if (!engine.gravixFullReconnectInProgress || event.reason == DisconnectReason.clientInitiated) {
+        _restart = null;
+        _gravixCancelAbsent();
         await _cleanUp(disposeLocalParticipant: false);
         events.emit(RoomDisconnectedEvent(reason: event.reason));
         notifyListeners();
@@ -1006,6 +1322,32 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     return result;
   }
 
+  /// GRAVIX (0.4.15, F6): kept participants a rejoin's JoinResponse did not
+  /// list, waiting (rejoinAbsentGrace) for a participant update before they are
+  /// reported gone.
+  final Map<String, Timer> _gravixAbsentAfterRejoin = {};
+
+  void _gravixCancelAbsent() {
+    for (final t in _gravixAbsentAfterRejoin.values) {
+      t.cancel();
+    }
+    _gravixAbsentAfterRejoin.clear();
+  }
+
+  /// A kept participant that is really gone: as _handleParticipantDisconnect, but
+  /// emitted directly (the room may not count as connected yet during a rejoin).
+  Future<void> _gravixDropAbsent(String identity) async {
+    _gravixAbsentAfterRejoin.remove(identity)?.cancel();
+    final participant = _remoteParticipants.removeByIdentity(identity);
+    if (participant == null) return;
+    _rpcClientManager.onParticipantDisconnected(identity);
+    await validateParticipantHasNoActiveDataStreams(identity);
+    await participant.removeAllPublishedTracks(notify: true);
+    events.emit(ParticipantDisconnectedEvent(participant: participant));
+    await participant.dispose();
+    notifyListeners();
+  }
+
   Future<void> _onParticipantUpdateEvent(List<lk_models.ParticipantInfo> updates) async {
     // trigger change notifier only if list of participants membership is changed
     var hasChanged = false;
@@ -1021,6 +1363,27 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         continue;
       }
 
+      // GRAVIX (0.4.15, F6): a kept participant the rejoin's JoinResponse did not
+      // list is back (relayed in a moment later): the same object, updated in
+      // place, no ParticipantConnected; or it really left.
+      final absent = _gravixAbsentAfterRejoin.remove(info.identity);
+      if (absent != null) {
+        absent.cancel();
+        if (info.state == lk_models.ParticipantInfo_State.DISCONNECTED) {
+          await _gravixDropAbsent(info.identity);
+          hasChanged = true;
+          continue;
+        }
+        final kept = _remoteParticipants.byIdentity[info.identity];
+        if (kept != null) {
+          final oldSid = kept.sid;
+          await kept.updateFromInfo(info);
+          _remoteParticipants.rekey(kept, oldSid);
+          await _flushPendingTracks(participant: kept);
+          continue;
+        }
+      }
+
       final isNew = !_remoteParticipants.containsIdentity(info.identity);
 
       if (info.state == lk_models.ParticipantInfo_State.DISCONNECTED) {
@@ -1033,7 +1396,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (isNew) {
         hasChanged = true;
         // announced now (connected) or at the end of a full restart (not yet)
-        if (connectionState == ConnectionState.connected) _restartAnnounced?.add(info.identity);
+        if (connectionState == ConnectionState.connected) _restart?.announced.add(info.identity);
         // Emit connected event
         emitWhenConnected(ParticipantConnectedEvent(participant: result.participant));
         // Emit TrackPublishedEvent for each new track
@@ -1273,6 +1636,7 @@ extension RoomPrivateMethods on Room {
     logger.fine('[${objectId}] cleanUp()');
 
     // clean up RemoteParticipants
+    _gravixCancelAbsent();
     final participants = _remoteParticipants.toList();
     _remoteParticipants.clear();
     for (final participant in participants) {
@@ -1283,6 +1647,7 @@ extension RoomPrivateMethods on Room {
     _pendingTrackQueue.clear();
 
     // clean up LocalParticipant
+    localParticipant?.gravixForgetRepublish(); // GRAVIX (0.4.15, F4)
     await localParticipant?.unpublishAllTracks();
 
     if (disposeLocalParticipant) {
@@ -1876,3 +2241,15 @@ extension DataStreamRoomMethods on Room {
     }
   }
 }
+
+/// GRAVIX (0.4.15, F5): one full restart's own state (see Room._restart).
+class _GravixRestartState {
+  /// Identities announced (or never to be re-announced) during this restart.
+  final Set<String> announced = <String>{};
+
+  /// keepParticipantsOnRejoin: identities kept across it, until its JoinResponse.
+  Set<String>? kept;
+}
+
+/// GRAVIX (2026-10-11): the longer of [a] (when set) and [b].
+Duration _gravixLonger(Duration? a, Duration b) => a != null && a > b ? a : b;

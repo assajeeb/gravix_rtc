@@ -56,6 +56,7 @@ export 'src/music/gravix_music_channel.dart' show kGravixMusicChannel;
 export 'src/music/gravix_room_music.dart';
 export 'src/room/gravix_audio_first.dart';
 export 'src/room/gravix_effective_quality.dart';
+export 'src/room/gravix_data_saver.dart' show GravixDataSaverEvent, GravixDataSaverEventKind;
 export 'src/room/gravix_red_mode.dart';
 export 'src/room/gravix_room_service.dart';
 export 'src/rtc_core/gravix_client.dart';

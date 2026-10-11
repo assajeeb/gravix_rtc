@@ -39,6 +39,7 @@ import '../proto/gravixcloud_models.pb.dart' as lk_models;
 import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 import '../publication/local.dart';
 import '../support/disposable.dart';
+import '../support/http_client.dart' show sdkHttpHead;
 import '../support/platform.dart' show lkPlatformIsTest, lkPlatformIs, PlatformType;
 import '../support/region_url_provider.dart';
 import '../support/websocket.dart';
@@ -67,6 +68,10 @@ abstract interface class GravixRestartRegionStrategy {
   /// The next url to try after the restart url refused, or null when done.
   Future<String?> getNextUrl();
 }
+
+/// GRAVIX (2026-10-11, resumeSatisfiesPeerFailure / resumePeerRestartWait): what a
+/// successful resume does with a full-reconnect request made while it ran.
+enum _GravixPcFailureVerdict { dispatch, satisfied, waitForOther, publisherWatch }
 
 class Engine extends Disposable with EventsEmittable<EngineEvent> {
   static const _lossyDCLabel = '_lossy';
@@ -116,7 +121,69 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   String? _connectedServerAddress;
   String? get connectedServerAddress => _connectedServerAddress;
 
-  bool fullReconnectOnNext = false;
+  /// A full-reconnect request. With
+  /// [GravixRecoveryOptions.upstreamReconnectFixes] (upstream 2.13.0, #1199) it
+  /// is the PENDING request: consumed when an attempt starts, so a true value
+  /// while an attempt runs is a new request, dispatched when it ends. Use
+  /// [gravixFullReconnectInProgress] to ask what the running attempt does.
+  bool get fullReconnectOnNext => _fullReconnectOnNext;
+  set fullReconnectOnNext(bool value) {
+    // GRAVIX (0.4.15, F4): remember which peer connections the request was made
+    // against (see the dispatch in attemptReconnect)
+    if (value) _fullRequestTransportGen = _gravixTransportGen;
+    // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure): and how many times a peer
+    // connection had come up by then. Any request counts as not made by a peer
+    // connection failure; handleReconnect marks those itself, right after.
+    if (value) _fullRequestPcUpSeq = _gravixPcUpSeq;
+    _fullRequestPcFailuresOnly = false;
+    _fullReconnectOnNext = value;
+  }
+
+  bool _fullReconnectOnNext = false;
+
+  /// GRAVIX (2026-10-11, resumeSatisfiesPeerFailure): bumped every time a peer
+  /// connection reports Connected (a join, a resume's ICE restart).
+  int _gravixPcUpSeq = 0;
+
+  /// The [_gravixPcUpSeq] of the latest full-reconnect request.
+  int _fullRequestPcUpSeq = 0;
+
+  /// Whether the pending full-reconnect request was made only by peer
+  /// connections reporting Failed (no Leave, negotiation failure, config, ...).
+  bool _fullRequestPcFailuresOnly = false;
+
+  /// GRAVIX (0.4.15, F4): bumped every time a new pair of peer connections is
+  /// created (a join, a full reconnect).
+  int _gravixTransportGen = 0;
+
+  /// The [_gravixTransportGen] of the latest full-reconnect request.
+  int _fullRequestTransportGen = 0;
+
+  /// GRAVIX (0.4.15, F4): bumped when a full reconnect starts replacing the
+  /// session. Work started on the previous session (a republish waiting for its
+  /// TrackPublished) checks it, and [addTrack] stops waiting at once.
+  @internal
+  int get gravixRestartGen => _gravixRestartGen;
+  int _gravixRestartGen = 0;
+  Completer<void> _gravixRestartSignal = Completer<void>();
+
+  void _gravixSessionReplaced() {
+    _gravixRestartGen++;
+    final old = _gravixRestartSignal;
+    _gravixRestartSignal = Completer<void>();
+    if (!old.isCompleted) old.complete();
+  }
+
+  bool _attemptIsFullReconnect = false;
+
+  /// GRAVIX: whether the session is being re-joined (a full reconnect running,
+  /// or one pending). With the upstream fixes off this is [fullReconnectOnNext]
+  /// alone, exactly what the room read before.
+  @internal
+  bool get gravixFullReconnectInProgress =>
+      _upstreamReconnectFixes ? (_attemptIsFullReconnect || fullReconnectOnNext) : fullReconnectOnNext;
+
+  bool get _upstreamReconnectFixes => roomOptions.recovery.upstreamReconnectFixes;
 
   // server-provided ice servers
   List<RTCIceServer> _serverProvidedIceServers = [];
@@ -132,6 +199,13 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   bool get isClosed => _isClosed;
 
   bool get isPendingReconnect => _reconnectStart != null && _reconnectTimeout != null;
+
+  /// GRAVIX (0.4.15, OBS-1): a reconnect (resume or full) is under way, from
+  /// [handleReconnect] until it succeeds or the session ends -- including the
+  /// attempt's own dial, when the signal client reads `disconnected` (its
+  /// cleanUp) and [isPendingReconnect] is false (no timer is pending then).
+  @internal
+  bool get gravixReconnectInProgress => _reconnectStart != null || _attemptingReconnect || _isReconnecting;
 
   /// GRAVIX: the back-off in use; see [RoomOptions.reconnectPolicy].
   ReconnectPolicy get reconnectPolicy => roomOptions.reconnectPolicy ?? _defaultReconnectPolicy;
@@ -201,6 +275,27 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   /// GRAVIX(one-session): set while [restartConnection] runs its own [connect].
   bool _inRestart = false;
 
+  /// GRAVIX (2026-10-11, restartAbortsOnSignalLoss): armed by [restartConnection]
+  /// around its connect and its publisher wait; completed when that signal
+  /// socket closes (see the SignalDisconnectedEvent handler).
+  Completer<void>? _gravixRestartSignalLost;
+
+  /// Whether the running attempt's full reconnect was failed that way.
+  bool _gravixAttemptSignalLost = false;
+
+  /// [wait], failed with [GravixRestartSignalLostException] as soon as the full
+  /// reconnect's signal socket closes (no-op when nothing is armed).
+  Future<T> _gravixUnlessSignalLost<T>(Future<T> wait, String what) {
+    final lost = _gravixRestartSignalLost;
+    if (lost == null) return wait;
+    return Future.any<T>([wait, lost.future.then<T>((_) => throw GravixRestartSignalLostException(what))]);
+  }
+
+  /// Tests only: flutter test skips the full reconnect's wait for the publisher
+  /// connection (upstream); true runs it.
+  @visibleForTesting
+  bool gravixPublisherWaitInTests = false;
+
   /// Whether a resume is in flight (between its dial and its ReconnectResponse).
   @visibleForTesting
   bool get gravixResumeInFlight => _resumeAbort != null && !_resumeAbort!.isCompleted;
@@ -209,9 +304,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     final c = _resumeAbort;
     if (c != null && !c.isCompleted) {
       logger.info('resume aborted: ${reason.message}');
+      _gravixAbortReason = reason;
       c.complete(reason);
     }
   }
+
+  /// GRAVIX (0.4.15): the ReconnectResponse of the resume in flight arrived (its
+  /// abort, if still held, covers the wait for the primary connection).
+  bool _resumeAnswered = false;
+  GravixResumeRejectedException? _gravixAbortReason;
 
   /// Cancels a scheduled reconnect and any resume in flight: a fresh connect or a
   /// disconnect owns the session now.
@@ -290,8 +391,16 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     _setUpEngineListeners();
     _setUpSignalListeners();
+    // GRAVIX (0.4.15, F6): a real connectivity change (not a same-type repeat)
+    _gravixNetListener.on<SignalConnectivityChangedEvent>((event) {
+      final before = event.oldState.toSet(), now = event.state.toSet();
+      if (now.contains(ConnectivityResult.none) || before.length != now.length || !before.containsAll(now)) {
+        _gravixNoteNetTrouble();
+      }
+    });
 
     onDispose(() async {
+      await _gravixNetListener.dispose();
       // GRAVIX: disposed while connected (no disconnect() first): leave, so the
       // SFU does not keep a ghost participant until its ping timeout
       gravixLeaveBestEffort();
@@ -336,29 +445,60 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     // resume or a full reconnect does (Timeouts.mediaConnect; see there).
     final freshJoin = !_inRestart && !_isReconnecting && !_attemptingReconnect;
 
+    signalClient.gravixNextDialTimeout = _gravixNextDialTimeout;
+    _gravixNextDialTimeout = null;
+    // upstream 2.13.1 (#1228): this attempt's setup time scales the video start bitrate hint
+    final connectStopwatch = Stopwatch()..start();
     try {
       // wait for socket to connect rtc server
       await signalClient.connect(url, token, connectOptions: this.connectOptions, roomOptions: this.roomOptions);
+      // GRAVIX (2026-10-11, slowPathPeerConnectWait): how long the signal path took
+      final signalSetup = connectStopwatch.elapsed;
+
+      // GRAVIX (2026-10-11, restartAbortsOnSignalLoss): during a full reconnect
+      // these waits end when its signal socket closes (RECHECK Wi-Fi flapping:
+      // they ran out their 10 s on a dead socket)
+      Future<T> unlessSignalLost<T>(Future<T> wait, String what) =>
+          _inRestart ? _gravixUnlessSignalLost(wait, what) : wait;
 
       // wait for join response
-      await events.waitFor<EngineJoinResponseEvent>(
-        duration: this.connectOptions.timeouts.connection,
-        onTimeout: () => throw ConnectException(
-          'Timed out waiting for SignalJoinResponseEvent',
-          reason: ConnectionErrorReason.Timeout,
+      await unlessSignalLost(
+        events.waitFor<EngineJoinResponseEvent>(
+          duration: this.connectOptions.timeouts.connection,
+          onTimeout: () => throw ConnectException(
+            'Timed out waiting for SignalJoinResponseEvent',
+            reason: ConnectionErrorReason.Timeout,
+          ),
         ),
+        'the JoinResponse',
       );
+
+      // the join response created the publisher; it derives the start bitrate hint from this
+      // attempt's setup time (or the time elapsed so far, for an offer made before it ends)
+      publisher?.setConnectStopwatch(connectStopwatch);
 
       logger.fine('Waiting for engine to connect...');
 
       // wait until primary pc is connected
-      await events.waitFor<EnginePeerStateUpdatedEvent>(
-        filter: (event) => event.isPrimary && event.state.isConnected(),
-        duration: freshJoin ? this.connectOptions.timeouts.mediaConnect : this.connectOptions.timeouts.connection,
-        onTimeout: () => throw MediaConnectException(
-          'Timed out waiting for PeerConnection to connect, please check your network for ice connectivity',
+      // GRAVIX (2026-10-11, fullReconnectMediaConnect): RECHECK r376, a full
+      // reconnect's ICE connected after 4.2 s and its DTLS was still running at
+      // the 10 s mark; a full reconnect now waits like a fresh join.
+      final recovery = this.roomOptions.recovery;
+      final timeouts = this.connectOptions.timeouts;
+      await unlessSignalLost(
+        _gravixWaitPrimaryConnected(
+          freshJoin || recovery.fullReconnectMediaConnect ? timeouts.mediaConnect : timeouts.connection,
+          ceiling: recovery.slowPathPeerConnectWait,
+          // GRAVIX (2026-10-11, slowPathPeerConnectWait): RECHECK r376, the fresh
+          // join's ICE still checking at the 20 s mark after a 10.7 s signal dial
+          slowPath: () =>
+              signalSetup >= recovery.slowSignalSetup || signalClient.rtt >= recovery.slowSignalRtt.inMilliseconds,
+          signalSetup: signalSetup,
         ),
+        'the primary connection',
       );
+      connectStopwatch.stop();
+      logger.info('connection setup took ${connectStopwatch.elapsedMilliseconds} ms');
       events.emit(const EngineConnectedEvent());
     } catch (error) {
       logger.fine('Connect Error $error');
@@ -376,6 +516,179 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
   }
 
+  /// GRAVIX (2026-10-11, slowPathPeerConnectWait): the wait for the primary
+  /// peer connection: [base]; when it runs out on a measurably slow signal path
+  /// ([slowPath]), on up to [ceiling] in all (one listener, no gap between).
+  Future<void> _gravixWaitPrimaryConnected(
+    Duration base, {
+    Duration? ceiling,
+    required bool Function() slowPath,
+    required Duration signalSetup,
+  }) async {
+    final done = Completer<void>();
+    final cancel = events.on<EnginePeerStateUpdatedEvent>((_) {
+      if (!done.isCompleted) done.complete();
+    }, filter: (event) => event.isPrimary && event.state.isConnected());
+    MediaConnectException timedOut() => MediaConnectException(
+      'Timed out waiting for PeerConnection to connect, please check your network for ice connectivity',
+    );
+    try {
+      var ranOut = false;
+      await done.future.timeout(base, onTimeout: () => ranOut = true);
+      if (!ranOut) return;
+      if (ceiling == null || ceiling <= base || !slowPath()) throw timedOut();
+      logger.info(
+        'peer connection not connected after ${base.inMilliseconds} ms on a slow signal path '
+        '(signal setup ${signalSetup.inMilliseconds} ms, rtt ${signalClient.rtt} ms): waiting up to '
+        '${ceiling.inMilliseconds} ms',
+      );
+      ranOut = false;
+      await done.future.timeout(ceiling - base, onTimeout: () => ranOut = true);
+      if (ranOut) throw timedOut();
+    } finally {
+      await cancel();
+    }
+  }
+
+  /// GRAVIX (0.4.15): the dial timeout of the next [connect] only (the
+  /// same-url retry of a full reconnect).
+  Duration? _gravixNextDialTimeout;
+
+  /// GRAVIX (0.4.15): the next [restartConnection] is the same-url retry.
+  bool _gravixSameUrlRetryNext = false;
+
+  /// GRAVIX (0.4.15, F6): when the reconnect attempt in progress began, and when
+  /// the device's network last changed or read offline (see
+  /// [GravixRecoveryOptions.failoverNeedsEvidence]).
+  DateTime? _gravixAttemptStartedAt;
+  DateTime? _gravixLastNetTroubleAt;
+  late final EventsListener<SignalEvent> _gravixNetListener = signalClient.createListener();
+
+  void _gravixNoteNetTrouble() => _gravixLastNetTroubleAt = DateTime.timestamp();
+
+  bool _gravixNetTroubleSince(DateTime? since) {
+    final at = _gravixLastNetTroubleAt;
+    return at != null && (since == null || !at.isBefore(since));
+  }
+
+  /// Evidence that [current] (the session's region) failed and [next] did not:
+  /// the device's network steady since the attempt began, [current] not
+  /// answering a probe, [next] answering one.
+  Future<bool> _gravixRegionFailed(String current, String next) async {
+    if (_gravixNetTroubleSince(_gravixAttemptStartedAt)) return false;
+    if (!await signalClient.networkIsAvailable()) {
+      _gravixNoteNetTrouble();
+      return false;
+    }
+    const t = Duration(seconds: 2);
+    final probes = await Future.wait([_gravixServerReachable(current, t), _gravixServerReachable(next, t)]);
+    return !probes[0] && probes[1];
+  }
+
+  /// GRAVIX (0.4.15, F3, device test r017): waits for the network, re-checking
+  /// the connectivity reading and probing the server every [every] instead of
+  /// only waiting for a SignalConnectivityChangedEvent: lifting a per-app
+  /// network block (and a stale reading) fires none, and the attempt sat out
+  /// 10 x Timeouts.connection (100 s). Same overall limit and timeout error.
+  Future<void> _gravixWaitForNetwork(Duration every, int gen) async {
+    final limit = DateTime.timestamp().add(connectOptions.timeouts.connection * 10);
+    while (true) {
+      if (_isClosed || gen != _sessionGen) return; // a disconnect / fresh connect took over
+      final left = limit.difference(DateTime.timestamp());
+      if (left <= Duration.zero) {
+        throw ConnectException(
+          'attemptReconnect: Timed out waiting for SignalConnectivityChangedEvent',
+          reason: ConnectionErrorReason.Timeout,
+        );
+      }
+      try {
+        await signalClient.events.waitFor<SignalConnectivityChangedEvent>(
+          duration: left < every ? left : every,
+          filter: (event) => !event.state.contains(ConnectivityResult.none),
+        );
+        return; // the platform said the network is back
+      } catch (_) {
+        // no event within [every] (waitFor only throws on its timeout)
+      }
+      if (await signalClient.networkIsAvailable()) {
+        logger.info('network back (no connectivity event); reconnecting');
+        return;
+      }
+      final target = url;
+      if (target != null && await _gravixServerReachable(target, every)) {
+        logger.info('server reachable although the connectivity reading says none; reconnecting');
+        return;
+      }
+    }
+  }
+
+  /// One HTTP HEAD to the server; any answer (even an error status) means the
+  /// path is up. Replaceable in tests.
+  @visibleForTesting
+  Future<bool> Function(String url, Duration timeout)? gravixReachabilityProbe;
+
+  Future<bool> _gravixServerReachable(String url, Duration timeout) async {
+    final probe = gravixReachabilityProbe;
+    if (probe != null) return probe(url, timeout);
+    try {
+      await sdkHttpHead(
+        Uri.parse(toHttpUrl(url)),
+        networkOptions: roomOptions.networkOptions,
+        // GRAVIX (2026-10-11, boundedSignalConnect): the probe's socket is closed
+        // at the timeout too; a `.timeout()` alone left every probe of a
+        // blackholed path connecting until the OS gave up (~2 min, one more
+        // socket per probe interval)
+        timeout: roomOptions.recovery.boundedSignalConnect ? timeout : null,
+      ).timeout(timeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// GRAVIX (0.4.15, R1): a resume now, because subscribed media stopped
+  /// arriving (no packet for ~2 s) before ICE noticed (~7 s). Ignored unless the
+  /// session is connected with no reconnect pending or running.
+  @internal
+  bool gravixRequestResume(String why, {bool uplink = false}) {
+    if (!_gravixCanRecover()) return false;
+    logger.warning('media stalled ($why): resuming now');
+    unawaited(
+      handleReconnect(
+        ClientDisconnectReason.mediaStalled,
+        // GRAVIX (2026-10-11, uplinkFeedbackStallFor): an uplink the SFU stopped
+        // answering is the publisher's connection
+        reconnectReason: uplink
+            ? lk_models.ReconnectReason.RR_PUBLISHER_FAILED
+            : lk_models.ReconnectReason.RR_SUBSCRIBER_FAILED,
+      ),
+    );
+    return true;
+  }
+
+  /// GRAVIX (0.4.15, S4): a full rejoin now, because a subscribed video decoded
+  /// nothing after a resume (a resumed session with a dead server downtrack).
+  @internal
+  bool gravixRequestRejoin(String why) {
+    if (!_gravixCanRecover()) return false;
+    logger.warning('no video after the resume ($why): full rejoin');
+    fullReconnectOnNext = true;
+    unawaited(handleReconnect(ClientDisconnectReason.mediaStalled));
+    return true;
+  }
+
+  bool _gravixCanRecover() =>
+      !_isClosed &&
+      !_attemptingReconnect &&
+      !isPendingReconnect &&
+      !_isReconnecting &&
+      connectionState == ConnectionState.connected;
+
+  /// GRAVIX (0.4.15): whether the local participant has any unmuted published
+  /// track. Set by the Room; null = unknown (treated as yes).
+  @internal
+  bool Function()? gravixHasUnmutedLocalMedia;
+
   /// GRAVIX(0.4.13): set by Room.connect around a join attempt it may retry
   /// (ConnectOptions.joinRetries). A failed [connect] then emits no
   /// EngineDisconnectedEvent; the room cleans the attempt up and either retries
@@ -391,6 +704,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   // resets internal state to a re-usable state
   Future<void> cleanUp() async {
     logger.fine('[$objectId] cleanUp()');
+    _gravixStopPublisherWatch();
+    _gravixStopRestartWait(); // GRAVIX (2026-10-11, resumePeerRestartWait)
 
     await publisher?.dispose();
     publisher = null;
@@ -431,6 +746,17 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       }
     });
 
+    // GRAVIX (0.4.15, F4): a full reconnect replacing this session ends the wait
+    // at once (its socket will never deliver the TrackPublished); before, the
+    // publish sat out timeouts.publish (10 s) and held the source's publish queue
+    final replaced = _gravixRestartSignal.future;
+    unawaited(
+      replaced.then((_) {
+        if (!completer.isCompleted) {
+          completer.completeError(GravixSessionReplacedException('addTrack ${req.cid}: the session was replaced'));
+        }
+      }),
+    );
     try {
       signalClient.sendAddTrack(req);
       return await completer.future.timeout(
@@ -441,6 +767,16 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       await cancelPublished();
       await cancelRejected();
     }
+  }
+
+  Future<void> _onPublisherNegotiationError(Object error) async {
+    if (error is NegotiationError) {
+      fullReconnectOnNext = true;
+    }
+    await handleReconnect(
+      ClientDisconnectReason.negotiationFailed,
+      reconnectReason: lk_models.ReconnectReason.RR_UNKNOWN,
+    );
   }
 
   @internal
@@ -538,6 +874,14 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     // construct the data channel message
     var message = rtc.RTCDataChannelMessage.fromBinary(packet.writeToBuffer());
 
+    // GRAVIX (0.4.15): resumed on the subscriber alone; the data channels are on
+    // the publisher connection, which is still recovering: wait for it (or for
+    // the reconnect its watch starts) rather than write into a dead channel.
+    final publisherRecovery = _gravixPublisherRecovery;
+    if (!_subscriberPrimary && publisherRecovery != null) {
+      await publisherRecovery.future;
+    }
+
     if (_subscriberPrimary) {
       // make sure publisher transport is connected
       await ensurePublisherConnected();
@@ -620,7 +964,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       if (state != rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnecting) {
         await negotiate();
       }
-      if (!lkPlatformIsTest()) {
+      if (!lkPlatformIsTest() || gravixPublisherWaitInTests) {
         logger.fine('Waiting for publisher to ice-connect...');
         await events.waitFor<EnginePublisherPeerStateUpdatedEvent>(
           filter: (event) => event.state.isConnected(),
@@ -752,11 +1096,19 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   }
 
   Future<void> _createPeerConnections(RTCConfiguration rtcConfiguration) async {
+    _gravixTransportGen++; // GRAVIX (0.4.15, F4)
     publisher = await Transport.create(
       _peerConnectionCreate,
       rtcConfig: rtcConfiguration,
       connectOptions: connectOptions,
     );
+    publisher!.gravixConnectionLevelStartBitrate = roomOptions.recovery.startBitrateBySetupTime; // GRAVIX (0.4.15)
+    // GRAVIX (0.4.15, BUG-3): an offer the socket cannot carry is held (not made
+    // and dropped), and a restart rolls back an offer that left unanswered.
+    if (roomOptions.recovery.deferNegotiateDuringResume) {
+      publisher!.gravixHoldOffers = () => signalClient.connectionState != ConnectionState.connected;
+    }
+    publisher!.gravixRollbackStaleOffer = roomOptions.recovery.rollbackStaleOfferOnRestart;
     // GRAVIX(viewer-fast-start): the subscriber connection checks its pair
     // again soon after it is writable, so the SFU nominates at once; restored to
     // the libwebrtc default when it is connected. See
@@ -803,6 +1155,10 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       signalClient.sendOffer(offer);
     };
 
+    // GRAVIX (0.4.15): upstream 2.13.1 (#1226): the catch in [negotiate] never saw
+    // a failed debounced offer (unhandled error, no reconnect); route it here.
+    if (_upstreamReconnectFixes) publisher?.onNegotiationError = _onPublisherNegotiationError;
+
     // in subscriber primary mode, server side opens sub data channels.
     if (_subscriberPrimary) {
       subscriber?.pc.onDataChannel = _onDataChannel;
@@ -820,6 +1176,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
               .catchError((Object e) => logger.warning('restoring the subscriber ping interval failed: $e')),
         );
       }
+      if (state.isConnected()) _gravixPcUpSeq++; // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure)
       events.emit(EngineSubscriberPeerStateUpdatedEvent(state: state, isPrimary: _subscriberPrimary));
       logger.fine('subscriber connectionState: $state');
       if (state.isDisconnected() || state.isFailed()) {
@@ -839,6 +1196,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       ].contains(state)) {
         _resetPublisherConnection();
       }
+      if (state.isConnected()) _gravixPcUpSeq++; // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure)
       events.emit(EnginePublisherPeerStateUpdatedEvent(state: state, isPrimary: !_subscriberPrimary));
       logger.fine('publisher connectionState: $state');
       if (state.isDisconnected() || state.isFailed()) {
@@ -1136,6 +1494,23 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     logger.info('onDisconnected state:${connectionState} reason:${reason.name}');
 
+    // GRAVIX (upstream 2.13.0 #1197/#1199): the escalation is decided when the
+    // request is made, not when its timer fires: a later request replaces the
+    // pending timer AND its reason, so a peer-connection failure followed by the
+    // socket close was downgraded to a resume. `leaveReconnect` is not escalated:
+    // a Leave{RECONNECT} sets the flag itself, and a Leave{RESUME} (migration)
+    // must stay a resume.
+    if (_upstreamReconnectFixes &&
+        (reason == ClientDisconnectReason.negotiationFailed || reason == ClientDisconnectReason.peerConnectionFailed)) {
+      // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure): a request only peer
+      // connection failures made can be satisfied by a resume's ICE restart
+      // (see attemptReconnect); one any other source joined cannot
+      final pcFailuresOnly =
+          reason == ClientDisconnectReason.peerConnectionFailed && (!fullReconnectOnNext || _fullRequestPcFailuresOnly);
+      fullReconnectOnNext = true;
+      _fullRequestPcFailuresOnly = pcFailuresOnly;
+    }
+
     _isReconnecting = true;
 
     if (_reconnectAttempts == 0) {
@@ -1205,7 +1580,14 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       return;
     }
 
-    if (_clientConfiguration?.resumeConnection == lk_models.ClientConfigSetting.DISABLED ||
+    final upstreamFixes = _upstreamReconnectFixes;
+    if (upstreamFixes) {
+      // reason-based escalation happened in handleReconnect; the server switch is
+      // config, checked here so the latest ClientConfiguration wins
+      if (_clientConfiguration?.resumeConnection == lk_models.ClientConfigSetting.DISABLED) {
+        fullReconnectOnNext = true;
+      }
+    } else if (_clientConfiguration?.resumeConnection == lk_models.ClientConfigSetting.DISABLED ||
         [
           ClientDisconnectReason.leaveReconnect,
           ClientDisconnectReason.negotiationFailed,
@@ -1214,23 +1596,44 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       fullReconnectOnNext = true;
     }
 
+    // GRAVIX (upstream 2.13.0 #1199): consume the request up front. This
+    // attempt's mode is fixed now; a true flag from here on is a NEW request
+    // that arrived while it ran (a peer failure mid-resume), dispatched in the
+    // finally block instead of being dropped by the guard above.
+    final fullReconnect = fullReconnectOnNext;
+    if (upstreamFixes) {
+      fullReconnectOnNext = false;
+      _attemptIsFullReconnect = fullReconnect;
+    }
+
     final gen = _sessionGen;
+    var succeeded = false;
+    _gravixAttemptStartedAt = DateTime.timestamp(); // GRAVIX (0.4.15, F6)
+    _gravixAttemptSignalLost = false; // GRAVIX (2026-10-11, restartAbortsOnSignalLoss)
+    // a new attempt owns the publisher now
+    _gravixStopPublisherWatch();
     try {
       _attemptingReconnect = true;
 
       if (await signalClient.networkIsAvailable() == false) {
+        _gravixNoteNetTrouble(); // GRAVIX (0.4.15, F6)
         logger.fine('no internet connection, waiting...');
-        await signalClient.events.waitFor<SignalConnectivityChangedEvent>(
-          duration: connectOptions.timeouts.connection * 10,
-          filter: (event) => !event.state.contains(ConnectivityResult.none),
-          onTimeout: () => throw ConnectException(
-            'attemptReconnect: Timed out waiting for SignalConnectivityChangedEvent',
-            reason: ConnectionErrorReason.Timeout,
-          ),
-        );
+        final probeEvery = roomOptions.recovery.networkWaitProbeInterval;
+        if (probeEvery == null) {
+          await signalClient.events.waitFor<SignalConnectivityChangedEvent>(
+            duration: connectOptions.timeouts.connection * 10,
+            filter: (event) => !event.state.contains(ConnectivityResult.none),
+            onTimeout: () => throw ConnectException(
+              'attemptReconnect: Timed out waiting for SignalConnectivityChangedEvent',
+              reason: ConnectionErrorReason.Timeout,
+            ),
+          );
+        } else {
+          await _gravixWaitForNetwork(probeEvery, gen);
+        }
       }
 
-      if (fullReconnectOnNext) {
+      if (upstreamFixes ? fullReconnect : fullReconnectOnNext) {
         await restartConnection();
       } else {
         await resumeConnection(reason, reconnectReason: reconnectReason);
@@ -1239,6 +1642,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _attemptingReconnect = false;
       _isReconnecting = false;
       _unrecoveredResumes = 0;
+      succeeded = true;
     } catch (e) {
       if (gen != _sessionGen || _isClosed || (e is GravixResumeRejectedException && e.cancelled)) {
         // GRAVIX(one-session): a fresh connect or a disconnect cancelled this
@@ -1246,21 +1650,40 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         logger.fine('attemptReconnect: cancelled ($e)');
         return;
       }
-      _reconnectAttempts = _reconnectAttempts + 1;
+      // GRAVIX (2026-10-11, restartAbortsOnSignalLoss): a full reconnect that lost
+      // its signal socket while the device's network changed failed because of the
+      // network, at once; counting it climbed the back-off by one step per Wi-Fi
+      // flap (to 7 s) and, after 10 flaps, ended the session. The attempt's own
+      // network wait absorbs the outage. With the network steady it counts.
+      if (roomOptions.recovery.restartAbortsOnSignalLoss &&
+          _gravixAttemptSignalLost &&
+          _gravixNetTroubleSince(_gravixAttemptStartedAt)) {
+        logger.info('attemptReconnect: the full reconnect lost its signal while the network changed; not counted');
+      } else {
+        _reconnectAttempts = _reconnectAttempts + 1;
+      }
+      logger.fine('attemptReconnect: ${fullReconnect ? 'full reconnect' : 'resume'} failed: $e');
       bool recoverable = true;
       var immediate = false;
+      if (upstreamFixes && fullReconnect) {
+        // a failed full reconnect stays a full reconnect (js / rust parity)
+        fullReconnectOnNext = true;
+      }
       if (e is GravixResumeRejectedException) {
         // GRAVIX(resume-rejected): the server closed this session (Leave
         // RECONNECT / socket closed before the ReconnectResponse): rejoin now,
         // no second resume. A Leave{RESUME} keeps resuming, also at once.
         logger.info('resume rejected (${e.message}); ${e.full ? 'full reconnect' : 'resume again'} now');
-        fullReconnectOnNext = e.full;
+        // with the upstream fixes an escalation is sticky: a Leave{RESUME} does not
+        // downgrade a full-reconnect request made while the resume ran
+        fullReconnectOnNext = upstreamFixes ? (fullReconnectOnNext || e.full) : e.full;
         immediate = true;
         _unrecoveredResumes = 0;
       } else if (e is WebSocketException || e is MediaConnectException) {
         // cannot resume connection, need to do full reconnect
         fullReconnectOnNext = true;
-      } else if (!fullReconnectOnNext && ++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
+      } else if (!(upstreamFixes ? fullReconnect || fullReconnectOnNext : fullReconnectOnNext) &&
+          ++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
         // GRAVIX (regionReprobeOnRestart, 2026-09-19): a resume against an
         // UNREACHABLE region times out rather than being refused, and upstream
         // keeps resuming. The JS SDK's live test (pinned SFU stopped) showed the
@@ -1298,7 +1721,167 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       }
     } finally {
       _attemptingReconnect = false;
+      _attemptIsFullReconnect = false;
+      // GRAVIX (upstream 2.13.0 #1199): a full reconnect requested while this
+      // attempt ran, which a successful attempt did not act on: dispatch it now.
+      // The failure path retries by itself. Not after a fresh connect or a
+      // disconnect took the session over (one-session).
+      if (upstreamFixes && succeeded && fullReconnectOnNext && !_isClosed && gen == _sessionGen) {
+        if (_fullRequestTransportGen != _gravixTransportGen) {
+          // GRAVIX (0.4.15, F4, device r056 / r059): the request was made against
+          // peer connections this (full) attempt has replaced -- the old ones
+          // reported failed while the attempt waited for the network. The new
+          // session satisfies it; dispatching it started a second full rejoin
+          // 23 ms after the first one connected.
+          logger.info('attemptReconnect: a full reconnect requested against the replaced connections; already done');
+          fullReconnectOnNext = false;
+        } else {
+          final verdict = !fullReconnect && roomOptions.recovery.resumeSatisfiesPeerFailure
+              ? _gravixResumePcFailureVerdict()
+              : _GravixPcFailureVerdict.dispatch;
+          switch (verdict) {
+            case _GravixPcFailureVerdict.satisfied:
+              // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure; iOS real device,
+              // Airplane Mode 5 s, 2/2): the request came from the OLD ICE session
+              // failing as the network returned, while this resume started; the
+              // resume keeps the same peer connections, so F4 above cannot tell. Its
+              // ICE restart brought them back: dispatching it rejoined 1 ms after the
+              // resume succeeded and the far side saw the host leave and join again.
+              logger.info(
+                'attemptReconnect: the peer connection failure mid-resume was satisfied by the resume; no rejoin',
+              );
+              fullReconnectOnNext = false;
+            case _GravixPcFailureVerdict.waitForOther:
+              // GRAVIX (2026-10-11, resumePeerRestartWait; iPhone recheck run 3): the
+              // primary is back, the other connection's ICE restart is still running
+              // (iOS reported it Disconnected 140 ms before the primary connected);
+              // rejoining now was the fake leave/join. The request is held aside, not
+              // left pending: a Disconnected report of the restarting connection
+              // starts a new attempt, which would consume it as a FULL reconnect.
+              fullReconnectOnNext = false;
+              _gravixWaitForRestartingPc(gen);
+            case _GravixPcFailureVerdict.publisherWatch:
+              // GRAVIX (2026-10-11, resumePeerRestartWait): the subscriber was enough
+              // (nothing unmuted published) and the publisher is still restarting:
+              // the publisher watch rejoins if it is not back in time
+              logger.info(
+                'attemptReconnect: the peer connection failure mid-resume: the publisher is still restarting; '
+                'the publisher watch decides',
+              );
+              fullReconnectOnNext = false;
+            case _GravixPcFailureVerdict.dispatch:
+              logger.info('attemptReconnect: full reconnect requested mid-attempt, dispatching');
+              unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
+          }
+        }
+      }
     }
+  }
+
+  /// GRAVIX (2026-10-11, resumeSatisfiesPeerFailure): what to do with the
+  /// pending full-reconnect request, made while a resume ran that has just
+  /// succeeded. It is satisfied by that resume's ICE restart when only peer
+  /// connections reporting Failed made it, a peer connection came back AFTER the
+  /// last of those reports (a request with no recovery behind it is still
+  /// dispatched), and right now the primary is connected and the other
+  /// connection is too (or was never used). A connection still restarting
+  /// (Connecting / Disconnected: [GravixRecoveryOptions.resumePeerRestartWait])
+  /// gets a bounded wait; with the subscriber enough for an idle publisher the
+  /// publisher watch decides. A failure of the restarted session (Failed), or a
+  /// connection still Failed, keeps the rejoin (#1199). Read from the cached
+  /// states: no await here, a new attempt may start as soon as this one ended.
+  _GravixPcFailureVerdict _gravixResumePcFailureVerdict() {
+    const dispatch = _GravixPcFailureVerdict.dispatch;
+    if (!_fullRequestPcFailuresOnly || _fullRequestPcUpSeq == _gravixPcUpSeq) return dispatch;
+    bool up(Transport? t) => t?.pc.connectionState?.isConnected() ?? false;
+    bool restarting(Transport? t) => const [
+      rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnecting,
+      rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected,
+    ].contains(t?.pc.connectionState);
+    final mayWait = roomOptions.recovery.resumePeerRestartWait > Duration.zero;
+    if (!up(primary)) {
+      // the subscriber was enough ([_gravixWaitPrimaryAfterResume]): the
+      // publisher watch is armed and rejoins if the publisher is not back
+      final watched = !_subscriberPrimary && _gravixPublisherWatch != null && up(subscriber) && restarting(publisher);
+      return mayWait && watched ? _GravixPcFailureVerdict.publisherWatch : dispatch;
+    }
+    final other = _subscriberPrimary ? publisher : subscriber;
+    final otherState = other?.pc.connectionState;
+    final otherUnused = otherState == null || otherState == rtc.RTCPeerConnectionState.RTCPeerConnectionStateNew;
+    if (otherUnused || up(other)) return _GravixPcFailureVerdict.satisfied;
+    return mayWait && restarting(other) ? _GravixPcFailureVerdict.waitForOther : dispatch;
+  }
+
+  /// GRAVIX (2026-10-11, resumePeerRestartWait): the bounded wait for the
+  /// connection that was still restarting when the resume succeeded. A passive
+  /// observer: a new attempt does not stop it (a Disconnected report of the
+  /// restarting connection starts one); a full reconnect that replaced the
+  /// connections, a fresh connect or a disconnect does.
+  Timer? _gravixRestartWaitTimer;
+  EventsListener<EngineEvent>? _gravixRestartWaitListener;
+
+  void _gravixWaitForRestartingPc(int gen) {
+    _gravixStopRestartWait();
+    final bound = roomOptions.recovery.resumePeerRestartWait;
+    final subscriberPrimary = _subscriberPrimary;
+    final other = subscriberPrimary ? publisher : subscriber;
+    if (other == null) return;
+    final name = subscriberPrimary ? 'publisher' : 'subscriber';
+    final transportGen = _gravixTransportGen;
+    final started = DateTime.timestamp();
+    bool stale() =>
+        _isClosed ||
+        gen != _sessionGen ||
+        transportGen != _gravixTransportGen ||
+        !identical(other, subscriberPrimary ? publisher : subscriber);
+    logger.info(
+      'attemptReconnect: resumed; the $name connection is still restarting '
+      '(${other.pc.connectionState?.name}); waiting up to ${bound.inMilliseconds} ms before a full reconnect',
+    );
+    final listener = createListener();
+    _gravixRestartWaitListener = listener;
+    listener.on<EnginePeerStateUpdatedEvent>((_) {
+      if (!identical(_gravixRestartWaitListener, listener)) return;
+      if (stale()) {
+        _gravixStopRestartWait();
+        return;
+      }
+      final state = other.pc.connectionState;
+      if (state?.isConnected() ?? false) {
+        logger.info(
+          'attemptReconnect: the $name connection is back '
+          '${DateTime.timestamp().difference(started).inMilliseconds} ms after the resume; '
+          'the peer connection failure mid-resume was satisfied by the resume; no rejoin',
+        );
+        _gravixStopRestartWait();
+      } else if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        // the restarted session failed: its own onConnectionState handler has
+        // requested the reconnect (a Failed escalates to a full one)
+        logger.info('attemptReconnect: the $name connection failed after its restart; reconnecting');
+        _gravixStopRestartWait();
+      }
+    });
+    _gravixRestartWaitTimer = Timer(bound, () {
+      if (!identical(_gravixRestartWaitListener, listener)) return;
+      _gravixStopRestartWait();
+      if (stale() || (other.pc.connectionState?.isConnected() ?? false)) return;
+      // a full reconnect already requested or running acts for it
+      if (fullReconnectOnNext || _attemptIsFullReconnect) return;
+      logger.info(
+        'attemptReconnect: the $name connection is not back ${bound.inMilliseconds} ms after the resume '
+        '(${other.pc.connectionState?.name}); full reconnect',
+      );
+      fullReconnectOnNext = true;
+      unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
+    });
+  }
+
+  void _gravixStopRestartWait() {
+    _gravixRestartWaitTimer?.cancel();
+    _gravixRestartWaitTimer = null;
+    final listener = _gravixRestartWaitListener;
+    _gravixRestartWaitListener = null;
+    unawaited(listener?.dispose());
   }
 
   Future<void> resumeConnection(ClientDisconnectReason reason, {lk_models.ReconnectReason? reconnectReason}) async {
@@ -1308,8 +1891,25 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     events.emit(const EngineResumingEvent());
 
+    final recovery = roomOptions.recovery;
+    // GRAVIX (0.4.15, F1 root cause, device r023 / r025 / r032): the subscriber
+    // holds remote candidates from NOW until the server's ICE-restart offer is
+    // applied (setRemoteDescription clears the flag and adds them). Upstream set
+    // it after the ReconnectResponse, the publisher offer and
+    // getConnectionState(); by then the server's one restart offer was often
+    // applied already, so every later trickle candidate waited in the pending
+    // list forever and the phone kept pairing with the OLD server candidate
+    // ("bad remote username" x22-24) until the resume timed out. Set before the
+    // resume request goes out (livekit-client JS order), it also holds the
+    // candidates that race ahead of the offer instead of adding them against the
+    // old remote description.
+    subscriber?.restartingIce = true;
     final abort = Completer<GravixResumeRejectedException>();
     _resumeAbort = abort;
+    _resumeAnswered = false;
+    // GRAVIX (0.4.15, F2): with leaveAbortsResumeWait the abort also covers the
+    // wait for the primary connection below (released at the end)
+    var keepAbort = false;
     try {
       // wait for socket to connect rtc server
       try {
@@ -1340,8 +1940,28 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         reconnected.ignore();
         throw outcome;
       }
+      _resumeAnswered = true;
+      keepAbort = recovery.leaveAbortsResumeWait;
+    } finally {
+      if (!keepAbort && identical(_resumeAbort, abort)) _resumeAbort = null;
+    }
+    try {
+      await _gravixResumeMedia(reason, abort: keepAbort ? abort : null);
     } finally {
       if (identical(_resumeAbort, abort)) _resumeAbort = null;
+    }
+  }
+
+  /// GRAVIX (0.4.15): the media half of [resumeConnection], after the
+  /// ReconnectResponse. [abort] (F2): a Leave or a closed socket during the wait
+  /// for the primary ends it at once (field r029: a Leave{RESUME} 87 ms after
+  /// the ReconnectResponse, then 10 s of "Waiting for primary to connect...").
+  Future<void> _gravixResumeMedia(
+    ClientDisconnectReason reason, {
+    Completer<GravixResumeRejectedException>? abort,
+  }) async {
+    void checkAbort() {
+      if (abort != null && abort.isCompleted) throw _gravixAbortReason!;
     }
 
     logger.fine('resumeConnection: reason: ${reason.name}');
@@ -1350,34 +1970,313 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       logger.fine('resumeConnection: negotiating publisher...');
       await publisher!.createAndSendOffer(const RTCOfferOptions(iceRestart: true));
     }
+    checkAbort();
 
     final isConnected = (await primary?.pc.getConnectionState())?.isConnected() ?? false;
 
     logger.fine('resumeConnection: primary is connected: $isConnected');
+    checkAbort();
 
     if (!isConnected) {
-      subscriber!.restartingIce = true;
+      // (subscriber.restartingIce was set before the resume request: see
+      // resumeConnection; setting it here, after the restart offer may already
+      // be applied, is what stranded the candidates)
       logger.fine('resumeConnection: Waiting for primary to connect...');
-      await events.waitFor<EnginePeerStateUpdatedEvent>(
-        filter: (event) => event.isPrimary && event.state.isConnected(),
-        duration: connectOptions.timeouts.peerConnection,
-        onTimeout: () =>
-            throw MediaConnectException('resumeConnection: Timed out waiting for EnginePeerStateUpdatedEvent'),
-      );
-      logger.fine('resumeConnection: primary connected');
+      await _gravixWaitPrimaryAfterResume(abort: abort);
+      logger.fine('resumeConnection: primary connected (or the subscriber is enough)');
     }
+    checkAbort();
+
+    // GRAVIX (upstream 2.13.0 #1199): the socket can drop while the peer
+    // connections were being restored. Reporting that as resumed cancelled the
+    // retry the drop needed and dropped every trickle candidate of the ICE
+    // restart; it is a failure the retry path resumes again.
+    if (_upstreamReconnectFixes && signalClient.connectionState != ConnectionState.connected) {
+      throw ConnectException(
+        'resumeConnection: signal connection severed during resume',
+        reason: ConnectionErrorReason.InternalError,
+      );
+    }
+
+    await _gravixSendHeldOffer();
 
     _isReconnecting = false;
     events.emit(const EngineResumedEvent());
   }
 
-  @internal
-  Future<void> restartConnection({String? regionUrl}) async {
-    if (_isClosed) {
+  /// GRAVIX (0.4.15, BUG-3): a renegotiation held while the resume dialled
+  /// (Transport.gravixHoldOffers) normally goes out after the restart answer
+  /// (Transport.setRemoteDescription). When nothing will answer any more -- no
+  /// restart offer was made, or its answer was applied before the hold was
+  /// marked -- it would wait for the next unrelated negotiation: send it now.
+  Future<void> _gravixSendHeldOffer() async {
+    final p = publisher;
+    if (p == null || p.gravixHoldOffers == null || !p.renegotiate) return;
+    // an answer still pending replays it when it lands
+    if (await p.pc.getSignalingState() != rtc.RTCSignalingState.RTCSignalingStateStable) return;
+    p.renegotiate = false;
+    logger.fine('resumeConnection: sending the renegotiation held during the resume');
+    p.negotiate(null);
+  }
+
+  /// GRAVIX (0.4.15, S3/R2): the resume's wait for the primary connection.
+  ///
+  /// Field 2026-10-09 03:50:01: the publisher was primary (a muted mic was
+  /// published); the subscriber connection was back in 0.7 s, the publisher's
+  /// ICE restart never completed ("bad remote username" x22), and the resume
+  /// waited Timeouts.peerConnection (10 s) before a full rejoin. Now, publisher
+  /// primary only:
+  ///  - [GravixRecoveryOptions.publisherRestartRetryAfter]: the subscriber is
+  ///    connected and the publisher is not -> ONE fresh publisher ICE-restart
+  ///    offer, and only from a stable signaling state (never a second offer on
+  ///    top of an unanswered one: the server re-keys a restart offer that
+  ///    arrives while it gathers, the suspected cause of the bad ufrag);
+  ///  - [GravixRecoveryOptions.subscriberSufficientWhenIdle]: nothing unmuted
+  ///    published -> the subscriber connection is enough to call the session
+  ///    resumed; the publisher keeps recovering ([_gravixWatchPublisher]).
+  /// Both off (or subscriber primary): the upstream wait, unchanged.
+  Future<void> _gravixWaitPrimaryAfterResume({Completer<GravixResumeRejectedException>? abort}) async {
+    final recovery = roomOptions.recovery;
+    final timeout = connectOptions.timeouts.peerConnection;
+    final publisherPrimary = !_subscriberPrimary;
+    final retryAfter = publisherPrimary ? recovery.publisherRestartRetryAfter : null;
+    final idleOk = publisherPrimary && recovery.subscriberSufficientWhenIdle && gravixHasUnmutedLocalMedia != null;
+    // GRAVIX (0.4.15, F1, field r023): the primary not connected this long after
+    // the ReconnectResponse while the signal is up -> a full rejoin now instead
+    // of after Timeouts.peerConnection. A healthy ICE restart takes well under a
+    // second; r023 never completed (the server's agent and the applied offer
+    // disagreed on the ufrag) and the viewer sat 10 s in the dark. With a fresh
+    // publisher restart pending ([publisherRestartRetryAfter]) the deadline
+    // counts from that restart's due time.
+    final deadlineAfter = recovery.resumePrimaryDeadline;
+    final escalateAfter = deadlineAfter == null ? null : (retryAfter ?? Duration.zero) + deadlineAfter;
+    if (retryAfter == null && !idleOk && escalateAfter == null && abort == null) {
+      await events.waitFor<EnginePeerStateUpdatedEvent>(
+        filter: (event) => event.isPrimary && event.state.isConnected(),
+        duration: timeout,
+        onTimeout: () =>
+            throw MediaConnectException('resumeConnection: Timed out waiting for EnginePeerStateUpdatedEvent'),
+      );
       return;
     }
 
+    final started = DateTime.timestamp();
+    final done = Completer<bool>(); // true: the primary connected; false: the subscriber is enough
+    var retryDue = false;
+    var retrySent = false;
+    var checking = false;
+    Future<bool> isConnected(Transport? t) async => (await t?.pc.getConnectionState())?.isConnected() ?? false;
+
+    Future<void> check() async {
+      if (done.isCompleted || checking) return;
+      checking = true;
+      try {
+        if (await isConnected(primary)) {
+          if (!done.isCompleted) done.complete(true);
+          return;
+        }
+        if (!publisherPrimary) return; // the subscriber is the primary: nothing else to do but wait
+        final subscriberUp = await isConnected(subscriber);
+        if (!subscriberUp) return;
+        if (idleOk && !(gravixHasUnmutedLocalMedia?.call() ?? true)) {
+          logger.info('resume: nothing unmuted published; the subscriber connection is enough');
+          if (!done.isCompleted) done.complete(false);
+          return;
+        }
+        if (retryDue && !retrySent && publisher != null) {
+          final signaling = await publisher!.pc.getSignalingState();
+          if (signaling == rtc.RTCSignalingState.RTCSignalingStateStable && !done.isCompleted) {
+            retrySent = true;
+            logger.info('resume: subscriber connected, publisher not: one fresh publisher ICE restart');
+            try {
+              await publisher!.createAndSendOffer(const RTCOfferOptions(iceRestart: true));
+            } catch (e) {
+              logger.warning('resume: the fresh publisher ICE restart failed: $e');
+            }
+          }
+        }
+      } finally {
+        checking = false;
+      }
+    }
+
+    final listener = createListener();
+    listener.on<EnginePeerStateUpdatedEvent>((_) => check());
+    Timer? retryTicker;
+    if (retryAfter != null) {
+      retryTicker = Timer(retryAfter, () {
+        retryDue = true;
+        unawaited(check());
+        // the subscriber may come back, or the signaling settle, later
+        retryTicker = Timer.periodic(const Duration(milliseconds: 250), (t) {
+          if (retrySent || done.isCompleted) {
+            t.cancel();
+          } else {
+            unawaited(check());
+          }
+        });
+      });
+    }
+    final deadline = Timer(timeout, () {
+      if (!done.isCompleted) {
+        done.completeError(
+          MediaConnectException('resumeConnection: Timed out waiting for EnginePeerStateUpdatedEvent'),
+        );
+      }
+    });
+    final escalate = escalateAfter == null || escalateAfter >= timeout
+        ? null
+        : Timer(escalateAfter, () {
+            if (done.isCompleted) return;
+            logger.warning(
+              'resume: the primary connection is not back ${escalateAfter.inMilliseconds} ms after the '
+              'ReconnectResponse; full rejoin now',
+            );
+            done.completeError(
+              MediaConnectException('resumeConnection: primary not connected within $escalateAfter (rejoining early)'),
+            );
+          });
+    // F2: a Leave / a closed socket ends the wait at once
+    unawaited(
+      abort?.future.then((reason) {
+        if (!done.isCompleted) done.completeError(reason);
+      }),
+    );
     try {
+      unawaited(check());
+      final viaPrimary = await done.future;
+      if (!viaPrimary) {
+        final elapsed = DateTime.timestamp().difference(started);
+        final left = timeout - elapsed;
+        // the field case (a muted mic published) is exactly this branch: the
+        // publisher still gets its one fresh ICE restart while it recovers
+        final retryIn = retryAfter == null || retrySent ? null : retryAfter - elapsed;
+        _gravixWatchPublisher(
+          left.isNegative ? Duration.zero : left,
+          retryIn: retryIn == null ? null : (retryIn.isNegative ? Duration.zero : retryIn),
+        );
+      }
+    } finally {
+      retryTicker?.cancel();
+      deadline.cancel();
+      escalate?.cancel();
+      await listener.dispose();
+    }
+  }
+
+  /// GRAVIX (0.4.15): set while a resumed session waits for its publisher
+  /// connection (the subscriber was enough, [_gravixWaitPrimaryAfterResume]).
+  /// Data sends wait on it: the data channels live on the publisher connection.
+  Completer<void>? _gravixPublisherRecovery;
+  Timer? _gravixPublisherWatch;
+  EventsListener<EngineEvent>? _gravixPublisherWatchListener;
+
+  /// The publisher keeps recovering after the resume; still not connected after
+  /// [left] (the rest of Timeouts.peerConnection) -> a reconnect as a failed
+  /// peer connection (a full rejoin): what 0.4.14 did at that moment, but the
+  /// video has been back since the subscriber reconnected.
+  void _gravixWatchPublisher(Duration left, {Duration? retryIn}) {
+    _gravixStopPublisherWatch();
+    final recovery = Completer<void>();
+    _gravixPublisherRecovery = recovery;
+    final listener = createListener();
+    _gravixPublisherWatchListener = listener;
+    listener.on<EnginePublisherPeerStateUpdatedEvent>((event) {
+      if (event.state.isConnected()) {
+        logger.info('resume: the publisher connection is back');
+        _gravixStopPublisherWatch();
+      }
+    });
+    if (retryIn != null) {
+      // [publisherRestartRetryAfter], continued: one fresh publisher ICE restart,
+      // only from a stable signaling state (polled until then)
+      var sent = false;
+      var busy = false;
+      Future<void> tryRetry(Timer? ticker) async {
+        if (sent || busy || !identical(_gravixPublisherRecovery, recovery)) {
+          ticker?.cancel();
+          return;
+        }
+        busy = true;
+        try {
+          final pub = publisher;
+          if (pub == null || ((await pub.pc.getConnectionState())?.isConnected() ?? false)) {
+            sent = true;
+            return;
+          }
+          if (await pub.pc.getSignalingState() != rtc.RTCSignalingState.RTCSignalingStateStable) return;
+          sent = true;
+          logger.info('resume: publisher still not connected: one fresh publisher ICE restart');
+          try {
+            await pub.createAndSendOffer(const RTCOfferOptions(iceRestart: true));
+          } catch (e) {
+            logger.warning('resume: the fresh publisher ICE restart failed: $e');
+          }
+        } finally {
+          busy = false;
+          if (sent) ticker?.cancel();
+        }
+      }
+
+      _gravixPublisherRetry = Timer(retryIn, () {
+        unawaited(tryRetry(null));
+        _gravixPublisherRetry = Timer.periodic(const Duration(milliseconds: 250), (t) => unawaited(tryRetry(t)));
+      });
+    }
+    _gravixPublisherWatch = Timer(left, () async {
+      if (_isClosed || connectionState != ConnectionState.connected) {
+        _gravixStopPublisherWatch();
+        return;
+      }
+      if ((await publisher?.pc.getConnectionState())?.isConnected() ?? false) {
+        _gravixStopPublisherWatch();
+        return;
+      }
+      logger.warning('resume: the publisher connection did not recover; reconnecting');
+      // the reconnect first (its synchronous start marks the engine reconnecting),
+      // then release the data sends waiting on the publisher: they are buffered
+      // for the reconnect instead of written into the dead channel
+      final reconnecting = handleReconnect(
+        ClientDisconnectReason.peerConnectionFailed,
+        reconnectReason: lk_models.ReconnectReason.RR_PUBLISHER_FAILED,
+      );
+      _gravixStopPublisherWatch();
+      await reconnecting;
+    });
+  }
+
+  Timer? _gravixPublisherRetry;
+
+  void _gravixStopPublisherWatch() {
+    _gravixPublisherRetry?.cancel();
+    _gravixPublisherRetry = null;
+    _gravixPublisherWatch?.cancel();
+    _gravixPublisherWatch = null;
+    unawaited(_gravixPublisherWatchListener?.dispose());
+    _gravixPublisherWatchListener = null;
+    final recovery = _gravixPublisherRecovery;
+    _gravixPublisherRecovery = null;
+    if (recovery != null && !recovery.isCompleted) recovery.complete();
+  }
+
+  @internal
+  Future<void> restartConnection({String? regionUrl}) async {
+    // GRAVIX (0.4.15): this call is the same-url retry of a failed full reconnect
+    final gravixSameUrlRetry = _gravixSameUrlRetryNext;
+    _gravixSameUrlRetryNext = false;
+    if (_isClosed) {
+      return;
+    }
+    final recovery = roomOptions.recovery;
+    // the url the session was on (connect() overwrites [url] at its start)
+    final sessionUrl = url;
+    final enteredWithRegion = regionUrl != null;
+    if (!enteredWithRegion && !gravixSameUrlRetry && !_attemptingReconnect) {
+      _gravixAttemptStartedAt = DateTime.timestamp(); // a restart outside an attempt
+    }
+
+    try {
+      _gravixSessionReplaced(); // GRAVIX (0.4.15, F4)
       events.emit(const EngineFullRestartingEvent());
 
       // GRAVIX: a full reconnect re-probes when asked to, instead of re-joining
@@ -1418,24 +2317,40 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _signalListener = signalClient.createListener(synchronized: true);
       _setUpSignalListeners();
 
-      _inRestart = true;
+      // GRAVIX (2026-10-11, restartAbortsOnSignalLoss): this restart's signal
+      // socket closing fails the restart at once (RECHECK Wi-Fi flapping, 9/9
+      // runs: the restart lost its socket and waited 10 s for the primary, or 10 s
+      // for the publisher whose offer could not be sent)
+      final signalLost = recovery.restartAbortsOnSignalLoss ? Completer<void>() : null;
+      _gravixRestartSignalLost = signalLost;
       try {
-        await connect(
-          regionUrl ?? url!,
-          token!,
-          roomOptions: roomOptions,
-          connectOptions: connectOptions,
-          fastConnectOptions: fastConnectOptions,
-        );
+        _inRestart = true;
+        // GRAVIX (0.4.15): the same-url retry dials with a short timeout
+        _gravixNextDialTimeout = gravixSameUrlRetry ? recovery.sameUrlRetryDialTimeout : null;
+        try {
+          await connect(
+            regionUrl ?? url!,
+            token!,
+            roomOptions: roomOptions,
+            connectOptions: connectOptions,
+            fastConnectOptions: fastConnectOptions,
+          );
+        } finally {
+          _inRestart = false;
+        }
+
+        if (_hasPublished) {
+          await _gravixUnlessSignalLost(ensurePublisherConnected(), 'the publisher connection');
+        }
       } finally {
-        _inRestart = false;
+        if (identical(_gravixRestartSignalLost, signalLost)) _gravixRestartSignalLost = null;
       }
 
-      if (_hasPublished) {
-        await ensurePublisherConnected();
-      }
-
-      fullReconnectOnNext = false;
+      // GRAVIX (upstream 2.13.0 #1199): with the fixes the request that started
+      // this restart was consumed; a true flag now is a NEW request (a
+      // Leave{RECONNECT} from the node just joined) that attemptReconnect
+      // dispatches, so it is not cleared here.
+      if (!_upstreamReconnectFixes) fullReconnectOnNext = false;
       _regionUrlProvider?.resetAttempts();
       events.emit(const EngineRestartedEvent());
     } catch (error) {
@@ -1448,14 +2363,61 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         _regionUrlProvider?.resetAttempts();
         rethrow;
       }
+      // GRAVIX (0.4.15, field 2026-10-09): a full reconnect that failed at the
+      // url the session is on tries it once more, with a short dial, before it
+      // leaves: a short path drop must not move the session to another region
+      // for the rest of its life. Not after a refusal (401/403: the token).
+      final atSessionUrl = !enteredWithRegion && (regionUrl ?? sessionUrl) == sessionUrl;
+      final refused = error is ConnectException && error.reason == ConnectionErrorReason.NotAllowed;
+      if (recovery.retrySameUrlFirst && atSessionUrl && !gravixSameUrlRetry && !refused && sessionUrl != null) {
+        logger.info('full reconnect at $sessionUrl failed ($error); retrying it once before another region');
+        _gravixSameUrlRetryNext = true;
+        await restartConnection(regionUrl: sessionUrl);
+        return;
+      }
       final nextRegionUrl =
-          await restartRegionStrategy?.getNextUrl() ?? await _regionUrlProvider?.getNextBestRegionUrl();
+          await restartRegionStrategy?.getNextUrl() ??
+          await _regionUrlProvider?.getNextBestRegionUrl(
+            currentUrl: url,
+            measuredOrder: recovery.measuredRegionFailover,
+            // GRAVIX (2026-10-11, boundedSignalConnect): soak 2026-10-11, the
+            // guest's fetch of the region list waited 31 s for the OS
+            fetchTimeout: recovery.boundedSignalConnect ? connectOptions.timeouts.connection : null,
+            // GRAVIX (2026-10-11, lastGoodRegionList): the list comes from the
+            // connect url, usually the region that just failed; EMU-OLD: that
+            // fetch failing ended every attempt, 0 of 9 runs left a dead blr1
+            lastGoodFallback: recovery.lastGoodRegionList,
+            currentUrlFailed: !refused,
+          );
       if (nextRegionUrl != null) {
+        // GRAVIX (0.4.15, F6, device r127 / r149): leaving the session's url
+        // needs evidence that the region failed; the PHONE's flapping Wi-Fi moved
+        // a blr1 viewer to sgp1 for good. Without it the same url is retried
+        // (the reconnect back-off and the network wait).
+        final leavingSessionUrl = atSessionUrl || gravixSameUrlRetry;
+        if (leavingSessionUrl &&
+            recovery.failoverNeedsEvidence &&
+            !refused &&
+            sessionUrl != null &&
+            !await _gravixRegionFailed(sessionUrl, nextRegionUrl)) {
+          logger.info(
+            'full reconnect at $sessionUrl failed ($error), but nothing shows the region failed '
+            '(the device network changed, or the server answers): staying on it',
+          );
+          _regionUrlProvider?.resetAttempts();
+          // GRAVIX (2026-10-11, silentHostFailFast): staying: the next attempt races
+          // its dial again (a slow path, not a dead host)
+          signalClient.gravixForgetSilentHost();
+          rethrow;
+        }
         await restartConnection(regionUrl: nextRegionUrl);
         return;
       } else {
         // no more regions to try (or we're not on cloud)
         _regionUrlProvider?.resetAttempts();
+        // GRAVIX (2026-10-11, silentHostFailFast): nowhere else to go: the next
+        // attempt races its dial again
+        signalClient.gravixForgetSilentHost();
         rethrow;
       }
     }
@@ -1592,8 +2554,24 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       logger.fine('Signal disconnected ${event.reason}');
       if (gravixResumeInFlight) {
         // GRAVIX(resume-rejected): the server closed the resume's socket before
-        // its ReconnectResponse: the session is gone
-        _abortResume(GravixResumeRejectedException('socket closed before the ReconnectResponse'));
+        // its ReconnectResponse: the session is gone. (0.4.15, F2) After it, while
+        // waiting for the primary connection: the resume is retried at once (the
+        // upstream "severed resume" rule, without the 10 s wait).
+        _abortResume(
+          _resumeAnswered
+              ? GravixResumeRejectedException('socket closed while waiting for the primary connection', full: false)
+              : GravixResumeRejectedException('socket closed before the ReconnectResponse'),
+        );
+        return;
+      }
+      // GRAVIX (2026-10-11, restartAbortsOnSignalLoss): the full reconnect's own
+      // socket closed: nothing it waits for (JoinResponse, the peer connections'
+      // offers and answers) can arrive any more. It used to wait 10 s anyway.
+      final restartLost = _gravixRestartSignalLost;
+      if (restartLost != null && !restartLost.isCompleted && event.reason == DisconnectReason.disconnected) {
+        logger.info('Signal disconnected during the full reconnect; failing it now');
+        _gravixAttemptSignalLost = true;
+        restartLost.complete();
         return;
       }
       if (_attemptingReconnect || isPendingReconnect) {
@@ -1702,7 +2680,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       // dropped, and the resume sat out its 10 s timeout.)
       final resuming = gravixResumeInFlight;
       if (event.action == lk_rtc.LeaveRequest_Action.RESUME) {
-        fullReconnectOnNext = false;
+        // GRAVIX (upstream 2.13.0 #1197): with the fixes the flag is left alone:
+        // an escalation from an already-failed resume must not be downgraded here
+        if (!_upstreamReconnectFixes) fullReconnectOnNext = false;
         if (resuming) {
           _abortResume(GravixResumeRejectedException('Leave{RESUME} during the resume', full: false));
           return;
@@ -1753,6 +2733,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   Future<void> disconnect({DisconnectReason reason = DisconnectReason.clientInitiated}) async {
     _isClosed = true;
+    _gravixStopPublisherWatch();
     final pendingReconnect = isPendingReconnect;
     // GRAVIX(one-session): a resume in flight ends here too (its late socket is
     // superseded by the cleanUp below, or closed by the server after the leave)
@@ -1792,8 +2773,11 @@ extension EngineInternalMethods on Engine {
   Future<rtc.RTCRtpTransceiver> createTransceiverRTCRtpSender(
     LocalTrack track,
     PublishOptions opts,
-    List<rtc.RTCRtpEncoding>? encodings,
-  ) async {
+    List<rtc.RTCRtpEncoding>? encodings, {
+    // GRAVIX (0.4.15): a transceiver with no track (a muted track whose capture
+    // is stopped, republished after a rejoin); the unmute replaces the track
+    bool gravixDetached = false,
+  }) async {
     if (publisher == null) {
       throw UnexpectedConnectionState('publisher is closed');
     }
@@ -1805,13 +2789,12 @@ extension EngineInternalMethods on Engine {
     if (encodings != null) {
       transceiverInit.sendEncodings = encodings;
     }
-    final transceiver = await publisher!.pc.addTransceiver(
-      track: track.mediaStreamTrack,
-      kind: track is LocalVideoTrack
-          ? rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo
-          : rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
-      init: transceiverInit,
-    );
+    final kind = track is LocalVideoTrack
+        ? rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo
+        : rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio;
+    final transceiver = gravixDetached
+        ? await publisher!.pc.addTransceiver(kind: kind, init: transceiverInit)
+        : await publisher!.pc.addTransceiver(track: track.mediaStreamTrack, kind: kind, init: transceiverInit);
     return transceiver;
   }
 
@@ -1952,6 +2935,22 @@ Future<String?> getConnectedAddress(rtc.RTCPeerConnection pc) async {
 /// resume again. [cancelled]: a fresh connect / disconnect took over; nothing is
 /// retried.
 @internal
+/// GRAVIX (0.4.15, F4): work of a session that a full reconnect replaced.
+class GravixSessionReplacedException extends TrackPublishException {
+  GravixSessionReplacedException(String message) : super(message);
+}
+
+/// GRAVIX (2026-10-11, restartAbortsOnSignalLoss): the full reconnect's signal
+/// socket closed while it waited (for the JoinResponse, the primary connection
+/// or the publisher connection).
+class GravixRestartSignalLostException extends ConnectException {
+  GravixRestartSignalLostException(String what)
+    : super(
+        'the signal connection closed while the full reconnect waited for $what',
+        reason: ConnectionErrorReason.InternalError,
+      );
+}
+
 class GravixResumeRejectedException implements Exception {
   GravixResumeRejectedException(this.message, {this.full = true, this.cancelled = false});
   final String message;

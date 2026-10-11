@@ -76,6 +76,8 @@ void main() {
       expect(GravixForegroundService.defaults.enabled, isFalse);
       expect(const GravixForegroundServiceOptions().showLeaveAction, isFalse);
       expect(const GravixForegroundServiceOptions().includeCamera, isFalse);
+      // 0.4.15: on by default; only matters once the service is enabled
+      expect(const GravixForegroundServiceOptions().claimMicrophoneAtStart, isTrue);
     });
 
     test('room hooks make no channel call and install no lifecycle observer', () async {
@@ -118,6 +120,9 @@ void main() {
         notificationTitle: 'Live room',
         notificationText: 'Tap to return',
         showLeaveAction: true,
+        // these tests pin the pre-0.4.15 flow (microphone added on publish);
+        // the default claim-at-start is covered in foreground_mic_claim_test.dart
+        claimMicrophoneAtStart: false,
       );
     });
 
@@ -159,7 +164,7 @@ void main() {
       final room2 = Object();
       await GravixForegroundService.roomConnecting(
         room2,
-        const GravixForegroundServiceOptions(enabled: true, includeCamera: true),
+        const GravixForegroundServiceOptions(enabled: true, includeCamera: true, claimMicrophoneAtStart: false),
       );
       await GravixForegroundService.roomPublished(room2, camera: true);
       expect(serviceCalls().last.arguments, {'microphone': false, 'camera': true});

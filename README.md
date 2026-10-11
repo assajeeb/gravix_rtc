@@ -34,6 +34,12 @@ plays (mic volume and ducking are Android-only) and is not yet verified on a dev
   `GravixRoomService(connectOptions: …)` or `room.connect`); never on a refusal
   (token, room full) or after a leave. `isJoining`, `joinRetry` / `onJoinRetry` (`RoomJoinRetryEvent`) for the
   UI. `joinRetries: 0` is the single attempt of 0.4.12.
+- **Recovery** (0.4.15) — `RoomOptions(recovery: GravixRecoveryOptions(...))` /
+  `GravixRoomService(recovery: ...)`: nearest-region failover, a resume that does
+  not wait on an idle publisher, early stall detection, a no-video backstop,
+  participants kept across a rejoin. `room.connectedUrl` / `connectedRegion` /
+  `RoomConnectedUrlChangedEvent` say where the session really is. See
+  [Recovery after a network drop](#recovery-after-a-network-drop).
 - **Join diagnostics** — `lastConnectionReport`, split region / first-audio
   reports, and an opt-in step-by-step join timeline
   (`connect(joinTimeline: …)`, `doc/JOIN_TIMELINE.md`).
@@ -179,6 +185,248 @@ final ok = await GravixAudioRouting.setAudioOutput(GravixAudioOutput.earpiece);
   receiver. iOS cannot force the receiver over a wired headset, so that
   request returns false.
 
+#### One API for the speaker and the routes (0.4.15)
+
+```dart
+await GravixAudioDevice.setEnableSpeakerphone(true);  // loudspeaker, even with a headset
+await GravixAudioDevice.setEnableSpeakerphone(false); // headset if connected, else the earpiece
+final info = await GravixAudioDevice.getAudioRoutes(); // info.available, info.current
+await GravixAudioDevice.setAudioRoute(GravixAudioRoute.bluetooth);
+await GravixAudioDevice.clearAudioRoute();             // back to automatic
+GravixAudioDevice.onAudioRouteChanged.listen((r) => showRoute(r.current));
+```
+
+Routes: `speaker`, `earpiece`, `wiredHeadset`, `bluetooth`, `usb`. An explicit
+route stays until it is changed or cleared, or until its device goes away (a
+Bluetooth selection ends when the headset disconnects). On Android it wins
+over `setSpeakerOutputPreferred` while it is set. The older calls above keep
+working.
+
+**Android media mode.** An app that initializes WebRTC with
+`AndroidAudioConfiguration.media` (MODE_NORMAL / USAGE_MEDIA, e.g. for
+recordable room audio) gets its output routed by Android itself: speaker,
+wired, or Bluetooth A2DP. There the earpiece and a loudspeaker forced over a
+headset are not reachable, and `setAudioRoute` answers false
+(`reason: mediaMode`). `getAudioRoutes` still reports where media plays.
+
+#### Microphone state (0.4.15)
+
+```dart
+GravixAudioDevice.micStateChanges.listen((e) {
+  switch (e.state) {
+    case GravixMicState.interrupted:          // a call, another app, a stopped recorder
+    case GravixMicState.blockedInBackground:  // Android: no microphone service type
+      showBanner('Microphone paused (${e.reason.name})');
+    case GravixMicState.active:
+    case GravixMicState.idle:
+      hideBanner();
+  }
+});
+```
+
+- **Android:** the SDK watches its own recording (silenced by the system or
+  not running), the audio mode (a cellular call) and the session's audio focus
+  (VoIP apps take it first). **iOS:** `AVAudioSession` interruptions.
+- When an interruption ends, the SDK re-applies the audio session and route
+  (the other call changed them) and, if the recorder did not come back by
+  itself within ~1.5 s, restarts the capture (at most once per 10 s). Turn
+  this off with
+  `GravixAudioDevice.options = const GravixAudioDeviceOptions(recoverMicAfterInterruption: false)`;
+  the state is still reported.
+- `GravixAudioDeviceOptions(silentCaptureDetection: true)` (off by default)
+  also reports a capture that runs but delivers digital silence for >= 3 s
+  (`reason: silentCapture`; a real microphone always has a noise floor) and
+  restarts it once per 30 s at most.
+- `GravixAudioDeviceOptions(micStateMonitoring: false)` turns the whole
+  monitor off (0.4.14 behaviour: no state events, no recovery, no chatroom).
+- iOS: the session is re-activated only when WebRTC did not do it within
+  ~1 s, and never while CallKit owns activation
+  (`AudioSessionManagementMode.externalCallSystem`).
+
+#### Bluetooth headsets (Android, media mode) (0.4.15)
+
+In media mode a Bluetooth headset is an output only (A2DP): its microphone
+needs the call profile (HFP/SCO), which Android opens only in communication
+mode. So the phone's own microphone records, which for a phone in a pocket
+reads as "the microphone does not work".
+
+`GravixAudioDeviceOptions(bluetoothChatroom: true)` (off by default) switches
+per microphone state, as other voice-room engines do:
+
+- microphone published and unmuted + a Bluetooth headset connected →
+  `MODE_IN_COMMUNICATION`, the headset selected as the communication device
+  (SCO), and WebRTC's recorder pointed at the headset microphone;
+- microphone off, a listener, or no headset → back to the configured media
+  mode and A2DP.
+
+Connecting or disconnecting the headset mid-room re-applies the decision.
+
+Limits, and why: WebRTC fixes the playout audio attributes (USAGE_MEDIA) when
+its audio device module is created, once per process, and the SDK cannot
+rebuild it under a live room. While the microphone is on, the room therefore
+plays through the headset's call channel (SCO: mono, 8/16 kHz, "phone call"
+sound) in communication mode, and goes back to A2DP sound when the
+microphone turns off. Apps that run the communication configuration need
+none of this: their headset microphone already works.
+
+#### Android app freezers (Transsion: Infinix, Tecno, itel) (0.4.15)
+
+Some OEM systems freeze background apps despite a foreground service. On an
+Infinix (Android 15) the "Hiber" freezer froze a silent background listener a
+few seconds after Home, released its wake lock and closed its sockets; it
+dropped from the room ~45 s later. Hiber leaves an app alone while it plays or
+records audio.
+
+```dart
+GravixAudioDevice.options = const GravixAudioDeviceOptions(
+  backgroundKeepAlive: GravixBackgroundKeepAlive.transsionOnly, // or .on; default .off
+  detectProcessFreeze: true,                                    // default false
+);
+GravixAudioDevice.processFreezes.listen((e) => log('frozen ${e.frozenFor}'));
+if (await GravixAudioDevice.isAggressiveFreezer()) showBackgroundSettingsHint();
+```
+
+- The keep-alive plays silence only while the app is in the background in a
+  room and nothing else plays (no subscribed remote audio). It requests no
+  audio focus and changes no route.
+- `isAggressiveFreezer()` only detects; ask the user to allow "background
+  running" / auto-start for your app in the phone's own settings (Phone
+  Master). The SDK does not request a battery-optimization exemption.
+
+#### Other apps' audio (Android, media mode) (0.4.15)
+
+In the media configuration (`AndroidAudioConfiguration.media`,
+`bypassVoiceProcessing` on the WebRTC initialize: MIC capture source, software
+echo cancellation) the echo canceller removes only what WebRTC itself plays:
+its reference is the room's playout. Another app's audio played on the
+loudspeaker (YouTube, a game, music) reaches the microphone through the air
+and is not in that reference, so the room hears it. The communication
+configuration (VOICE_COMMUNICATION source, the phone's own voice processing)
+is a different trade-off that the app picks at initialize.
+
+`GravixAudioDeviceOptions(otherAppAudio: ...)` (Android, off by default)
+watches other apps' playback while a room is connected (Android's playback
+activity, API 26+, no permission and no audio content; reported after ~1 s of
+continuous playback, cleared after ~2 s without):
+
+```dart
+GravixAudioDevice.options = const GravixAudioDeviceOptions(
+  otherAppAudio: GravixOtherAppAudioMode.detect,
+);
+GravixAudioDevice.otherAppAudioPlayingChanged.listen((playing) {
+  if (playing) showBanner('Audio from another app can be heard in the room');
+});
+```
+
+| Mode | While another app plays and the microphone is on |
+|---|---|
+| `off` (default) | nothing is watched (the earlier behaviour) |
+| `detect` | report only (`otherAppAudioPlaying`, `otherAppAudioPlayingChanged`) |
+| `platformEffects` | the phone's echo canceller + noise suppressor attached to the running capture |
+| `voiceCommunicationCapture` | the capture re-opened with the VOICE_COMMUNICATION source (+ the effects); back to the original source afterwards. Each switch restarts the recorder |
+| `muteMicInBackground` | the microphone muted in the engine while our app is in the background (the user's own mute is kept apart) |
+
+What each one achieves depends on the phone (whether its echo canceller hears
+other apps' output). A headset-routed player (API 31+) does not count, nor
+does the SDK's own silent keep-alive (`backgroundKeepAlive`).
+
+Measured 2026-10-10 (media profile = Pakhi's settings; other app's music on
+the loudspeaker; level at the far side relative to the user's own voice):
+
+| | Infinix X6728 (Android 15) | Xiaomi 2201117TG (Android 13) |
+|---|---|---|
+| `off` (media profile) | +5 to +6 dB (YouTube at max: +2.4 dB) | 0 dB |
+| `platformEffects` | removed (< -53 dB; YouTube -48 to -64 dB) | not removed (-1 to -3 dB) |
+| `voiceCommunicationCapture` | removed (< -36 dB), 0.25-0.3 s capture gap per switch | removed in 2 of 4 runs only; 0.3-2.5 s gap |
+| `muteMicInBackground` | removed, the user is muted too | |
+
+Recommended for media-profile apps: `platformEffects` (no capture restart,
+removes the leak where the phone's echo canceller hears other apps) plus a
+hint on `otherAppAudioPlayingChanged(true)` for phones where it cannot help.
+Its cost to the user's voice while the other app plays was 1-2 dB with the
+tonal test music; under real, dense music (YouTube) it was not measured and
+may be larger (an echo canceller treats the music as echo). The
+first 1-3 s of the other app's audio pass before detection. Browsers keep
+their audio stream open while a media page is paused and for about 8 s after
+the media ends, so the watcher reports them longer than they play;
+`muteMicInBackground` therefore also mutes the user for that time.
+
+Also measured (open): in the media profile the echo of the room's OWN
+playout came back nearly uncancelled on both phones (Infinix +4 to +5 dB vs
+the voice, no processing +9 dB; Xiaomi -2 to -9 dB, no processing -1 dB),
+while the communication profile cancelled it (-58 dB). Not investigated yet.
+
+Not offered, and why (checked 2026-10-10 against flutter_webrtc 1.6.2 /
+libwebrtc 150.7871):
+
+- **Stronger noise suppression.** The constraints reach libwebrtc's audio
+  processing only as on/off; the noise suppressor level is fixed (high) by
+  the voice engine, and this build has no field trial for a suppression
+  level, AGC2 tuning or a machine-learned suppressor. The classic suppressor
+  models stationary noise and does not remove music or game sound. The one
+  hook is flutter_webrtc's capture post-processing
+  (`ExternalAudioProcessingFactory`), which would need a bundled speech
+  model (an "AI noise suppression" like other engines ship).
+- **Other apps' audio as the echo reference (`AudioPlaybackCapture`, API
+  29+).** Needs a MediaProjection consent dialog ("start recording or
+  casting?") every session and a mediaProjection foreground service; it
+  cannot capture apps that opt out (`allowAudioPlaybackCapture=false` or a
+  capture policy) and only covers media/game/unknown usages; and the
+  captured mix would have to be fed to the echo canceller as a second
+  reference, which libwebrtc's Android audio device module does not accept
+  without native changes. Not acceptable as a default UX.
+
+#### Echo in Android media mode (0.4.15, experimental)
+
+An app that initializes WebRTC itself with `AndroidAudioConfiguration.media`
+and `bypassVoiceProcessing: true` (MIC capture, so other apps can still
+record) gets libwebrtc's software echo canceller (AEC3), not the phone's. Its
+playout goes through Android's media "deep buffer" output (~200-300 ms
+measured). On a phone whose loudspeaker reaches the microphone loudly, AEC3
+cancels that path unreliably.
+
+`GravixMediaEcho.apply` changes WebRTC's audio module before the first room
+(after `WebRTC.initialize()`, before any `connect`). The default tuning
+changes nothing and makes no platform call:
+
+```dart
+await rtc.WebRTC.initialize(options: {
+  'androidAudioConfiguration': rtc.AndroidAudioConfiguration.media.toMap(),
+  'androidUseHardwareAudioProcessing': false,
+  'bypassVoiceProcessing': true,
+});
+await GravixMediaEcho.apply(const GravixMediaEchoTuning(lowLatencyPlayout: true));
+```
+
+- `lowLatencyPlayout`: WebRTC's AudioTrack in low-latency mode (a fast
+  output track, ~20-30 ms instead of ~200-300 ms). Still USAGE_MEDIA: media
+  volume, recordable room audio and media routing are unchanged.
+- `captureSource`: `mic` / `voiceCommunication` for WebRTC's recorder.
+- `aec3FieldTrials`: libwebrtc field trials for AEC3. They replace the whole
+  process-wide field-trial string; set `keepWarpTrial` if the app turned
+  WARP on.
+
+Measured on 2026-10-10 (Infinix X6728 Android 15, Xiaomi 2201117TG Android 13,
+media volume 10/15, run 1, run 2). The numbers are the room's own playout
+coming back, in dB relative to the user's voice; "<" means not detected
+(an upper bound set by the room's noise):
+
+| setting | Infinix speech / music | Xiaomi speech / music | user's voice while the far end plays |
+|---|---|---|---|
+| no processing (reference) | 0, 0 / +4, +4 | -13, <-4 / -10, -11 | - |
+| media + MIC + AEC3 (bypass) | <-10, <-16 / <-5, -42 | <-32, <-30 / -44, <-27 | removed (Infinix: fit >= 57 dB, floor-limited; 2nd run not measurable), cut 8-13 dB (Xiaomi) |
+| same + `lowLatencyPlayout` | <-35, <-31 / -46, <-29 | <-44, -48 / <-38, -51 | cut 15-24 dB (Infinix), 10-14 dB (Xiaomi) |
+| media without bypass (VOICE_COMMUNICATION capture, platform AEC) | <-37, <-55 / <-30, -62 | <-9, <-16 / <-9, <-10 (noisy room) | removed (Infinix: fit 45-52 dB, floor-limited), none measurable (Xiaomi) |
+| communication profile (SDK default) | -62, <-19 / -62, -63 | -45, <-28 / <-20, -47 | removed (Infinix: fit 56-60 dB, floor-limited), none measurable (Xiaomi) |
+
+Mono MIC capture (`captureSource: mic` on a non-bypass module) was not
+better. The voice column uses a dense far-end probe (the worst case), so
+expect smaller cuts with ordinary speech. "Removed" means the voice fell
+into the noise floor while the far end played: the half-duplex behaviour of
+that echo canceller on that phone. Part of the low-latency gain may come from
+a quieter echo path on the fast output: the raw echo level of that path was
+not measured.
+
 ### Background audio (iOS)
 
 Keep the call audible with the screen locked or the app in the background.
@@ -221,8 +469,16 @@ GravixForegroundService.leaveRequests.listen((_) => leaveTheRoom());
 From then on:
 
 - `Room.connect` (and `GravixRoomService.connect`) starts the service as
-  `mediaPlayback`, for every role.
-- Publishing the microphone adds `microphone`.
+  `mediaPlayback` + `microphone`, for every role (0.4.15; the `microphone`
+  type only when `RECORD_AUDIO` is granted). Android 14 refuses to add the
+  `microphone` type while the app is in the background, so a listener who left
+  the screen and then took a seat used to lose the microphone ~5 s later.
+  `claimMicrophoneAtStart: false` restores the old start (`mediaPlayback`
+  only, `microphone` added on the first microphone publish).
+- A `microphone` type that is missing (the permission came later) is claimed
+  again on every return to the foreground.
+- The `microphone` type records nothing by itself and shows no microphone
+  indicator; only an actual capture does.
 - Publishing the camera adds `camera`, only with `includeCamera: true`.
 - When the room disconnects or is disposed, the service stops.
 
@@ -331,6 +587,48 @@ false, isOutputAvailable: false)`; the plugin applies it when it registers.
   `Info.plist` needs `RTCAppGroupIdentifier` and `RTCScreenSharingExtension`;
   without the latter `setScreenShareEnabled(true)` throws
   `PlatformException(broadcastExtensionNotConfigured)`.
+
+### Recovery after a network drop
+
+0.4.15 (field event 2026-10-09). Every switch's off value is the 0.4.14
+behaviour; `GravixRecoveryOptions.legacy` turns all of them off.
+
+```dart
+final room = Room(roomOptions: const RoomOptions(recovery: GravixRecoveryOptions()));
+room.events.on<RoomConnectedUrlChangedEvent>((e) => showServer(e.region ?? e.url));
+// or read room.connectedUrl / room.connectedRegion
+```
+
+| `GravixRecoveryOptions` field | default | what it does |
+|---|---|---|
+| `measuredRegionFailover` | `true` | region failover dials the regions in the start-up measurement's order (near-only cap max(2 x best, best + 100 ms)); without a fresh measurement, the server's order |
+| `retrySameUrlFirst` / `sameUrlRetryDialTimeout` | `true` / 2.5 s | a failed full reconnect retries its url once with a short WebSocket open timeout before another region |
+| `publisherRestartRetryAfter` | 2.5 s (`null` = off) | resume: subscriber back, publisher not -> one fresh publisher ICE restart |
+| `subscriberSufficientWhenIdle` | `true` | resume: nothing unmuted published -> the subscriber connection is enough |
+| `earlyStallDetection` / `stallNoPacketsFor` / `stallMinInterval` | `true` / 2 s / 10 s | subscribed camera and audio silent -> resume at once |
+| `noVideoWatchdog` / `noVideoFor` / `noVideoWindow` / `noVideoMinInterval` | `true` / 4 s / 15 s / 60 s | after a resume, a camera decoding nothing -> full rejoin |
+| `keepParticipantsOnRejoin` | `true` | a full rejoin keeps the participant objects; only real leaves / joins are reported |
+| `republishStoppedTracksMuted` | `true` | a muted track whose capture was stopped is republished muted without a capture |
+| `resumePrimaryDeadline` | 3 s (`null` = off) | resume: the primary not back 3 s after the ReconnectResponse -> full rejoin now |
+| `leaveAbortsResumeWait` | `true` | resume: a Leave or a closed socket ends the wait for the primary at once |
+| `networkWaitProbeInterval` | 2 s (`null` = off) | a reconnect waiting for connectivity re-checks it and probes the server every 2 s |
+| `failoverNeedsEvidence` | `true` | leave the session's url only when the region failed (steady device network, the url does not answer, another region does) |
+| `rejoinAbsentGrace` | 5 s | a kept participant missing from the rejoin's JoinResponse may reappear (relay) before it is reported gone |
+| `boundedSignalConnect` | `true` | (2026-10-11) each step of a signal connect -- the WebSocket dial, the validate request, the failover's region list, the reachability probes -- gives up at its timeout and closes its socket, so a blackholed path does not hold a reconnect until the OS gives up (~30-130 s) |
+| `signalDialCap` | 30 s (`null` = off) | (2026-10-11) a fresh join's signal dial may take up to this: a connection not up after `Timeouts.connection` is raced by another one (again every `Timeouts.connection`), the first one up carries the join; a resume keeps `Timeouts.connection` |
+| `silentHostFailFast` | `true` | (2026-10-11) after a signal dial that got no connection at all, the next fresh dial to that host is not raced to the cap (it must connect within `Timeouts.connection`; a connection that comes up keeps the cap) and is not followed by `/rtc/validate`: a dead region is left sooner |
+| `signalUpgradeWindow` / `signalDialCeiling` | 20 s / 45 s (`null` window = off) | (2026-10-11) once a raced dial's connection is up, its upgrade may take until 20 s after that, never past 45 s from the dial's start, never less than `signalDialCap` |
+| `fullReconnectMediaConnect` / `slowPathPeerConnectWait` | `true` / 30 s | (2026-10-11) a full reconnect waits `Timeouts.mediaConnect` for its peer connection; on a measurably slow signal path (setup >= `slowSignalSetup` 5 s or ping RTT >= `slowSignalRtt` 1 s) the wait goes on up to 30 s |
+| `resumeSatisfiesPeerFailure` | `true` | (2026-10-11) a peer connection reported Failed (the old ICE session, as the network returns) while a resume runs that then brings both connections back: no full rejoin after the resume (the far side saw a fake leave + join) |
+| `resumePeerRestartWait` | 3 s (`Duration.zero` = off) | (2026-10-11) with `resumeSatisfiesPeerFailure`: a connection still restarting when the resume succeeds gets this long to come back before the full rejoin (it failing rejoins at once) |
+| `lastGoodRegionList` | `true` | (2026-10-11) the failover's region list is fetched from the url the app connected to -- usually the region that just died; when that fetch fails, the list fetched at connect is used (any age) instead of ending the attempt, and a host that just failed is not asked at all. A 401/403 still ends it; no list at all: as before |
+| `restartAbortsOnSignalLoss` | `true` | (2026-10-11) a full reconnect whose signal socket closes fails at once instead of waiting 10 s for connections that can no longer be negotiated; such a failure during a network change does not count against the reconnect attempts |
+| `uplinkFeedbackStallFor` | 5 s (`Duration.zero` = off) | (2026-10-11) a published, unmuted track that keeps sending with no receiver report from the server for this long (the server's RTCP stuck on a dead path after the connection moved to ICE-TCP) -> a resume |
+| `upstreamReconnectFixes` | `true` | upstream 2.13.0/2.13.1 reconnect fixes (Leave{RESUME} resumes, no dropped requests, severed resume retried, negotiation errors reconnect) |
+| `startBitrateBySetupTime` | `true` | upstream 2.13.1 connection-level video start bitrate, scaled by setup time |
+
+New: `Room.connectedUrl`, `Room.connectedRegion`, `RoomConnectedUrlChangedEvent`,
+`LocalTrackRepublishFailedEvent`, `ClientDisconnectReason.mediaStalled`.
 
 ### Audio redundancy (RED)
 

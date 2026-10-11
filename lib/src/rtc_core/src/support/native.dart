@@ -186,6 +186,15 @@ class Native {
     return null;
   }
 
+  /// 2026-10-10 ECHO: media-profile echo experiments on WebRTC's audio device
+  /// module (GravixMediaEcho.apply). Throws PlatformException when WebRTC is
+  /// not initialized; returns the per-setting report.
+  @internal
+  static Future<Map<String, Object?>> applyMediaEchoTuning(Map<String, Object?> args) async {
+    final reply = await channel.invokeMethod<dynamic>('applyMediaEchoTuning', args);
+    return reply is Map ? reply.map((k, v) => MapEntry(k.toString(), v)) : const <String, Object?>{};
+  }
+
   /// Configure and activate GravixRtc's Android audio session (mode/focus/routing).
   @internal
   static Future<void> configureAndroidAudioSession(Map<String, dynamic> configuration) async {
@@ -283,6 +292,28 @@ class Native {
     });
   }
 
+  /// Requests microphone permission before audio capture starts (iOS/macOS).
+  ///
+  /// GRAVIX 0.4.15 (ported from the upstream client SDK 2.12.0; the native
+  /// handler was already in GravixClientPlugin.swift, nothing called it): the
+  /// WebRTC audio device only checks the permission and fails when it is
+  /// missing, so the SDK requests it here. On iOS the prompt is only shown
+  /// while the app is active. Throws a [PlatformException] with code
+  /// `deviceAccessDenied` when permission is denied, restricted, or could not
+  /// be requested. A no-op where the platform does not implement it, or while
+  /// the engine's input availability is disabled via [setEngineAvailability].
+  @internal
+  static Future<void> ensureMicrophoneAccess() async {
+    try {
+      await channel.invokeMethod<void>('ensureMicrophoneAccess', <String, dynamic>{});
+    } on PlatformException catch (error) {
+      if (error.code == 'Unimplemented') return;
+      rethrow;
+    } on MissingPluginException {
+      return;
+    }
+  }
+
   /// Selects the iOS output directly: the loudspeaker when [speaker] is true,
   /// the receiver (earpiece) otherwise.
   ///
@@ -314,6 +345,136 @@ class Native {
       'notificationTitle': ?notificationTitle,
       'notificationText': ?notificationText,
     });
+  }
+
+  static final StreamController<Map<String, Object?>> _micSignals = StreamController<Map<String, Object?>>.broadcast();
+
+  /// Raw microphone signals from the native mic monitor (0.4.15): Android
+  /// `recording`, `silenced`, `focus`, `phoneCall`, `sdkInt`; iOS
+  /// `sessionInterrupted`. Read by GravixMicMonitor.
+  @internal
+  static Stream<Map<String, Object?>> get micSignals => _micSignals.stream;
+
+  static final StreamController<Map<String, Object?>> _otherAppAudio =
+      StreamController<Map<String, Object?>>.broadcast();
+
+  /// Android other-app audio watcher events (2026-10-10): `playing` (bool,
+  /// debounced), `players` (int). Read by GravixMicMonitor.
+  @internal
+  static Stream<Map<String, Object?>> get otherAppAudioEvents => _otherAppAudio.stream;
+
+  /// Starts the Android other-app audio watcher (playback activity callback on
+  /// its own thread). Events arrive as `onOtherAppAudio`. Never throws.
+  @internal
+  static Future<void> startOtherAppAudioMonitor() async {
+    try {
+      await channel.invokeMethod<void>('startOtherAppAudioMonitor', <String, dynamic>{});
+    } catch (error) {
+      logger.fine('startOtherAppAudioMonitor: $error');
+    }
+  }
+
+  /// Stops the watcher. Never throws.
+  @internal
+  static Future<void> stopOtherAppAudioMonitor() async {
+    try {
+      await channel.invokeMethod<void>('stopOtherAppAudioMonitor', <String, dynamic>{});
+    } catch (error) {
+      logger.fine('stopOtherAppAudioMonitor: $error');
+    }
+  }
+
+  /// Applies a capture action while another app plays: `none`,
+  /// `platformEffects`, `voiceCommunication`, `mute`. Never throws.
+  @internal
+  static Future<void> setOtherAppCaptureAction(String action) async {
+    try {
+      await channel.invokeMethod<void>('setOtherAppCaptureAction', <String, dynamic>{'action': action});
+    } catch (error) {
+      logger.fine('setOtherAppCaptureAction($action): $error');
+    }
+  }
+
+  /// Starts the native mic monitor; returns the first signals, or null.
+  /// [recoverAfterInterruption] lets iOS re-activate the audio session after
+  /// an interruption ends when WebRTC did not.
+  @internal
+  static Future<Map<String, Object?>?> startMicMonitor({required bool recoverAfterInterruption}) async {
+    final reply = await channel.invokeMethod<dynamic>('startMicMonitor', <String, dynamic>{
+      'recoverAfterInterruption': recoverAfterInterruption,
+    });
+    return reply is Map ? reply.cast<String, Object?>() : null;
+  }
+
+  /// Stops the native mic monitor. Never throws.
+  @internal
+  static Future<void> stopMicMonitor() async {
+    try {
+      await channel.invokeMethod<void>('stopMicMonitor', <String, dynamic>{});
+    } catch (error) {
+      logger.fine('stopMicMonitor: $error');
+    }
+  }
+
+  /// Re-applies the platform audio session after an interruption (Android:
+  /// deactivate + activate + route; iOS: re-activate if WebRTC did not).
+  /// Never throws.
+  @internal
+  static Future<void> reassertAudioSession() async {
+    try {
+      await channel.invokeMethod<void>('reassertAudioSession', <String, dynamic>{});
+    } catch (error) {
+      logger.fine('reassertAudioSession: $error');
+    }
+  }
+
+  static final StreamController<Map<String, Object?>> _audioRoutes = StreamController<Map<String, Object?>>.broadcast();
+
+  /// Audio route changes from both platforms (0.4.15): `routes` (available
+  /// route type names), `current`, `reason`. Read by GravixAudioDevice.
+  @internal
+  static Stream<Map<String, Object?>> get audioRouteEvents => _audioRoutes.stream;
+
+  /// The available audio routes and the current one:
+  /// `{routes: [speaker, earpiece, wiredHeadset, bluetooth, usb], current, mode}`.
+  @internal
+  static Future<Map<String, Object?>> getAudioRoutes() async {
+    final reply = await channel.invokeMethod<dynamic>('getAudioRoutes', <String, dynamic>{});
+    return reply is Map ? reply.cast<String, Object?>() : const <String, Object?>{};
+  }
+
+  /// Selects [route] (a route type name), or clears an explicit selection
+  /// when null. Returns `{applied, reason?, current}`.
+  @internal
+  static Future<Map<String, Object?>> setAudioRoute(String? route) async {
+    final reply = await channel.invokeMethod<dynamic>('setAudioRoute', <String, dynamic>{'route': route});
+    return reply is Map ? reply.cast<String, Object?>() : const <String, Object?>{};
+  }
+
+  /// Android: the Bluetooth chatroom model (0.4.15, opt-in). [enabled] turns
+  /// it on/off; [micActive] says whether the local microphone is published
+  /// and unmuted. Never throws.
+  @internal
+  static Future<void> setBluetoothChatroom({required bool enabled, required bool micActive}) async {
+    try {
+      await channel.invokeMethod<void>('setBluetoothChatroom', <String, dynamic>{
+        'enabled': enabled,
+        'micActive': micActive,
+      });
+    } catch (error) {
+      logger.fine('setBluetoothChatroom: $error');
+    }
+  }
+
+  /// Android: starts/stops the silent background keep-alive player
+  /// (GravixAudioDeviceOptions.backgroundKeepAlive, 0.4.15). Never throws.
+  @internal
+  static Future<void> setBackgroundKeepAlive({required bool active}) async {
+    try {
+      await channel.invokeMethod<void>('setBackgroundKeepAlive', <String, dynamic>{'active': active});
+    } catch (error) {
+      logger.fine('setBackgroundKeepAlive: $error');
+    }
   }
 
   static final StreamController<String> _callServiceEvents = StreamController<String>.broadcast();
@@ -483,6 +644,18 @@ class Native {
             isRecordingEnabled: args['isRecordingEnabled'] == true,
           );
         }
+        return null;
+      case 'onMicSignals':
+        final args = call.arguments;
+        if (args is Map) _micSignals.add(args.cast<String, Object?>());
+        return null;
+      case 'onOtherAppAudio':
+        final args = call.arguments;
+        if (args is Map) _otherAppAudio.add(args.cast<String, Object?>());
+        return null;
+      case 'onAudioRoutesChanged':
+        final args = call.arguments;
+        if (args is Map) _audioRoutes.add(args.cast<String, Object?>());
         return null;
       case 'callServiceLeaveRequested':
         _callServiceEvents.add('leave');

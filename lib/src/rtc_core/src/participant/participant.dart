@@ -14,6 +14,7 @@
 // limitations under the License.
 
 import 'package:collection/collection.dart';
+import 'package:logging/logging.dart' show Level;
 import 'package:meta/meta.dart';
 
 import '../core/room.dart';
@@ -148,7 +149,9 @@ abstract class Participant<T extends TrackPublication> extends DisposableChangeN
   Participant({required this.room, required this.sid, required this.identity, required String name}) : _name = name {
     // Any event emitted will trigger ChangeNotifier
     events.listen((event) {
-      logger.finer('[ParticipantEvent] $event, will notifyListeners()');
+      // GRAVIX (2026-10-11, perf): guarded; the interpolation ran every
+      // participant event's toString() even when FINER is off (the default).
+      if (logger.isLoggable(Level.FINER)) logger.finer('[ParticipantEvent] $event, will notifyListeners()');
       notifyListeners();
     });
 
@@ -206,7 +209,9 @@ abstract class Participant<T extends TrackPublication> extends DisposableChangeN
 
   @internal
   Future<bool> updateFromInfo(lk_models.ParticipantInfo info) async {
-    logger.fine('${runtimeType}.updateFromInfo(info: $info)');
+    // GRAVIX (2026-10-11, perf): guarded; `$info` printed the whole ParticipantInfo
+    // protobuf as text on every participant update (5.9 µs / 1.5 KB, UNIT).
+    if (logger.isLoggable(Level.FINE)) logger.fine('${runtimeType}.updateFromInfo(info: $info)');
     if (_participantInfo != null && _participantInfo!.sid == info.sid && _participantInfo!.version > info.version) {
       // Ignore out-of-order updates.
       return false;

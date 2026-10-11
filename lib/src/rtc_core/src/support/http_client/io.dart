@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import 'dart:async';
 import 'dart:io' as io;
 
 import 'package:http/http.dart' as http;
@@ -22,8 +23,8 @@ import '../../logger.dart';
 import '../../options.dart';
 import '../certificate_pinning.dart';
 
-http.Client createSdkHttpClient(NetworkOptions networkOptions) =>
-    http_io.IOClient(createSdkIoHttpClient(networkOptions));
+http.Client createSdkHttpClient(NetworkOptions networkOptions, {Duration? connectionTimeout}) =>
+    http_io.IOClient(createSdkIoHttpClient(networkOptions)..connectionTimeout = connectionTimeout);
 
 /// A client meant to be KEPT for several requests to the same host (the region
 /// measurement): its keep-alive pool serves requests 2..N on the socket the first
@@ -48,20 +49,27 @@ http.Client createSdkProbeHttpClient(
 /// fails the request. The standby race (websocket/io.dart) decides there whether
 /// the fresh dial still goes ahead: nothing of the fresh join has reached the
 /// server at that point, so dropping it leaves no session behind.
+///
+/// [hedge] (GRAVIX, 2026-10-11): each connection the client needs is raced, see
+/// [GravixConnectHedge]. [onConnect] then counts every socket of the race.
 io.HttpClient createSdkIoHttpClient(
   NetworkOptions networkOptions, {
   void Function()? onConnect,
   void Function()? beforeUse,
+  GravixConnectHedge? hedge,
 }) {
   final validator = CertificatePinValidator(networkOptions.certificatePinning);
   final client = io.HttpClient();
-  if (!validator.isEnabled && onConnect == null && beforeUse == null) {
+  if (!validator.isEnabled && onConnect == null && beforeUse == null && hedge == null) {
     return client;
   }
 
-  final connect = validator.isEnabled ? _CertificatePinningConnectionFactory(validator).connect : _plainConnect;
+  final _Connect plain = validator.isEnabled ? _CertificatePinningConnectionFactory(validator).connect : _plainConnect;
+  final _Connect connect = hedge == null
+      ? plain
+      : (url, proxyHost, proxyPort) => _HedgedConnect(plain, hedge, url, proxyHost, proxyPort, onConnect).task;
   client.connectionFactory = (url, proxyHost, proxyPort) async {
-    onConnect?.call();
+    if (hedge == null) onConnect?.call();
     final task = await connect(url, proxyHost, proxyPort);
     if (beforeUse == null) return task;
     final socket = task.socket.then<io.Socket>((socket) {
@@ -77,6 +85,116 @@ io.HttpClient createSdkIoHttpClient(
     return io.ConnectionTask.fromSocket<io.Socket>(socket, task.cancel);
   };
   return client;
+}
+
+typedef _Connect = Future<io.ConnectionTask<io.Socket>> Function(Uri url, String? proxyHost, int? proxyPort);
+
+/// GRAVIX (2026-10-11): how a connection is raced. Device recheck 2026-10-11
+/// (Xiaomi, Network Link Conditioner "Very Bad Network": RTT 1-2 s, 25-35 %
+/// loss): a join's signal dial that was not through within Timeouts.connection
+/// failed the join -- on main 36862c4 and on every later version -- on a path
+/// that works, slowly. And on a blackholed path (soak 2026-10-11) a connection
+/// whose SYN went nowhere only gets the OS's SYN retries.
+///
+/// A connection not up (TCP, and TLS for https) [every] after it started gets
+/// another one started in parallel, up to [maxConnects] in all; the FIRST to be
+/// up is the client's socket, every other one is cancelled (or destroyed if it
+/// comes up later). Only one socket is ever handed to the client, so its request
+/// (a WebSocket upgrade: a server session) is written once. A connection that
+/// fails outright (refused, unreachable, a bad certificate) is an answer: when
+/// none is left pending the race fails at once, without waiting for the next
+/// one. The race has no end of its own; the caller's bound closes the client,
+/// which cancels it. (For https a loser whose TCP is up but whose TLS handshake
+/// is still running is not interrupted by the cancel: it is destroyed when the
+/// handshake ends. Nothing is ever written on a loser.)
+class GravixConnectHedge {
+  const GravixConnectHedge(this.every, {this.maxConnects = 4});
+  final Duration every;
+  final int maxConnects;
+}
+
+class _HedgedConnect {
+  _HedgedConnect(this._connect, this._hedge, this._url, this._proxyHost, this._proxyPort, this._onConnect) {
+    // the client always listens to the socket future; this only keeps an error
+    // after the client went away from being unhandled
+    unawaited(_winner.future.then((_) {}, onError: (Object _) {}));
+    _start();
+  }
+
+  final _Connect _connect;
+  final GravixConnectHedge _hedge;
+  final Uri _url;
+  final String? _proxyHost;
+  final int? _proxyPort;
+  final void Function()? _onConnect;
+  final _winner = Completer<io.Socket>();
+  final _tasks = <io.ConnectionTask<io.Socket>>[];
+  var _started = 0;
+  var _pending = 0;
+  var _closed = false;
+  Timer? _next;
+
+  Future<io.ConnectionTask<io.Socket>> get task =>
+      Future.value(io.ConnectionTask.fromSocket<io.Socket>(_winner.future, _cancel));
+
+  bool get _over => _closed || _winner.isCompleted;
+
+  void _start() {
+    if (_over) return;
+    _started++;
+    _pending++;
+    if (_started > 1) {
+      logger.fine(
+        '[http] ${_url.host}: no connection after ${(_hedge.every * (_started - 1)).inMilliseconds} ms, '
+        'connecting again in parallel (#$_started)',
+      );
+    }
+    _onConnect?.call();
+    if (_started < _hedge.maxConnects) _next = Timer(_hedge.every, _start);
+    Future<io.ConnectionTask<io.Socket>>.sync(() => _connect(_url, _proxyHost, _proxyPort)).then((task) {
+      if (_over) {
+        _pending--;
+        task.socket.then((s) => s.destroy(), onError: (Object _) {});
+        task.cancel();
+        return;
+      }
+      _tasks.add(task);
+      task.socket.then((socket) {
+        _pending--;
+        if (_over) {
+          socket.destroy();
+          return;
+        }
+        _next?.cancel();
+        if (_started > 1) logger.fine('[http] ${_url.host}: up after $_started connection(s) were started');
+        _winner.complete(socket);
+        for (final t in _tasks) {
+          if (!identical(t, task)) t.cancel();
+        }
+      }, onError: (Object e, StackTrace st) => _failed(e, st));
+    }, onError: (Object e, StackTrace st) => _failed(e, st));
+  }
+
+  void _failed(Object e, StackTrace st) {
+    _pending--;
+    if (_over || _pending > 0) return;
+    // every connection so far failed outright: that is the answer
+    _next?.cancel();
+    _winner.completeError(e, st);
+  }
+
+  void _cancel() {
+    if (_closed) return;
+    _closed = true;
+    // (after a win the losers are cancelled already, and the winner is the
+    // client's socket now)
+    if (_winner.isCompleted) return;
+    _next?.cancel();
+    for (final t in _tasks) {
+      t.cancel();
+    }
+    _winner.completeError(const io.SocketException('Connection attempt cancelled'));
+  }
 }
 
 // What io.HttpClient does without a connectionFactory (no pinning): a plain socket
@@ -165,7 +283,13 @@ class _CertificatePinningConnectionFactory {
 bool _isTlsScheme(String scheme) => scheme == 'https' || scheme == 'wss';
 
 int _portFor(Uri uri) {
-  if (uri.hasPort) {
+  // GRAVIX (2026-10-11): io.WebSocket.connect rewrites ws(s):// to http(s)://
+  // with `port: uri.port`, which is 0 for a ws/wss url without a port; an
+  // explicit 0 here means the scheme's default, as io.HttpClient itself reads
+  // it. Emulator 2026-10-11 (API 34, r511 / r512 / r522): the raced signal dial
+  // connected to port 0 and every join failed ("Network is unreachable", errno
+  // 101); the standby race's fresh dial and a pinned wss dial did the same.
+  if (uri.hasPort && uri.port != 0) {
     return uri.port;
   }
   return _isTlsScheme(uri.scheme) ? 443 : 80;

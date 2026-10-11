@@ -45,6 +45,12 @@ class SenderStats extends CodecStats {
   /// RTT reported by remote
   num? roundTripTime;
 
+  /// GRAVIX (2026-10-11, uplinkFeedbackStallFor): the values of the last
+  /// receiver report the remote (the SFU) sent about this stream
+  /// (`remote-inbound-rtp`); it changes with every new report. Null: no report
+  /// has arrived yet.
+  String? remoteReportMarker;
+
   /// ID of the outbound stream
   String streamId;
 
@@ -196,6 +202,23 @@ num? getNumValFromReport(Map<dynamic, dynamic> values, String key) {
     return (values[key] is String) ? num.tryParse(values[key]) : values[key] as num;
   }
   return null;
+}
+
+/// GRAVIX (2026-10-11, uplinkFeedbackStallFor): a value that changes with every
+/// receiver report the remote sent about one of our streams: the
+/// `remote-inbound-rtp` report's timestamp (libwebrtc stamps it with the time
+/// the report arrived) and the values the report updates. Null without a
+/// report.
+String? remoteReportMarkerFrom(num? timestamp, Map<dynamic, dynamic>? values) {
+  if (values == null) return null;
+  return [
+    timestamp,
+    values['roundTripTimeMeasurements'],
+    values['totalRoundTripTime'],
+    values['packetsLost'],
+    values['fractionLost'],
+    values['jitter'],
+  ].join('|');
 }
 
 String? getStringValFromReport(Map<dynamic, dynamic> values, String key) {

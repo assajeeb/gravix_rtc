@@ -144,6 +144,7 @@ class LocalVideoTrack extends LocalTrack with VideoTrack {
           vs.jitter = getNumValFromReport(r.values, 'jitter');
           vs.packetsLost = getNumValFromReport(r.values, 'packetsLost');
           vs.roundTripTime = getNumValFromReport(r.values, 'roundTripTime');
+          vs.remoteReportMarker = remoteReportMarkerFrom(r.timestamp, r.values);
         }
         final c = stats.firstWhereOrNull((element) => element.type == 'codec');
         if (c != null) {

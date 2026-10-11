@@ -22,6 +22,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gravix_rtc/gravix_rtc.dart';
 
+import 'echo_variants.dart';
+
 const _channel = MethodChannel('gravix.example/harness');
 
 /// logcat tag of the one-line-per-join result.
@@ -467,9 +469,12 @@ class _HarnessScreenState extends State<HarnessScreen> {
         onTimeout: () => null,
       );
       if (report != null && report.complete) {
+        // echoDiag (2026-10-10 ECHO): AEC statistics every 2 s while holding.
+        final diag = _c.flag('echoDiag') ? (EchoDiagnostics(() => _room.room)..start()) : null;
         await Future<void>.delayed(
           Duration(milliseconds: _c.integer('holdMs', 500)),
         );
+        diag?.stop();
         await _logAudioStats();
       }
     } catch (e) {

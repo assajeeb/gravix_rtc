@@ -616,7 +616,15 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     try {
       final sample = sampler ?? (samplerFor ?? gravixDefaultRegionSampler)(client!);
       for (var i = 0; i < kGravixMeasureSamples && !end.isCompleted; i++) {
-        if (sw.elapsed >= runBudget) return;
+        // the budget is spent: END the run as a budget stop. Returning alone let
+        // every worker skip its remaining regions at once and the run end as
+        // 'complete' before a delayed budget Timer fired (busy event loop), so a
+        // run that ran out of budget reported budgetHit=false (2026-10-11, the
+        // flaky "scale: 50 regions" test; region_budget_race_test.dart).
+        if (sw.elapsed >= runBudget) {
+          finish('budget');
+          return;
+        }
         Duration? d;
         try {
           d = await Future.any<Duration?>([sample(t.entry), end.future.then((_) => cut)]);
@@ -870,8 +878,8 @@ enum GravixRegionPickReason { measured, pinned, home }
 /// `home_region`, [gravixHomeRegionFrom]). It wins when it is offered, measured
 /// `ok`, and within [gravixHomeRegionMargin] (max(25 ms, 30 %)) of the fastest
 /// offered region: joining it saves the relay hop between the viewer's region and
-/// the host's (field 2026-10-04: host sgp1, viewer blr1 a few ms apart, 2.9-3.4 %
-/// loss on the relay leg). Further away, the viewer's own pick stands (the room
+/// the host's (e.g. a host in sgp1 and a viewer in blr1: a few ms apart, yet
+/// 2.9-3.4 % loss measured on the relay leg). Further away, the viewer's own pick stands (the room
 /// is relayed to it) and the pinned rule is skipped, so a pinned home url cannot
 /// keep it either. Home not measured: as if none were given. Hosts pass none.
 GravixRegionUrl? gravixPickMeasuredRegion(

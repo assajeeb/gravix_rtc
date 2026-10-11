@@ -6,8 +6,8 @@ import 'package:meta/meta.dart';
 /// The room-music method channel (gravix_rtc 0.4.10+).
 ///
 /// gravix_rtc <= 0.4.9 used `gravity.music_mixer`, the name the apps' own audio
-/// kits use: the SDK's plugin, registered after the kit, took every kit call
-/// (field 2026-10-05). The SDK never registers that name again.
+/// kits use: the SDK's plugin, registered after the kit, took every kit call.
+/// The SDK never registers that name again.
 const String kGravixMusicChannel = 'com.gravitycompile.gravix_rtc/music';
 
 /// Fans the native -> Dart events of one music channel out to every Dart-side

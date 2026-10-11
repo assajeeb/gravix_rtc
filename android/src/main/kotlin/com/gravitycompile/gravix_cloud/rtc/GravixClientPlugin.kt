@@ -20,6 +20,9 @@ package com.gravitycompile.gravix_cloud.rtc
 import com.gravitycompile.gravix_cloud.music.MusicMixerEngine
 import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.AudioRecord
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -66,6 +69,20 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
   private var binaryMessenger: BinaryMessenger? = null
   private var applicationContext: Context? = null
   private var audioSwitchManager: GxAudioSwitchManager? = null
+  private var micMonitor: GxMicMonitor? = null
+  private val keepAlive = GxKeepAlivePlayer(
+    usage = { audioSwitchManager?.audioUsage() ?: android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION },
+    webRtcPlaying = ::webRtcPlayoutRunning,
+  )
+  private var otherAppMonitor: GxOtherAppAudioMonitor? = null
+
+  // Other-app audio (owner report 2026-10-10): capture actions while another
+  // app plays, and the engine mute shared by the user's mute and the
+  // automatic one.
+  private val captureSwitcher = GxCaptureSwitcher(
+    { flutterWebRTCPlugin?.audioDeviceModule },
+    { audioDeviceModuleExecutor },
+  )
   private var audioDeviceModuleExecutor: ExecutorService? = null
   private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -86,9 +103,9 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
   }
 
-  private fun invokeOnChannel(method: String) {
+  private fun invokeOnChannel(method: String, arguments: Any? = null) {
     try {
-      if (::channel.isInitialized) channel.invokeMethod(method, null)
+      if (::channel.isInitialized) channel.invokeMethod(method, arguments)
     } catch (t: Throwable) {
       Log.w(TAG, "$method delivery failed", t)
     }
@@ -115,7 +132,13 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     channel.setMethodCallHandler(this)
     binaryMessenger = flutterPluginBinding.binaryMessenger
     applicationContext = flutterPluginBinding.applicationContext
-    audioSwitchManager = GxAudioSwitchManager(flutterPluginBinding.applicationContext)
+    audioSwitchManager = GxAudioSwitchManager(flutterPluginBinding.applicationContext).also { manager ->
+      // 0.4.15: focus changes feed the mic monitor (7c), route changes go to
+      // Dart (7d), and the chatroom model points WebRTC's recorder (7b).
+      manager.onFocusChange = { change -> micMonitor?.onFocusChange(change) }
+      manager.onRoutesChanged = { routes -> invokeOnChannel("onAudioRoutesChanged", routes) }
+      manager.onChatroomRoute = { engaged -> pointRecorderAtBluetooth(engaged) }
+    }
     audioDeviceModuleExecutor?.shutdown()
     audioDeviceModuleExecutor = Executors.newSingleThreadExecutor()
   }
@@ -368,7 +391,9 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     try {
       // flag first on mute, last on unmute: no window where a held mixer runs
       if (mute) MusicMixerEngine.captureMuted = true
-      audioDeviceModule.setMicrophoneMute(mute)
+      // the user's mute combined with an automatic other-app mute (both off =
+      // exactly the previous setMicrophoneMute(mute))
+      captureSwitcher.setUserMute(mute)
       if (!mute) MusicMixerEngine.captureMuted = false
       result.success(true)
     } catch (error: Throwable) {
@@ -456,6 +481,29 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     result.success(audioProcessingStateToMap(factory.audioProcessingState))
   }
 
+  /**
+   * 2026-10-10 ECHO (media-profile echo experiments, opt-in): see
+   * GxMediaEchoTuning. Must run after WebRTC is initialized and before the
+   * first room; the Dart side sends nothing for an "off" tuning.
+   */
+  private fun handleApplyMediaEchoTuning(call: MethodCall, result: Result) {
+    val adm = flutterWebRTCPlugin?.audioDeviceModule
+    if (adm == null) {
+      result.error("noAudioDeviceModule", "WebRTC is not initialized yet", null)
+      return
+    }
+    @Suppress("UNCHECKED_CAST")
+    val args = call.arguments as? Map<String, Any?> ?: emptyMap()
+    val report = GxMediaEchoTuning.apply(adm, args) { trials ->
+      // Replaces libwebrtc's global field-trial string; the APM environment
+      // reads it lazily when AEC3 is constructed (first capture).
+      @Suppress("DEPRECATION")
+      org.webrtc.PeerConnectionFactory.initializeFieldTrials(trials)
+    }
+    Log.i(TAG, "media echo tuning: $report")
+    result.success(report)
+  }
+
   private fun audioProcessingModeString(mode: AudioProcessingMode): String = when (mode) {
     AudioProcessingMode.PLATFORM -> "platform"
     AudioProcessingMode.SOFTWARE -> "software"
@@ -497,6 +545,102 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     "highPassFilter" to componentToMap(state.highPassFilter),
   )
 
+  // ── 0.4.15: microphone state, recorder routing (field report 2026-10-10) ──
+
+  /**
+   * WebRTC's recorder, reached by reflection: `audioInput` is a public field of
+   * a package-private class (WebRtcAudioRecord) in the webrtc-sdk the app links,
+   * so it is not visible at compile time. Null when unavailable.
+   */
+  private fun webRtcAudioRecord(): Any? = try {
+    val adm = flutterWebRTCPlugin?.audioDeviceModule ?: return null
+    adm.javaClass.getField("audioInput").get(adm)
+  } catch (_: Throwable) {
+    null
+  }
+
+  /** WebRTC's own AudioTrack is playing (reflection; false when unreadable). */
+  private fun webRtcPlayoutRunning(): Boolean = try {
+    val adm = flutterWebRTCPlugin?.audioDeviceModule
+    val output = adm?.javaClass?.getField("audioOutput")?.get(adm)
+    val field = output?.javaClass?.getDeclaredField("audioTrack")?.apply { isAccessible = true }
+    (field?.get(output) as? android.media.AudioTrack)?.playState == android.media.AudioTrack.PLAYSTATE_PLAYING
+  } catch (_: Throwable) {
+    false
+  }
+
+  /**
+   * Attributes of WebRTC's own playout track while it plays (the other-app
+   * watcher must not count the room itself), or null. Called on the watcher
+   * thread. Before API 30 AudioTrack does not expose its attributes: the
+   * profile is inferred from the audio mode (media profile = MODE_NORMAL).
+   */
+  private fun ownPlayout(): OtherAppAudioPolicy.Player? = try {
+    val adm = flutterWebRTCPlugin?.audioDeviceModule
+    val output = adm?.javaClass?.getField("audioOutput")?.get(adm)
+    val track = output?.javaClass?.getDeclaredField("audioTrack")?.apply { isAccessible = true }?.get(output)
+      as? android.media.AudioTrack
+    if (track == null || track.playState != android.media.AudioTrack.PLAYSTATE_PLAYING) {
+      null
+    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      val a = track.audioAttributes
+      OtherAppAudioPolicy.Player(a.usage, a.contentType, true)
+    } else {
+      val am = applicationContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+      if (am?.mode == AudioManager.MODE_NORMAL) {
+        OtherAppAudioPolicy.Player(android.media.AudioAttributes.USAGE_MEDIA, android.media.AudioAttributes.CONTENT_TYPE_UNKNOWN, true)
+      } else {
+        OtherAppAudioPolicy.Player(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION, android.media.AudioAttributes.CONTENT_TYPE_SPEECH, true)
+      }
+    }
+  } catch (_: Throwable) {
+    null
+  }
+
+  /**
+   * Our own started players for the other-app watcher (watcher thread):
+   * WebRTC's playout and the silent keep-alive. Merge 2026-10-11: the
+   * keep-alive (USAGE_MEDIA in the media profile, started exactly when the
+   * playout is not) read as another app and muteMicInBackground muted the user.
+   */
+  private fun ownPlayers(): List<OtherAppAudioPolicy.Player> = listOfNotNull(ownPlayout()) + keepAlive.ownPlayers()
+
+  /** Audio session id of WebRTC's AudioRecord: > 0, 0 = none, -1 = unreadable. */
+  private fun recorderSessionId(): Int = try {
+    val input = webRtcAudioRecord() ?: return -1
+    val field = input.javaClass.getDeclaredField("audioRecord").apply { isAccessible = true }
+    (field.get(input) as? AudioRecord)?.audioSessionId ?: 0
+  } catch (_: Throwable) {
+    -1
+  }
+
+  /**
+   * Chatroom model (7b): with SCO up, prefer the headset's SCO microphone on
+   * WebRTC's recorder (applied to the running AudioRecord, no restart; this is
+   * what moves a MIC-source capture, which setCommunicationDevice alone does
+   * not); when it ends, clear the preference (null) so the platform picks
+   * again. Main thread.
+   */
+  private fun pointRecorderAtBluetooth(engaged: Boolean) {
+    val context = applicationContext ?: return
+    try {
+      val device: AudioDeviceInfo? = if (engaged) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+          ?: return
+      } else {
+        null
+      }
+      val input = webRtcAudioRecord() ?: return
+      val method = input.javaClass.getDeclaredMethod("setPreferredDevice", AudioDeviceInfo::class.java)
+      method.isAccessible = true
+      method.invoke(input, device)
+      Log.i(TAG, "recorder preferred input: ${device?.productName ?: "platform default"}")
+    } catch (t: Throwable) {
+      Log.w(TAG, "could not point the recorder at the headset", t)
+    }
+  }
+
   override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
     when (call.method) {
       "startVisualizer" -> {
@@ -535,6 +679,10 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
         handleGetAudioProcessingState(result)
       }
 
+      "applyMediaEchoTuning" -> {
+        handleApplyMediaEchoTuning(call, result)
+      }
+
       "configureAndroidAudioSession" -> {
         @Suppress("UNCHECKED_CAST")
         val configuration = call.arguments as? Map<String, Any?> ?: emptyMap()
@@ -552,6 +700,87 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
         val enable = call.argument<Boolean>("enable") ?: false
         val force = call.argument<Boolean>("force") ?: false
         audioSwitchManager?.setSpeakerphoneOn(enable, force)
+        result.success(null)
+      }
+
+      // 0.4.15 mic state (7a/7c) and routes (7b/7d)
+      "startMicMonitor" -> {
+        val context = applicationContext
+        if (context == null) {
+          result.error("micMonitor", "plugin is not attached", null)
+          return
+        }
+        val monitor = micMonitor ?: GxMicMonitor(context, ::recorderSessionId) { signals ->
+          invokeOnChannel("onMicSignals", signals)
+        }.also { micMonitor = it }
+        // never blocks the main thread (see GxMicMonitor): the first signals
+        // arrive as an onMicSignals event
+        monitor.start()
+        result.success(null)
+      }
+
+      "stopMicMonitor" -> {
+        micMonitor?.stop()
+        result.success(null)
+      }
+
+      // other-app audio (2026-10-10): only ever called when the app opted in
+      "startOtherAppAudioMonitor" -> {
+        val context = applicationContext
+        if (context == null) {
+          result.error("otherAppAudio", "plugin is not attached", null)
+          return
+        }
+        val monitor = otherAppMonitor ?: GxOtherAppAudioMonitor(context, ::ownPlayers, { event ->
+          invokeOnChannel("onOtherAppAudio", event)
+        }).also { otherAppMonitor = it }
+        monitor.start()
+        result.success(null)
+      }
+
+      "stopOtherAppAudioMonitor" -> {
+        otherAppMonitor?.stop()
+        result.success(null)
+      }
+
+      "setOtherAppCaptureAction" -> {
+        captureSwitcher.apply(OtherAppAudioPolicy.Action.parse(call.argument<String>("action")))
+        result.success(null)
+      }
+
+      "reassertAudioSession" -> {
+        audioSwitchManager?.reassert()
+        result.success(null)
+      }
+
+      "getAudioRoutes" -> {
+        val manager = audioSwitchManager
+        if (manager == null) {
+          result.success(mapOf("routes" to emptyList<String>(), "current" to "unknown"))
+        } else {
+          manager.routes { result.success(it) }
+        }
+      }
+
+      "setAudioRoute" -> {
+        val manager = audioSwitchManager
+        if (manager == null) {
+          result.success(mapOf("applied" to false, "reason" to "noSession"))
+        } else {
+          manager.selectRoute(call.argument<String>("route")) { result.success(it) }
+        }
+      }
+
+      "setBackgroundKeepAlive" -> {
+        keepAlive.setActive(call.argument<Boolean>("active") ?: false)
+        result.success(null)
+      }
+
+      "setBluetoothChatroom" -> {
+        audioSwitchManager?.setChatroom(
+          call.argument<Boolean>("enabled") ?: false,
+          call.argument<Boolean>("micActive") ?: false,
+        )
         result.success(null)
       }
 
@@ -647,6 +876,13 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     channel.setMethodCallHandler(null)
     flutterEngine = null
 
+    micMonitor?.dispose()
+    micMonitor = null
+    keepAlive.setActive(false)
+    otherAppMonitor?.dispose()
+    otherAppMonitor = null
+    // queued before the executor shuts down: the capture goes back as built
+    captureSwitcher.reset()
     audioSwitchManager?.dispose()
     audioSwitchManager = null
 

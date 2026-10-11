@@ -20,6 +20,11 @@ class AudioVisualizerNative extends AudioVisualizer {
 
   AudioVisualizerNative(this._audioTrack, {required this.visualizerOptions}) {
     onDispose(() async {
+      // GRAVIX (2026-10-11, perf audit): a started visualizer disposed without
+      // stop() kept its native sink (an FFT + a main-thread post every 10 ms frame)
+      // running until the engine detached (Android) or for the life of the
+      // process (iOS). stop() is a no-op when it is not running.
+      await stop();
       await events.dispose();
     });
   }

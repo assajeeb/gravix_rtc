@@ -65,6 +65,9 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
     #if os(iOS)
     var cancellable = Set<AnyCancellable>()
     var routeChangeObserver: NSObjectProtocol?
+    // 0.4.15 mic monitor (AppleMicMonitor.swift)
+    var interruptionObserver: NSObjectProtocol?
+    var micMonitorRecover = true
     #endif
 
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -845,6 +848,17 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
         #if os(iOS)
         case "setAppleAudioOutput":
             handleSetAppleAudioOutput(args: args, result: result)
+        case "startMicMonitor":
+            handleStartMicMonitor(args: args, result: result)
+        case "stopMicMonitor":
+            handleStopMicMonitor(result: result)
+        case "reassertAudioSession":
+            scheduleSessionReactivation(reason: "afterInterruption")
+            result(nil)
+        case "getAudioRoutes":
+            result(routesSnapshot(reason: ""))
+        case "setAudioRoute":
+            handleSetAudioRoute(args: args, result: result)
         case "broadcastRequestActivation":
             if BroadcastManager.shared.requestActivation() {
                 result(true)
@@ -1066,6 +1080,13 @@ class GxAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
     var isForceSpeakerOutput: Bool {
         lock.lock(); defer { lock.unlock() }
         return forceSpeakerOutput
+    }
+
+    /// Whether Gravix may activate the session itself: automatic management
+    /// and no external call system (CallKit) owning activation (0.4.15).
+    var canActivateSession: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return isAutomaticManagementEnabled && isSessionActivationEnabled
     }
 
     /// Applies the cached configuration immediately, resolving the category from

@@ -77,7 +77,7 @@ class GravixRegionProber {
   /// [client]: send it on this client (and its keep-alive pool) instead of a
   /// one-shot client. The region measurement passes one per region
   /// ([GravixRegionProbeClient]) so its samples after the first measure one round
-  /// trip instead of DNS + TCP + TLS + HTTP again (field 2026-10-01).
+  /// trip instead of DNS + TCP + TLS + HTTP again.
   static Future<String?> defaultVerifiedProbe(String probeUrl, {http.Client? client}) async {
     final uri = Uri.parse(probeUrl);
     final response = client != null ? await client.get(uri) : await sdkHttpGet(uri);

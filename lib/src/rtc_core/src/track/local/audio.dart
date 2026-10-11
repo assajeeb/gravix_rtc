@@ -21,6 +21,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
 
+import '../../audio/audio_manager.dart';
 import '../../events.dart';
 import '../../exceptions.dart' show TrackCreateException;
 import '../../internal/events.dart';
@@ -91,7 +92,7 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   ///
   /// Disabling the track would make the engine stop the AudioRecord (and
   /// re-create it on unmute), which re-routes the voice path on OEM audio HALs
-  /// and interrupts the OTHER participants' playout (field 2026-09-30). Falls
+  /// and interrupts the OTHER participants' playout. Falls
   /// back to the disable path when the module mute is unavailable.
   ///
   /// Once muted, the RTP sender's bitrate is capped as well ([MicUplinkPause]):
@@ -278,6 +279,11 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     if (GravixEngineMicMute.engaged && _engineMuteOwner == null) await GravixEngineMicMute.release();
     await super.startCapture();
     if (_gravixExplicitRecordingSupported()) {
+      // Recording can start before any policy push (pre-connect audio,
+      // pre-join mic). Hand native the resolved Dart policy first (cache-only
+      // while the engine is idle), so the session is not left to the native
+      // built-in preset (0.4.15, upstream 2.12.0 -9001 fix). iOS only.
+      await AudioManager.instance.ensureAppleAudioSessionPolicy();
       // Match Swift: start the ADM before publishing so capture-time audio
       // processing options are applied before WebRTC opens the microphone.
       if (await gravixStartExplicitRecording(() => Native.startLocalRecording(currentOptions.processing.toMap()))) {
@@ -378,6 +384,12 @@ bool _gravixExplicitRecordingSupported() {
   return lkPlatformSupportsExplicitAudioRecordingStart();
 }
 
+bool _gravixExplicitRecordingIsAndroid() {
+  final p = gravixExplicitRecordingDebugPlatform;
+  if (p != null) return p == PlatformType.android;
+  return lkPlatformIs(PlatformType.android);
+}
+
 /// Releases a recorder pre-warmed by the explicit start that WebRTC never
 /// took over (0.4.12). Android only: `requestStopRecording` stops the Java
 /// recorder only while the engine itself is not recording, so it can never cut
@@ -410,6 +422,19 @@ Future<bool> gravixStartExplicitRecording(Future<void> Function() start) async {
         return false;
       case 'deviceAccessDenied':
         throw TrackCreateException(error.message ?? 'Microphone permission is not granted');
+    }
+    if (_gravixExplicitRecordingIsAndroid()) {
+      // 0.4.15 (field report 2026-10-10 item 7c; upstream client SDK 2.12.0):
+      // on Android the explicit start is only a recorder pre-warm. WebRTC
+      // opens the recorder again when the track is published and reports its
+      // own errors there, so no answer from the pre-warm (the native side now
+      // answers success even when preparing failed; an older or foreign
+      // native side may still say applyFailed) may abort the microphone
+      // capture with an AudioProcessingException the options never caused.
+      logger.warning(
+        'explicit audio recording pre-warm failed (${error.code}); the track starts the device on publish',
+      );
+      return false;
     }
     final reason = _audioProcessingFailureReason(error.code);
     if (reason == track_options.AudioProcessingFailureReason.platformUnavailable) {
@@ -491,6 +516,7 @@ AudioSenderStats? audioSenderStatsFrom(List<rtc.StatsReport> stats) {
         senderStats.packetsLost = getNumValFromReport(r.values, 'packetsLost');
         senderStats.roundTripTime = getNumValFromReport(r.values, 'roundTripTime');
         senderStats.jitter = getNumValFromReport(r.values, 'jitter');
+        senderStats.remoteReportMarker = remoteReportMarkerFrom(r.timestamp, r.values);
       }
 
       final c = stats.firstWhereOrNull((element) => element.type == 'codec');

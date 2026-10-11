@@ -149,6 +149,8 @@ extension GravixClientPlugin {
             "outputs": GravixClientPlugin.describeOutputs(session.currentRoute),
             "speakerReasserted": reasserted,
         ])
+        // 0.4.15: the cross-platform route event (GravixAudioDevice.onAudioRouteChanged)
+        channel?.invokeMethod("onAudioRoutesChanged", arguments: routesSnapshot(reason: GravixClientPlugin.describe(reason)))
     }
 
     static func describe(_ reason: AVAudioSession.RouteChangeReason) -> String {

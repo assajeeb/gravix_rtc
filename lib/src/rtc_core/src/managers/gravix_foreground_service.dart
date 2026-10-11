@@ -7,6 +7,8 @@ import 'package:flutter/services.dart' show MissingPluginException, PlatformExce
 import 'package:flutter/widgets.dart' show AppLifecycleListener, AppLifecycleState, WidgetsBinding;
 import 'package:meta/meta.dart' show internal, visibleForTesting;
 
+import '../audio/gravix_background_guard.dart';
+import '../audio/gravix_mic_state.dart';
 import '../logger.dart';
 import '../support/native.dart';
 import '../support/platform.dart';
@@ -21,6 +23,7 @@ class GravixForegroundServiceOptions {
     this.showLeaveAction = false,
     this.leaveActionLabel,
     this.includeCamera = false,
+    this.claimMicrophoneAtStart = true,
   });
 
   /// Start the service automatically for every room (connect → start,
@@ -48,6 +51,28 @@ class GravixForegroundServiceOptions {
   /// as before, while the microphone and playback keep going.
   final bool includeCamera;
 
+  /// Ask for the `microphone` type when the service STARTS (at connect, while
+  /// the app is visible), for listeners too, instead of only when the
+  /// microphone is published. Default true (0.4.15).
+  ///
+  /// Why (field report 2026-10-10, item 7a): Android 14+ refuses to ADD the
+  /// microphone type while the app is in the background. A listener who left
+  /// the screen and then took a seat or unmuted got no microphone type, and
+  /// Android silenced the capture ~5 s later. The type is only granted while
+  /// RECORD_AUDIO is granted (the native side checks); when it is granted
+  /// later, the type is claimed again on the next return to the foreground.
+  /// The role is not known at connect (the server's join answer has not
+  /// arrived, and a listener can be promoted at any time), so it is claimed
+  /// for every role.
+  ///
+  /// The microphone type itself records nothing and shows no microphone
+  /// indicator; only an actual capture does. For Google Play, declare the
+  /// microphone foreground-service type for the voice/video room use case.
+  ///
+  /// False = the pre-0.4.15 behaviour: `mediaPlayback` at start, `microphone`
+  /// added on the first microphone publish.
+  final bool claimMicrophoneAtStart;
+
   GravixForegroundServiceOptions copyWith({
     bool? enabled,
     String? notificationTitle,
@@ -55,6 +80,7 @@ class GravixForegroundServiceOptions {
     bool? showLeaveAction,
     String? leaveActionLabel,
     bool? includeCamera,
+    bool? claimMicrophoneAtStart,
   }) => GravixForegroundServiceOptions(
     enabled: enabled ?? this.enabled,
     notificationTitle: notificationTitle ?? this.notificationTitle,
@@ -62,6 +88,7 @@ class GravixForegroundServiceOptions {
     showLeaveAction: showLeaveAction ?? this.showLeaveAction,
     leaveActionLabel: leaveActionLabel ?? this.leaveActionLabel,
     includeCamera: includeCamera ?? this.includeCamera,
+    claimMicrophoneAtStart: claimMicrophoneAtStart ?? this.claimMicrophoneAtStart,
   );
 
   @override
@@ -72,16 +99,24 @@ class GravixForegroundServiceOptions {
       other.notificationText == notificationText &&
       other.showLeaveAction == showLeaveAction &&
       other.leaveActionLabel == leaveActionLabel &&
-      other.includeCamera == includeCamera;
+      other.includeCamera == includeCamera &&
+      other.claimMicrophoneAtStart == claimMicrophoneAtStart;
 
   @override
-  int get hashCode =>
-      Object.hash(enabled, notificationTitle, notificationText, showLeaveAction, leaveActionLabel, includeCamera);
+  int get hashCode => Object.hash(
+    enabled,
+    notificationTitle,
+    notificationText,
+    showLeaveAction,
+    leaveActionLabel,
+    includeCamera,
+    claimMicrophoneAtStart,
+  );
 
   @override
   String toString() =>
       'GravixForegroundServiceOptions(enabled: $enabled, showLeaveAction: $showLeaveAction, '
-      'includeCamera: $includeCamera)';
+      'includeCamera: $includeCamera, claimMicrophoneAtStart: $claimMicrophoneAtStart)';
 }
 
 /// Android call foreground service: keeps the microphone, the room playback
@@ -105,8 +140,10 @@ class GravixForegroundServiceOptions {
 /// ```
 ///
 /// Then every `Room.connect` (and `GravixRoomService.connect`) starts the
-/// service as `mediaPlayback`; publishing the microphone adds the
-/// `microphone` type (only when RECORD_AUDIO is granted); the room's
+/// service as `mediaPlayback` + `microphone` (the microphone type only when
+/// RECORD_AUDIO is granted; see
+/// [GravixForegroundServiceOptions.claimMicrophoneAtStart], which when false
+/// adds it on the first microphone publish instead); the room's
 /// disconnect/dispose stops it. One room can opt in or out on its own with
 /// `RoomOptions(foregroundService: ...)` / `GravixRoomService.connect(foregroundService: ...)`.
 ///
@@ -167,7 +204,8 @@ class GravixForegroundService {
 
   /// Starts the service (or re-applies [options] / the flags when it runs).
   /// [micPublished] asks for the `microphone` type (granted only with
-  /// RECORD_AUDIO). Call it while the app is visible. Works whether or not
+  /// RECORD_AUDIO); with [GravixForegroundServiceOptions.claimMicrophoneAtStart]
+  /// (the default) it is asked for in any case. Call it while the app is visible. Works whether or not
   /// [defaults] is enabled. Returns whether the service is in the foreground.
   static Future<bool> start({
     GravixForegroundServiceOptions? options,
@@ -210,6 +248,10 @@ class GravixForegroundService {
   /// delays the join (the caller does not await the native start).
   @internal
   static Future<void> roomConnecting(Object room, GravixForegroundServiceOptions? override) {
+    // 0.4.15: the mic state monitor follows every room, service or not (it
+    // runs only while a room exists and is event-driven).
+    GravixMicMonitor.instance.attachRoom(room);
+    GravixBackgroundGuard.instance.attachRoom(room);
     final opts = effective(override);
     if (!opts.enabled || !isSupported) return Future<void>.value();
     _stopTimer?.cancel();
@@ -223,7 +265,10 @@ class GravixForegroundService {
     final opts = _rooms[room];
     if (opts == null) return Future<void>.value();
     final wantCamera = camera && opts.includeCamera;
-    if ((!microphone || _mic) && (!wantCamera || _camera)) return Future<void>.value();
+    // a microphone type claimed at start but not granted (RECORD_AUDIO came
+    // later) is asked for again on the publish
+    final micMissing = microphone && _running && !_typeNames.contains('microphone');
+    if ((!microphone || (_mic && !micMissing)) && (!wantCamera || _camera)) return Future<void>.value();
     if (microphone) _mic = true;
     if (wantCamera) _camera = true;
     return _serial(_applyUpdate);
@@ -233,6 +278,8 @@ class GravixForegroundService {
   /// the service stops after [stopGrace] when nothing else holds it.
   @internal
   static void roomReleased(Object room) {
+    GravixMicMonitor.instance.detachRoom(room);
+    GravixBackgroundGuard.instance.detachRoom(room);
     if (_rooms.remove(room) == null) return;
     if (_rooms.isNotEmpty || _manual) return;
     _stopTimer?.cancel();
@@ -311,6 +358,7 @@ class GravixForegroundService {
           _running = false;
           _typeNames = const <String>[];
           _syncLifecycle();
+          GravixMicMonitor.instance.refresh();
       }
     });
   }
@@ -329,6 +377,9 @@ class GravixForegroundService {
   static Future<bool> _ensureStarted(GravixForegroundServiceOptions opts) async {
     _listenNative();
     _activeOptions = opts;
+    // 7a (0.4.15): claimed while visible, so a later publish from the
+    // background needs no type upgrade Android 14 would refuse.
+    if (opts.claimMicrophoneAtStart) _mic = true;
     _syncLifecycle();
     if (_running) return _applyUpdate();
     try {
@@ -373,7 +424,10 @@ class GravixForegroundService {
       final reply = await Native.updateCallService(microphone: _mic, camera: _camera);
       _readTypes(reply);
       final error = reply['error'];
-      _updatePending = error != null;
+      // Still pending while a wanted microphone type is missing (RECORD_AUDIO
+      // not granted yet): every return to the foreground claims it again, a
+      // no-op on the native side while nothing changed (7a, 0.4.15).
+      _updatePending = error != null || _micTypeMissing;
       if (error != null) logger.warning('call foreground service type update refused: $error');
       return error == null;
     } on PlatformException catch (e) {
@@ -385,9 +439,12 @@ class GravixForegroundService {
     }
   }
 
+  static bool get _micTypeMissing => _mic && !_typeNames.contains('microphone');
+
   static void _readTypes(Map<String, Object?> reply) {
     final names = reply['typeNames'];
     if (names is List) _typeNames = names.whereType<String>().toList(growable: false);
+    GravixMicMonitor.instance.refresh();
   }
 
   static Future<void> _stopIfUnheld() async {
@@ -406,6 +463,7 @@ class GravixForegroundService {
     _camera = false;
     _updatePending = false;
     _syncLifecycle();
+    GravixMicMonitor.instance.refresh();
     if (wasActive) await Native.stopCallService();
   }
 

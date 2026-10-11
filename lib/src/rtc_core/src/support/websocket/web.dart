@@ -32,6 +32,13 @@ Future<GravixRtcWebSocketWeb> lkWebSocketConnect(
   Map<String, String>? headers, // |headers| will be ignored on web
   NetworkOptions? networkOptions = const NetworkOptions(),
   Object? preconnected, // no pre-connected sockets in a browser
+  // the signal client's own timeout bounds the dial, and a browser socket that
+  // opens after it is closed by the signal client
+  Duration? connectTimeout,
+  Duration? hedgeAfter, // the browser owns the connections
+  Duration? connectWithin, // (it does not tell when a connection is up)
+  Duration? upgradeWindow,
+  Duration? dialCeiling,
 }) => GravixRtcWebSocketWeb.connect(uri, options: options, networkOptions: networkOptions);
 
 class GravixRtcWebSocketWeb extends GravixRtcWebSocket {

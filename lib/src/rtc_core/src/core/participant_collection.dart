@@ -32,6 +32,13 @@ class ParticipantCollection<T extends Participant> extends IterableBase<T> {
     _bySid[participant.sid] = participant;
   }
 
+  /// GRAVIX (0.4.15): [participant] is kept across a full rejoin and may have a
+  /// new sid: drop its old sid key, then index it again.
+  void rekey(T participant, String oldSid) {
+    if (identical(_bySid[oldSid], participant)) _bySid.remove(oldSid);
+    set(participant);
+  }
+
   // Contains methods
   bool containsIdentity(String identity) => _byIdentity.containsKey(identity);
   bool containsSid(String sid) => _bySid.containsKey(sid);

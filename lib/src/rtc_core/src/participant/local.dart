@@ -58,7 +58,8 @@ import '../types/other.dart';
 import '../types/participant_permissions.dart';
 import '../types/video_cap.dart';
 import '../types/video_dimensions.dart';
-import '../utils.dart' show buildStreamId, mimeTypeToVideoCodecString, Utils, isSVCCodec, isVideoCodec;
+import '../utils.dart'
+    show buildStreamId, computeStartTargetBitrate, mimeTypeToVideoCodecString, Utils, isSVCCodec, isVideoCodec;
 import 'gravix_publish_runners.dart';
 import 'participant.dart';
 
@@ -208,6 +209,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   Future<LocalTrackPublication<LocalAudioTrack>?> _publishAudioTrack(
     LocalAudioTrack track, {
     AudioPublishOptions? publishOptions,
+    // GRAVIX (0.4.15): republish a muted track whose capture is stopped without
+    // a capture (see rePublishAllTracks)
+    bool gravixDetached = false,
   }) async {
     if (audioTrackPublications.any((e) => e.track?.mediaStreamTrack.id == track.mediaStreamTrack.id)) {
       throw TrackPublishException('track already exists');
@@ -219,11 +223,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     final audioEncoding = publishOptions.encoding ?? AudioEncoding.presetMusic;
     final List<rtc.RTCRtpEncoding> encodings = [audioEncoding.toRTCRtpEncoding()];
 
-    final shouldStopOnFailure = !track.isActive;
+    final shouldStopOnFailure = !track.isActive && !gravixDetached;
     try {
       // Start capture before signaling so create-time audio processing failures
       // abort publish without creating a server-side publication.
-      await track.start();
+      // (A detached republish has no capture to start: the unmute restarts it.)
+      if (!gravixDetached) await track.start();
 
       final req = lk_rtc.AddTrackRequest(
         cid: track.getCid(),
@@ -244,7 +249,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       ]);
 
       Future<lk_models.TrackInfo> negotiate(AudioPublishOptions options) async {
-        track.transceiver = await room.engine.createTransceiverRTCRtpSender(track, options, encodings);
+        track.transceiver = await room.engine.createTransceiverRTCRtpSender(
+          track,
+          options,
+          encodings,
+          gravixDetached: gravixDetached,
+        );
         await room.engine.negotiate();
         return lk_models.TrackInfo();
       }
@@ -261,11 +271,16 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           sendEncodings: encodings,
         );
         // addTransceiver cannot pass in a kind parameter due to a bug in flutter-webrtc (web)
-        track.transceiver = await room.engine.publisher?.pc.addTransceiver(
-          track: track.mediaStreamTrack,
-          kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: transceiverInit,
-        );
+        final pc = room.engine.publisher?.pc;
+        // a detached republish: a transceiver of the kind, no track (the
+        // interface's track parameter is non-nullable, so it is left out)
+        track.transceiver = gravixDetached
+            ? await pc?.addTransceiver(kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio, init: transceiverInit)
+            : await pc?.addTransceiver(
+                track: track.mediaStreamTrack,
+                kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
+                init: transceiverInit,
+              );
 
         await room.engine.negotiate();
       }
@@ -321,6 +336,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   Future<LocalTrackPublication<LocalVideoTrack>?> _publishVideoTrack(
     LocalVideoTrack track, {
     VideoPublishOptions? publishOptions,
+    // GRAVIX (0.4.15): see _publishAudioTrack
+    bool gravixDetached = false,
   }) async {
     if (videoTrackPublications.any((e) => e.track?.mediaStreamTrack.id == track.mediaStreamTrack.id)) {
       throw TrackPublishException('track already exists');
@@ -426,7 +443,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     logger.fine('Video layers: ${layers.map((e) => e)}');
 
     Future<lk_models.TrackInfo> negotiate(VideoPublishOptions options) async {
-      track.transceiver = await room.engine.createTransceiverRTCRtpSender(track, options, encodings);
+      track.transceiver = await room.engine.createTransceiverRTCRtpSender(
+        track,
+        options,
+        encodings,
+        gravixDetached: gravixDetached,
+      );
 
       track.codec = options.videoCodec;
       if (lkBrowser() != BrowserType.firefox) {
@@ -441,14 +463,31 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         //TOOD:
       } else if (isVideoCodec(options.videoCodec) && encodings?.first.maxBitrate != null) {
         // Apply start bitrate for all video codecs to prevent initial blurriness
-        room.engine.publisher?.setTrackBitrateInfo(
-          TrackBitrateInfo(
-            cid: track.getCid(),
-            transceiver: track.transceiver,
-            codec: options.videoCodec,
-            maxbr: encodings![0].maxBitrate! ~/ 1000,
-          ),
-        );
+        if (room.roomOptions.recovery.startBitrateBySetupTime) {
+          // GRAVIX (0.4.15): upstream 2.13.1 (#1218): the target is the sum of the
+          // simulcast layers (encodings[0] is the LOWEST one), screen share flagged
+          final targetBitrate = computeStartTargetBitrate(options.videoCodec, options, encodings);
+          if (targetBitrate > 0) {
+            room.engine.publisher?.setTrackBitrateInfo(
+              TrackBitrateInfo(
+                cid: track.getCid(),
+                transceiver: track.transceiver,
+                codec: options.videoCodec,
+                maxbr: targetBitrate ~/ 1000,
+                isScreenShare: track.source == TrackSource.screenShareVideo,
+              ),
+            );
+          }
+        } else {
+          room.engine.publisher?.setTrackBitrateInfo(
+            TrackBitrateInfo(
+              cid: track.getCid(),
+              transceiver: track.transceiver,
+              codec: options.videoCodec,
+              maxbr: encodings![0].maxBitrate! ~/ 1000,
+            ),
+          );
+        }
       }
 
       await room.engine.negotiate();
@@ -535,11 +574,14 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
       logger.fine('publishVideoTrack publisher: ${room.engine.publisher}');
 
-      track.transceiver = await room.engine.publisher?.pc.addTransceiver(
-        track: track.mediaStreamTrack,
-        kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: transceiverInit,
-      );
+      final pc = room.engine.publisher?.pc;
+      track.transceiver = gravixDetached
+          ? await pc?.addTransceiver(kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo, init: transceiverInit)
+          : await pc?.addTransceiver(
+              track: track.mediaStreamTrack,
+              kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo,
+              init: transceiverInit,
+            );
 
       track.codec = publishOptions.videoCodec;
       if (lkBrowser() != BrowserType.firefox) {
@@ -554,14 +596,31 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         //TOOD:
       } else if (isVideoCodec(publishOptions.videoCodec) && encodings?.first.maxBitrate != null) {
         // Apply start bitrate for all video codecs to prevent initial blurriness
-        room.engine.publisher?.setTrackBitrateInfo(
-          TrackBitrateInfo(
-            cid: track.getCid(),
-            transceiver: track.transceiver,
-            codec: publishOptions.videoCodec,
-            maxbr: encodings![0].maxBitrate! ~/ 1000,
-          ),
-        );
+        if (room.roomOptions.recovery.startBitrateBySetupTime) {
+          // GRAVIX (0.4.15): upstream 2.13.1 (#1218): the target is the sum of the
+          // simulcast layers (encodings[0] is the LOWEST one), screen share flagged
+          final targetBitrate = computeStartTargetBitrate(publishOptions.videoCodec, publishOptions, encodings);
+          if (targetBitrate > 0) {
+            room.engine.publisher?.setTrackBitrateInfo(
+              TrackBitrateInfo(
+                cid: track.getCid(),
+                transceiver: track.transceiver,
+                codec: publishOptions.videoCodec,
+                maxbr: targetBitrate ~/ 1000,
+                isScreenShare: track.source == TrackSource.screenShareVideo,
+              ),
+            );
+          }
+        } else {
+          room.engine.publisher?.setTrackBitrateInfo(
+            TrackBitrateInfo(
+              cid: track.getCid(),
+              transceiver: track.transceiver,
+              codec: publishOptions.videoCodec,
+              maxbr: encodings![0].maxBitrate! ~/ 1000,
+            ),
+          );
+        }
       }
 
       await room.engine.negotiate();
@@ -574,7 +633,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       screenShareSimulcastLayers: requestedOptions.screenShareSimulcastLayers,
     );
 
-    await track.start();
+    if (!gravixDetached) await track.start();
 
     final pub = LocalTrackPublication<LocalVideoTrack>(participant: this, info: trackInfo, track: track);
     addTrackPublication(pub);
@@ -679,18 +738,82 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     }
   }
 
+  /// Publications a full rejoin is republishing that are not published yet. A
+  /// newer rejoin takes them over (otherwise the muted mic could be lost between
+  /// two back-to-back rejoins).
+  final List<LocalTrackPublication> _gravixRepublishPending = [];
+
+  /// GRAVIX (0.4.15): the room is left: nothing is republished any more.
+  @internal
+  void gravixForgetRepublish() => _gravixRepublishPending.clear();
+
+  /// GRAVIX (2026-10-11): a rejoin still has to republish a [source] track. Its
+  /// publication is missing on purpose meanwhile; the host-camera restore
+  /// (GravixDataSaver) must not open a second camera into that window.
+  @internal
+  bool gravixRepublishPending(TrackSource source) => _gravixRepublishPending.any((p) => p.source == source);
+
   Future<void> rePublishAllTracks() async {
-    final tracks = trackPublications.values.toList();
+    final restartGen = room.engine.gravixRestartGen;
+    bool superseded() => room.engine.gravixRestartGen != restartGen;
+    // what the previous rejoin did not finish, then what is published now; one
+    // entry per track
+    final pubs = <LocalTrackPublication>[];
+    for (final pub in [..._gravixRepublishPending, ...trackPublications.values]) {
+      if (pub.track == null || pubs.any((p) => identical(p.track, pub.track))) continue;
+      pubs.add(pub);
+    }
+    _gravixRepublishPending
+      ..clear()
+      ..addAll(pubs);
     trackPublications.clear();
-    for (LocalTrackPublication track in tracks) {
-      if (track.track is LocalAudioTrack) {
-        await publishAudioTrack(track.track as LocalAudioTrack);
-      } else if (track.track is LocalVideoTrack) {
-        final videoTrack = track.track as LocalVideoTrack;
-        // a full reconnect replaced the peer connection, so any simulcast
-        // codec senders the track still holds belong to the old one
-        videoTrack.clearSimulcastState();
-        await publishVideoTrack(videoTrack);
+    final detachStopped = room.roomOptions.recovery.republishStoppedTracksMuted;
+    for (LocalTrackPublication pub in pubs) {
+      if (superseded()) {
+        // a newer rejoin replaced the session: it republishes what is left
+        logger.info('republish: the session was replaced; ${_gravixRepublishPending.length} left for the next one');
+        return;
+      }
+      final track = pub.track;
+      // GRAVIX (0.4.15, field 2026-10-09 03:50:13.919): a track muted with
+      // stopOnMute (stopAudioCaptureOnMute, the default) has no native track any
+      // more; handing it to addTransceiver threw "track is null" out of the
+      // rejoin, which then never emitted RoomReconnectedEvent. Republish it muted
+      // with no capture behind it: the unmute restarts the capture on the new
+      // sender (LocalTrack.unmute -> restartTrack -> replaceTrack), and the
+      // microphone is not reopened while muted.
+      final detached = detachStopped && track != null && track.muted && !track.isActive;
+      try {
+        if (track is LocalAudioTrack) {
+          if (detached) {
+            logger.info('republishing the stopped muted ${track.source} without a capture');
+            await _publishRunners.forSource(track.source).run(() => _publishAudioTrack(track, gravixDetached: true));
+          } else {
+            await publishAudioTrack(track);
+          }
+        } else if (track is LocalVideoTrack) {
+          // a full reconnect replaced the peer connection, so any simulcast
+          // codec senders the track still holds belong to the old one
+          track.clearSimulcastState();
+          if (detached) {
+            logger.info('republishing the stopped muted ${track.source} without a capture');
+            await _publishRunners.forSource(track.source).run(() => _publishVideoTrack(track, gravixDetached: true));
+          } else {
+            await publishVideoTrack(track);
+          }
+        }
+        _gravixRepublishPending.remove(pub);
+      } catch (error) {
+        if (error is GravixSessionReplacedException || superseded()) {
+          // GRAVIX (0.4.15, F4): not a failure: the next session republishes it
+          logger.info('republishing ${pub.source}: the session was replaced; the next rejoin republishes it');
+          return;
+        }
+        _gravixRepublishPending.remove(pub);
+        // GRAVIX (0.4.15): one track that cannot be republished must not abort the
+        // rejoin (the other tracks, RoomReconnectedEvent): report it instead.
+        logger.severe('republishing ${pub.source} after the rejoin failed: $error');
+        [events, room.events].emit(LocalTrackRepublishFailedEvent(participant: this, publication: pub, error: error));
       }
     }
   }

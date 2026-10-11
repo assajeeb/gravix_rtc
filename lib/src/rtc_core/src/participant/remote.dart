@@ -14,6 +14,7 @@
 // limitations under the License.
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:logging/logging.dart' show Level;
 import 'package:meta/meta.dart';
 
 import '../core/room.dart';
@@ -228,7 +229,8 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
   @override
   @internal
   Future<bool> updateFromInfo(lk_models.ParticipantInfo info) async {
-    logger.fine('RemoteParticipant.updateFromInfo(info: $info)');
+    // GRAVIX (2026-10-11, perf): guarded, see Participant.updateFromInfo.
+    if (logger.isLoggable(Level.FINE)) logger.fine('RemoteParticipant.updateFromInfo(info: $info)');
     if (!await super.updateFromInfo(info)) {
       //return false;
     }

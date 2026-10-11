@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.4.15 — 2026-10-11
+
+Recovery after network drops and region failover, from field reports and real-device testing
+(Android and iOS). Every behaviour change has its own switch in `GravixRecoveryOptions`
+(`RoomOptions(recovery: ...)`, `GravixRoomService(recovery: ...)`); each switch's off value is the
+0.4.14 behaviour, and `GravixRecoveryOptions.legacy` turns all of them off.
+
+### Where the session is
+- `Room.connectedUrl` / `Room.connectedRegion`: the url and region the session is actually on (after
+  a failover or a rejoin to another region, not the url passed to `connect`). Kept through resumes and
+  reconnects; null only when the session has ended.
+- `RoomConnectedUrlChangedEvent(url, region, previousUrl, previousRegion, reason)` on every connect and
+  on a rejoin to another url. A server indicator in an app should read these.
+
+### Reconnect, resume and failover (`GravixRecoveryOptions`, all on by default)
+- Region failover goes to the nearest healthy region by the start-up measurement
+  (`measuredRegionFailover`); a full reconnect first retries its own url once (`retrySameUrlFirst`);
+  it moves only with evidence that the region failed (`failoverNeedsEvidence`); the region list from
+  the last good fetch is kept for failover (`lastGoodRegionList`).
+- Signal connects are bounded and raced on slow paths (`boundedSignalConnect`, `signalDialCap`,
+  `signalUpgradeWindow` / `signalDialCeiling`); a host that never answers is failed over sooner
+  (`silentHostFailFast`).
+- Resume: no 10 s wait for an idle publisher (`publisherRestartRetryAfter`,
+  `subscriberSufficientWhenIdle`); a resume's primary connection gets a deadline
+  (`resumePrimaryDeadline`); a Leave during the wait acts at once (`leaveAbortsResumeWait`); the old
+  ICE session's failure no longer forces a rejoin after a successful resume
+  (`resumeSatisfiesPeerFailure`, `resumePeerRestartWait`).
+- A renegotiation (e.g. a track published or unpublished) while a resume is dialling no longer breaks
+  the resume ("Incompatible send direction", then a full reconnect): the offer is held until the
+  resume completes (`deferNegotiateDuringResume`), and a restart rolls back an offer that was sent but
+  never answered (`rollbackStaleOfferOnRestart`).
+- Faster detection: a subscribed video with no packets resumes early (`earlyStallDetection`); a resumed
+  session with no new video rejoins (`noVideoWatchdog`); an uplink the server stopped answering
+  resumes (`uplinkFeedbackStallFor`); a full reconnect fails at once when its signal socket closes
+  (`restartAbortsOnSignalLoss`); the wait for connectivity re-checks the network
+  (`networkWaitProbeInterval`).
+- Waits that fit slow paths: a full reconnect waits like a fresh join (`fullReconnectMediaConnect`),
+  longer when the signal path is measurably slow (`slowPathPeerConnectWait`).
+- A full rejoin keeps the participants still in the room (`keepParticipantsOnRejoin`,
+  `rejoinAbsentGrace`) and republishes a stopped muted microphone as muted
+  (`republishStoppedTracksMuted`).
+- `GravixRoomService`'s data saver changes the host camera in place; the camera is no longer lost
+  after the app was in the background (`hostCameraGuard`).
+- Upstream client SDK 2.12.0 – 2.13.1 ports, including the reconnect fixes (`upstreamReconnectFixes`)
+  and a connection-level video start bitrate (`startBitrateBySetupTime`).
+
+### Audio
+- New: microphone state (`GravixAudioDevice.micState`), one speaker / route API
+  (`setAudioRoute`, `clearAudioRoute`, `setEnableSpeakerphone`, `getAudioRoutes`,
+  `onAudioRouteChanged`).
+- Fixed: background microphone on Android 14+; the microphone after a phone or VoIP call; route
+  reporting (`speakerOff` is applied only when the route is not the loudspeaker; iOS reports the new
+  explicit route after every selection).
+- New, opt-in: Bluetooth "chatroom" model (Android), keep-alive against OEM app freezers (Android),
+  silent-capture detection, other apps' audio while the microphone is on (`otherAppAudio`),
+  media-profile echo experiments (`GravixMediaEcho`, experimental).
+
+### Other fixes
+- A `wss://` url without a port was dialled on port 0 by the SDK's connection factory (raced dials,
+  certificate pinning, the standby redial).
+- The start-up region measurement reports a run that ran out of its budget as a budget stop.
+- `dumpVideoStats` no longer throws during a rejoin; the audio visualizer stops on dispose; log text is
+  built only when the level is enabled.
+
 ## 0.4.14 — 2026-10-09
 
 No SDK behaviour change.

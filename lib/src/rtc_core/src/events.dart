@@ -144,6 +144,65 @@ class RoomReconnectedEvent with RoomEvent {
   String toString() => '${runtimeType}()';
 }
 
+/// A local track could not be published
+/// again after a full rejoin. The rejoin itself goes on (the room still emits
+/// [RoomReconnectedEvent]); the app may publish the source again. Before 0.4.15
+/// the error escaped the rejoin unhandled ("addTransceiver(): track is null").
+/// Emitted by [Room] and [LocalParticipant].
+class LocalTrackRepublishFailedEvent with RoomEvent, ParticipantEvent {
+  final LocalParticipant participant;
+  final LocalTrackPublication publication;
+  final Object error;
+
+  const LocalTrackRepublishFailedEvent({required this.participant, required this.publication, required this.error});
+
+  @override
+  String toString() => '${runtimeType}(source: ${publication.source}, error: $error)';
+}
+
+/// GRAVIX (0.4.15): why [Room.connectedUrl] changed.
+enum RoomConnectedUrlChangeReason {
+  /// A [Room.connect] completed (also when it landed on another region than the
+  /// url it was given: the core's region failover).
+  connect,
+
+  /// A full reconnect (a new session) joined another url than the previous one.
+  rejoin,
+}
+
+/// The server the session is connected to
+/// changed: the first connect, a region failover, or a full rejoin to another
+/// region. An app's "server" indicator should follow this (or read
+/// [Room.connectedUrl]) rather than the url it passed to [Room.connect]: the
+/// session may be elsewhere. A resume keeps the url and emits nothing.
+/// Emitted by [Room].
+class RoomConnectedUrlChangedEvent with RoomEvent {
+  /// The url the session is connected to now.
+  final String url;
+
+  /// Its region slug (e.g. `sgp1`) when known: the server's JoinResponse, else
+  /// the region list / start-up measurement entry for [url]. Null when unknown.
+  final String? region;
+
+  /// The url before, null on the first connect.
+  final String? previousUrl;
+  final String? previousRegion;
+  final RoomConnectedUrlChangeReason reason;
+
+  const RoomConnectedUrlChangedEvent({
+    required this.url,
+    required this.region,
+    required this.previousUrl,
+    required this.previousRegion,
+    required this.reason,
+  });
+
+  @override
+  String toString() =>
+      '${runtimeType}(url: $url, region: $region, previousUrl: $previousUrl, '
+      'previousRegion: $previousRegion, reason: ${reason.name})';
+}
+
 /// Disconnected from the room
 /// Emitted by [Room].
 class RoomDisconnectedEvent with RoomEvent {

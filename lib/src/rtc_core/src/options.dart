@@ -18,6 +18,7 @@ import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 import 'constants.dart';
 import 'core/reconnect_policy.dart';
 import 'e2ee/options.dart';
+import 'gravix_recovery_options.dart';
 import 'managers/gravix_foreground_service.dart';
 import 'track/local/audio.dart';
 import 'track/local/video.dart';
@@ -27,6 +28,8 @@ import 'types/other.dart';
 import 'types/video_encoding.dart';
 import 'types/video_parameters.dart';
 import 'utils.dart';
+
+export 'gravix_recovery_options.dart';
 
 class TrackOption<E extends Object, T extends Object> {
   final E? enabled;
@@ -343,6 +346,12 @@ class RoomOptions {
   /// it on). See [GravixForegroundService].
   final GravixForegroundServiceOptions? foregroundService;
 
+  /// GRAVIX (0.4.15, 2026-10-10): region failover, resume and rejoin
+  /// behaviour. Every switch's off value is the 0.4.14 behaviour;
+  /// [GravixRecoveryOptions.legacy] turns all of them off. See
+  /// [GravixRecoveryOptions].
+  final GravixRecoveryOptions recovery;
+
   const RoomOptions({
     this.defaultCameraCaptureOptions = const CameraCaptureOptions(),
     this.defaultScreenShareCaptureOptions = const ScreenShareCaptureOptions(),
@@ -360,6 +369,7 @@ class RoomOptions {
     this.fastPublish = true,
     this.networkOptions = const NetworkOptions(),
     this.foregroundService,
+    this.recovery = const GravixRecoveryOptions(),
   });
 
   RoomOptions copyWith({
@@ -378,6 +388,7 @@ class RoomOptions {
     NetworkOptions? networkOptions,
     ReconnectPolicy? reconnectPolicy,
     GravixForegroundServiceOptions? foregroundService,
+    GravixRecoveryOptions? recovery,
   }) {
     return RoomOptions(
       defaultCameraCaptureOptions: defaultCameraCaptureOptions ?? this.defaultCameraCaptureOptions,
@@ -396,6 +407,7 @@ class RoomOptions {
       networkOptions: networkOptions ?? this.networkOptions,
       reconnectPolicy: reconnectPolicy ?? this.reconnectPolicy,
       foregroundService: foregroundService ?? this.foregroundService,
+      recovery: recovery ?? this.recovery,
     );
   }
 }

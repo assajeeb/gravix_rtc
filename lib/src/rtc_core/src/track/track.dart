@@ -184,9 +184,18 @@ abstract class Track extends DisposableChangeNotifier with EventsEmittable<Track
 
   @internal
   void startMonitor() {
-    _monitorTimer ??= Timer.periodic(const Duration(milliseconds: monitorFrequency), (_) async {
-      if (!await monitorStats()) {
-        stopMonitor();
+    // GRAVIX (0.4.15): upstream 2.13.1 (#1224) single-flight poll. A getStats
+    // slower than the interval used to stack polls (phone CPU); a completion from
+    // an old timer can neither stop nor block a restarted one.
+    if (_monitorTimer != null) return;
+    var inFlight = false;
+    _monitorTimer = Timer.periodic(const Duration(milliseconds: monitorFrequency), (timer) async {
+      if (inFlight || !identical(_monitorTimer, timer)) return;
+      inFlight = true;
+      try {
+        if (!await monitorStats() && identical(_monitorTimer, timer)) stopMonitor();
+      } finally {
+        inFlight = false;
       }
     });
   }

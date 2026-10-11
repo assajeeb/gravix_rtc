@@ -18,7 +18,10 @@ import 'package:http/http.dart' as http;
 import '../options.dart';
 import 'http_client/io.dart' if (dart.library.js_interop) 'http_client/web.dart' as impl;
 
-http.Client createSdkHttpClient(NetworkOptions networkOptions) => impl.createSdkHttpClient(networkOptions);
+/// [connectionTimeout] (dart:io): how long the client's TCP + TLS connect may
+/// take before it is aborted; null = until the OS gives up.
+http.Client createSdkHttpClient(NetworkOptions networkOptions, {Duration? connectionTimeout}) =>
+    impl.createSdkHttpClient(networkOptions, connectionTimeout: connectionTimeout);
 
 /// A client to keep for several requests (keep-alive), see the io implementation.
 http.Client createSdkProbeHttpClient(
@@ -27,28 +30,39 @@ http.Client createSdkProbeHttpClient(
   Duration? idleTimeout,
 }) => impl.createSdkProbeHttpClient(networkOptions, onConnect: onConnect, idleTimeout: idleTimeout);
 
+/// [timeout] (GRAVIX, 2026-10-11): the request gives up after it (a
+/// TimeoutException) and its socket is closed -- the connect too, which is also
+/// bounded at the socket ([createSdkHttpClient]'s connectionTimeout). Null = no
+/// limit: a connect into a blackholed path waits for the OS (errno 110 after
+/// ~31-133 s on the soak phones), and a caller's own `.timeout()` leaves that
+/// socket connecting in the background.
 Future<http.Response> sdkHttpGet(
   Uri uri, {
   Map<String, String>? headers,
   NetworkOptions networkOptions = const NetworkOptions(),
-}) async {
-  final client = createSdkHttpClient(networkOptions);
-  try {
-    return await client.get(uri, headers: headers);
-  } finally {
-    client.close();
-  }
-}
+  Duration? timeout,
+}) => _bounded(networkOptions, timeout, (client) => client.get(uri, headers: headers));
 
+/// See [sdkHttpGet] for [timeout].
 Future<http.Response> sdkHttpHead(
   Uri uri, {
   Map<String, String>? headers,
   NetworkOptions networkOptions = const NetworkOptions(),
-}) async {
-  final client = createSdkHttpClient(networkOptions);
+  Duration? timeout,
+}) => _bounded(networkOptions, timeout, (client) => client.head(uri, headers: headers));
+
+Future<http.Response> _bounded(
+  NetworkOptions networkOptions,
+  Duration? timeout,
+  Future<http.Response> Function(http.Client client) request,
+) async {
+  final client = createSdkHttpClient(networkOptions, connectionTimeout: timeout);
   try {
-    return await client.head(uri, headers: headers);
+    final response = request(client);
+    return await (timeout == null ? response : response.timeout(timeout));
   } finally {
+    // on a timeout as well: closing the client aborts the pending connect or
+    // request (IOClient.close is a forced close)
     client.close();
   }
 }

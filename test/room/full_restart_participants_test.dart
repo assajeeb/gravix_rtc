@@ -53,9 +53,22 @@ void main() {
   });
 
   // a service bound to a real Room whose engine events the test drives
-  Future<(GravixRoomService, Room, List<String>, List<String>, List<String>)> inRoomWith(List<String> others) async {
+  // (0.4.15: the 0.4.6 contract below is the keepParticipantsOnRejoin: false
+  // path; the kept-participants path is tested at the end and in
+  // rejoin_keeps_participants_test.dart)
+  Future<(GravixRoomService, Room, List<String>, List<String>, List<String>)> inRoomWith(
+    List<String> others, {
+    bool keep = false,
+  }) async {
     final joined = <String>[], offline = <String>[], roomEvents = <String>[];
-    final s = GravixRoomService(connectRoom: (room, url, token) async {}, applyMic: (_) async {});
+    final s = GravixRoomService(
+      connectRoom: (room, url, token) async {},
+      applyMic: (_) async {},
+      // (rejoinAbsentGrace zero: a leaver is reported at the JoinResponse, the
+      // order these tests pin; the grace is tested in
+      // region_move_keeps_participants_test.dart)
+      recovery: GravixRecoveryOptions(keepParticipantsOnRejoin: keep, rejoinAbsentGrace: Duration.zero),
+    );
     await s.connect(url: 'wss://a.example', token: 't', publishMic: false);
     final room = s.room!;
     s.onUserJoined = joined.add;
@@ -113,6 +126,24 @@ void main() {
     await pump();
     expect(offline, contains('ann'));
     expect(joined, isEmpty);
+  });
+
+  test('keepParticipantsOnRejoin (0.4.15 default): nobody changed = no room event, same objects', () async {
+    final (_, room, joined, offline, roomEvents) = await inRoomWith(['ann', 'bob'], keep: true);
+    final before = room.remoteParticipants['ann'];
+    await fullRestart(room, ['ann', 'bob']);
+    expect(roomEvents, ['reconnected']);
+    expect(joined, isEmpty);
+    expect(offline, isEmpty);
+    expect(identical(room.remoteParticipants['ann'], before), isTrue);
+  });
+
+  test('keepParticipantsOnRejoin: one left, one joined: one Disconnected, one Connected', () async {
+    final (_, room, joined, offline, roomEvents) = await inRoomWith(['ann', 'bob'], keep: true);
+    await fullRestart(room, ['ann', 'cat']);
+    expect(roomEvents, ['-bob', '+cat', 'reconnected']);
+    expect(offline, ['bob']);
+    expect(joined, ['cat']);
   });
 
   test('the room disconnects in the middle of a restart: the dropped ones are reported offline', () async {

@@ -26,4 +26,7 @@ enum ClientDisconnectReason {
   reconnectRetry,
   leaveReconnect,
   reconnectAttemptsExceeded,
+  // GRAVIX (0.4.15): a subscribed video stopped (R1) / decoded nothing after a
+  // resume (S4); see GravixVideoStallWatch
+  mediaStalled,
 }

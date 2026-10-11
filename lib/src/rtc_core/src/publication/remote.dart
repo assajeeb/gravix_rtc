@@ -18,6 +18,7 @@ import 'dart:math';
 
 import 'package:flutter/widgets.dart';
 
+import 'package:logging/logging.dart' show Level;
 import 'package:meta/meta.dart';
 
 import '../core/signal_client.dart';
@@ -100,8 +101,26 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
     return super.subscribed ? TrackSubscriptionState.subscribed : TrackSubscriptionState.unsubscribed;
   }
 
+  /// GRAVIX (0.4.15): whether the server reported a stream state for this
+  /// publication (the default `paused` is not a report).
+  bool _streamStateReported = false;
+
+  /// GRAVIX (0.4.15, R1/S4): the server said it paused this stream (a paused
+  /// stream legitimately sends nothing). False while nothing was reported.
+  @internal
+  bool get gravixServerPaused => _streamStateReported && _streamState == StreamState.paused;
+
+  /// GRAVIX (0.4.15, S5): a kept publication's new subscription starts with no
+  /// report, as a new publication would.
+  @internal
+  void gravixResetStreamState() {
+    _streamStateReported = false;
+    _streamState = StreamState.paused;
+  }
+
   @internal
   Future<void> updateStreamState(StreamState streamState) async {
+    _streamStateReported = true;
     // return if no change
     if (_streamState == streamState) return;
     _streamState = streamState;
@@ -170,7 +189,10 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
         .nonNulls
         .toList();
 
-    logger.finer('[Visibility] ${track?.sid} watching ${viewSizes.length} views...');
+    // GRAVIX (2026-10-11, perf): guarded; this runs every 300 ms per remote video.
+    if (logger.isLoggable(Level.FINER)) {
+      logger.finer('[Visibility] ${track?.sid} watching ${viewSizes.length} views...');
+    }
 
     if (viewSizes.isNotEmpty) {
       final largestSize = viewSizes.reduce(maxOfSizes);

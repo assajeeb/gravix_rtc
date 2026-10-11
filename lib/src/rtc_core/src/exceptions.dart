@@ -83,6 +83,20 @@ class TrackCreateException extends GravixRtcException {
   TrackCreateException([String msg = 'Failed to create track']) : super._(msg);
 }
 
+/// The platform audio session could not be configured for, or does not permit,
+/// the requested audio operation (iOS; macOS has no audio session, so engine
+/// failures there keep their generic error codes).
+/// Common reasons:
+/// - Recording was started while the app-managed audio session
+///   (`AudioSessionManagementMode.manual`) has a category without input.
+/// - The system rejected the audio session configuration.
+///
+/// 0.4.15 (ported from the upstream client SDK 2.12.0): these used to surface
+/// as an `AudioProcessingException`, which named a cause they never had.
+class AudioSessionException extends GravixRtcException {
+  AudioSessionException([String msg = 'Audio session error']) : super._(msg);
+}
+
 /// Failed to publish a local track.
 /// Common reasons:
 /// - Token does not have track publish permission.

@@ -127,6 +127,21 @@ void main() {
     );
   });
 
+  // 0.4.15 (2026-10-10, field report item 7c; upstream client SDK 2.12.0):
+  // a failed recorder pre-warm on Android is best effort and must never abort
+  // the microphone, whatever code a native side answers with.
+  test('Android: a failed pre-warm (applyFailed) does not abort the microphone', () async {
+    gravixExplicitRecordingDebugPlatform = PlatformType.android;
+    try {
+      final started = await gravixStartExplicitRecording(
+        () async => throw PlatformException(code: 'applyFailed', message: 'prewarm failed'),
+      );
+      expect(started, isFalse);
+    } finally {
+      gravixExplicitRecordingDebugPlatform = null;
+    }
+  });
+
   test('a start that works reports started', () async {
     expect(await gravixStartExplicitRecording(() async {}), isTrue);
   });

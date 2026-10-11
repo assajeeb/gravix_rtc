@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:audio_session/audio_session.dart';
 import 'package:collection/collection.dart'; // firstOrNull
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCPeerConnection, RTCPeerConnectionState;
 import 'package:uuid/uuid.dart';
 
@@ -31,6 +32,7 @@ import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
 import '../rtc_core/src/support/websocket/standby.dart';
+import 'gravix_data_saver.dart';
 import 'gravix_red_mode.dart';
 import '../large_room/gravix_publish_presets.dart' show GravixPublishPresets;
 import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMute;
@@ -96,6 +98,7 @@ class GravixRoomService implements GravixAudioHost {
     this.analytics,
     this.reconnectPolicy,
     this.connectOptions,
+    this.recovery = const GravixRecoveryOptions(),
     GravixRegionProber? regionProber,
     GravixRegionDecisionCache? regionDecisionCache,
     @visibleForTesting Future<void> Function(Room room, String url, String token)? connectRoom,
@@ -140,6 +143,9 @@ class GravixRoomService implements GravixAudioHost {
   /// No-op unless [GravixAudioRouting.v2] is on.
   void setAppBackgrounded(bool backgrounded) {
     _appBackgrounded = backgrounded;
+    // the data saver (video rooms): a camera publication lost in the background
+    // is restored now, and the stale score of the paused camera is ignored
+    if (!backgrounded && _room != null) unawaited(_dataSaver.onForeground());
     if (!_v2Active) return;
     if (!backgrounded) {
       // Coming back to the foreground is one of the moments another app's call
@@ -182,20 +188,55 @@ class GravixRoomService implements GravixAudioHost {
   Timer? _statsTimer; // debug video stats loop
 
   // ══ AUTO DATA-SAVER (host uplink protection) ═══════════════════════════════
-  // Simulcast serves weak VIEWERS; this protects weak HOSTS. A 3s monitor
-  // watches the host's own connectionQuality:
-  //   poor/lost for ≥10s  → republish single-layer @600kbps (data saver ON)
-  //   excellent for ≥45s  → republish full profile      (data saver OFF)
-  // Hysteresis + a 60s minimum gap between switches prevent oscillation.
+  // Simulcast serves weak VIEWERS; this protects weak HOSTS: see
+  // [GravixDataSaver] (poor/lost for ≥10s → low-data profile, excellent for
+  // ≥45s → normal profile, 60s minimum gap between switches). Since
+  // 2026-10-11 (recovery.hostCameraGuard) the switch is in place, paused
+  // cameras / a backgrounded app are not read as a poor network, and a lost
+  // camera publication is restored.
   final ValueNotifier<bool> lowDataActive = ValueNotifier<bool>(false);
-  Timer? _qualityTimer;
-  DateTime? _poorSince;
-  DateTime? _goodSince;
-  DateTime _lastProfileSwitch = DateTime.fromMillisecondsSinceEpoch(0);
-  bool _switchingProfile = false;
-  static const _poorEngage = Duration(seconds: 10);
-  static const _goodRestore = Duration(seconds: 45);
-  static const _minSwitchGap = Duration(seconds: 60);
+  late final GravixDataSaver _dataSaver = GravixDataSaver(
+    room: () => _room,
+    cameraEnabled: isCameraEnabled,
+    lowDataActive: lowDataActive,
+    publishOptions: _videoPublishOptions,
+    inForeground: () => gravixHostInForeground(appBackgrounded: _appBackgrounded, state: _lifecycleState()),
+    reopenCamera: _reopenCamera,
+    guard: recovery.hostCameraGuard,
+    onEvent: _onDataSaverEvent,
+  );
+
+  @visibleForTesting
+  GravixDataSaver get debugDataSaver => _dataSaver;
+
+  /// The data saver's last event: a profile switch, a failed one (and its
+  /// rollback), a restored or lost camera publication. Null until the first.
+  final ValueNotifier<GravixDataSaverEvent?> dataSaverEvent = ValueNotifier<GravixDataSaverEvent?>(null);
+
+  /// Called with every [dataSaverEvent].
+  void Function(GravixDataSaverEvent event)? onDataSaverEvent;
+
+  void _onDataSaverEvent(GravixDataSaverEvent event) {
+    debugPrint('📶 data-saver event: $event');
+    if (_disposed) return;
+    dataSaverEvent.value = event;
+    onDataSaverEvent?.call(event);
+  }
+
+  static AppLifecycleState? _lifecycleState() {
+    try {
+      return WidgetsBinding.instance.lifecycleState;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// A fresh camera capture, published (the camera-on path). The data saver's
+  /// restore and rollback: the old track is disposed or its publication gone.
+  Future<bool> _reopenCamera() async {
+    await _setCameraEnabledNow(true);
+    return localParticipant?.getTrackPublicationBySource(TrackSource.camera) != null;
+  }
 
   /// Background-music mixing bridge. Playback
   /// (start/pause/resume/stop/seek/volume) is app-controlled through this
@@ -276,6 +317,11 @@ class GravixRoomService implements GravixAudioHost {
   Future<void> _connectRoom(Room room, String url, String token) =>
       _connectRoomSeam?.call(room, url, token) ??
       room.connect(url, token, connectOptions: _attemptConnectOptions ?? connectOptions);
+
+  /// GRAVIX (0.4.15): region failover, resume and rejoin behaviour of every room
+  /// this service joins ([RoomOptions.recovery]). `GravixRecoveryOptions.legacy`
+  /// = the 0.4.14 behaviour.
+  final GravixRecoveryOptions recovery;
 
   /// The core's connect options for every join of this service: timeouts and
   /// the join retry (`ConnectOptions.joinRetries`, default 2 retries;
@@ -512,64 +558,6 @@ class GravixRoomService implements GravixAudioHost {
       // extra encoding.
       videoSimulcastLayers: lowData ? const [] : const [GravixPublishPresets.lowLayer],
     );
-  }
-
-  void _startQualityMonitor() {
-    _qualityTimer?.cancel();
-    _poorSince = null;
-    _goodSince = null;
-    _qualityTimer = Timer.periodic(const Duration(seconds: 3), (_) => _checkQuality());
-  }
-
-  void _checkQuality() {
-    final lp = _room?.localParticipant;
-    if (lp == null || !isCameraEnabled.value || _switchingProfile) return;
-    final q = lp.connectionQuality;
-    final now = DateTime.now();
-
-    final isPoor = q == ConnectionQuality.poor || q == ConnectionQuality.lost;
-    final isExcellent = q == ConnectionQuality.excellent;
-
-    _poorSince = isPoor ? (_poorSince ?? now) : null;
-    _goodSince = isExcellent ? (_goodSince ?? now) : null;
-
-    if (now.difference(_lastProfileSwitch) < _minSwitchGap) return;
-
-    if (!lowDataActive.value && _poorSince != null && now.difference(_poorSince!) >= _poorEngage) {
-      _applyPublishProfile(lowData: true);
-    } else if (lowDataActive.value && _goodSince != null && now.difference(_goodSince!) >= _goodRestore) {
-      _applyPublishProfile(lowData: false);
-    }
-  }
-
-  /// Republish the live camera track with a new profile — no reconnect.
-  Future<void> _applyPublishProfile({required bool lowData}) async {
-    if (_switchingProfile) return;
-    _switchingProfile = true;
-    try {
-      final lp = _room?.localParticipant;
-      final pub = lp?.getTrackPublicationBySource(TrackSource.camera);
-      final track = pub?.track;
-      if (lp == null || pub == null || track is! LocalVideoTrack) return;
-
-      debugPrint(
-        '📶 auto data-saver: switching to '
-        '${lowData ? "LOW (single-layer 600k)" : "NORMAL (simulcast 800k)"} '
-        '(quality=${lp.connectionQuality})',
-      );
-      // stopLocalTrackOnUnpublish=false keeps the capturer + beauty processor
-      // alive; viewers see at most a sub-second gap while layers renegotiate.
-      await lp.removePublishedTrack(pub.sid);
-      await lp.publishVideoTrack(track, publishOptions: _videoPublishOptions(lowData));
-      lowDataActive.value = lowData;
-      _lastProfileSwitch = DateTime.now();
-      _poorSince = null;
-      _goodSince = null;
-    } catch (e) {
-      debugPrint('Error applying publish profile: $e');
-    } finally {
-      _switchingProfile = false;
-    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1117,12 +1105,15 @@ class GravixRoomService implements GravixAudioHost {
           defaultAudioCaptureOptions: _audioCaptureOptions,
           defaultAudioPublishOptions: _audioPublishOptions(red: red == GravixRedMode.on),
           defaultVideoPublishOptions: _videoPublishOptions(lowDataMode),
-          // AUTO DATA-SAVER needs republish-with-new-options WITHOUT killing
-          // the capturer (and the beauty processor attached to its source):
-          // unpublish must NOT stop the local track.
+          // Skips the explicit track.stop() on unpublish ONLY. It does not keep
+          // an unpublished track reusable: removePublishedTrack always ends in
+          // pub.dispose(), which disposes the track (the 0.4.14 data saver's
+          // republish failed on exactly that - iOS field 2026-10-11). The data
+          // saver now changes the encodings in place (GravixDataSaver).
           stopLocalTrackOnUnpublish: false,
           reconnectPolicy: reconnectPolicy,
           foregroundService: foregroundService,
+          recovery: recovery,
           // (RoomOptions.fastPublish used to be set here. Nothing reads it - not
           // in this fork and not upstream; publisher negotiation is started early
           // by the SERVER's JoinResponse.fastPublish, in engine.dart. Setting it
@@ -1130,6 +1121,8 @@ class GravixRoomService implements GravixAudioHost {
         ),
       );
 
+      // GRAVIX (0.4.15): the region entries name Room.connectedRegion
+      room.gravixRegionHints = [for (final e in _regionEntries) e];
       // <candidate:fastAnswer>
       room.engine.gravixFastAnswer = fastAnswer;
       // </candidate:fastAnswer>
@@ -1283,7 +1276,7 @@ class GravixRoomService implements GravixAudioHost {
       // Auto data-saver: hosts only (video publish), runs in release too.
       if (enableVideo) {
         lowDataActive.value = lowDataMode;
-        _startQualityMonitor();
+        _dataSaver.start();
       }
 
       // Replicate legacy onUserJoined firing for everyone already present.
@@ -1486,7 +1479,7 @@ class GravixRoomService implements GravixAudioHost {
 
   /// Call when the app comes back to the foreground: every standby connection is
   /// closed and opened again. One opened while the app was paused (behind a
-  /// permission dialog, field 2026-09-30) is not trusted -- the join's upgrade
+  /// permission dialog) is not trusted -- the join's upgrade
   /// over such a connection went unanswered. Never throws.
   Future<void> reopenStandby() => GravixStandby.reopenAll();
 
@@ -2637,7 +2630,7 @@ class GravixRoomService implements GravixAudioHost {
   /// Become a speaker (true) or listener (false).
   /// Requires token canPublish=true to actually publish.
   ///
-  /// Toggles coalesce (field 2026-09-30: ~30 taps in 30 s): the LAST requested
+  /// Toggles coalesce (e.g. ~30 taps in 30 s): the LAST requested
   /// state wins, at most one mic transition runs at a time, and calls made
   /// while one runs only update the wanted state. [isMicMuted] follows the
   /// request at once (what the user tapped) and is corrected if it fails.
@@ -2902,31 +2895,48 @@ class GravixRoomService implements GravixAudioHost {
 
     final room = _room;
     if (room == null) return;
+    await dumpVideoStatsFor(room);
+  }
 
+  /// The body of [dumpVideoStats] for [room] (debug builds only, by the caller).
+  @visibleForTesting
+  static Future<void> dumpVideoStatsFor(Room room) async {
+    // Every stats read is caught (EMU-OLD n10, 2026-10-11): during a full rejoin
+    // the old sender's native peer connection is already gone and flutter_webrtc
+    // throws "peerConnectionGetStats(): peerConnection is null"; from this
+    // Timer.periodic that was an unhandled exception. A debug metric never throws.
     // Outbound (your own publish) — one entry per simulcast layer.
     final localPub = room.localParticipant?.getTrackPublicationBySource(TrackSource.camera);
     final localTrack = localPub?.track;
     if (localTrack is LocalVideoTrack) {
-      final stats = await localTrack.getSenderStats();
-      for (final s in stats) {
-        debugPrint(
-          '📤 OUT layer=${s.rid ?? "-"} '
-          '${s.frameWidth}x${s.frameHeight} @${s.framesPerSecond}fps  '
-          'limit=${s.qualityLimitationReason}',
-        );
+      try {
+        final stats = await localTrack.getSenderStats();
+        for (final s in stats) {
+          debugPrint(
+            '📤 OUT layer=${s.rid ?? "-"} '
+            '${s.frameWidth}x${s.frameHeight} @${s.framesPerSecond}fps  '
+            'limit=${s.qualityLimitationReason}',
+          );
+        }
+      } catch (e) {
+        debugPrint('📤 OUT stats unavailable ($e)');
       }
     }
 
     // Inbound (remote hosts you're watching).
-    for (final p in room.remoteParticipants.values) {
-      for (final pub in p.videoTrackPublications) {
+    for (final p in room.remoteParticipants.values.toList()) {
+      for (final pub in p.videoTrackPublications.toList()) {
         final t = pub.track;
         if (t is RemoteVideoTrack) {
-          final s = await t.getReceiverStats();
-          debugPrint(
-            '📥 IN ${p.identity} '
-            '${s?.frameWidth}x${s?.frameHeight} @${s?.framesPerSecond}fps',
-          );
+          try {
+            final s = await t.getReceiverStats();
+            debugPrint(
+              '📥 IN ${p.identity} '
+              '${s?.frameWidth}x${s?.frameHeight} @${s?.framesPerSecond}fps',
+            );
+          } catch (e) {
+            debugPrint('📥 IN ${p.identity} stats unavailable ($e)');
+          }
         }
       }
     }
@@ -3005,6 +3015,9 @@ class GravixRoomService implements GravixAudioHost {
     _abandonJoining();
     _redAutoTimer?.cancel();
     _redAutoTimer = null;
+    // the data saver first: its camera restore must not reopen the camera the
+    // teardown below unpublishes
+    _dataSaver.stop();
     // a publication still running behind connect() finishes first: tearing the
     // tracks down under it could leave a camera capturing after the leave
     await _awaitInitialPublish();
@@ -3041,12 +3054,9 @@ class GravixRoomService implements GravixAudioHost {
     } finally {
       _statsTimer?.cancel();
       _statsTimer = null;
-      _qualityTimer?.cancel();
-      _qualityTimer = null;
+      _dataSaver.stop();
       _redAutoTimer?.cancel();
       _redAutoTimer = null;
-      _poorSince = null;
-      _goodSince = null;
       if (!_disposed) {
         lowDataActive.value = false;
         isConnected.value = false;
@@ -3080,6 +3090,7 @@ class GravixRoomService implements GravixAudioHost {
     music.dispose();
     await roomMusic.dispose();
     lowDataActive.dispose();
+    dataSaverEvent.dispose();
     activeSpeakers.dispose();
     isConnected.dispose();
     isJoining.dispose();

@@ -21,6 +21,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:logging/logging.dart' show Level;
 import 'package:meta/meta.dart';
 
 import '../events.dart';
@@ -91,7 +92,9 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
   @internal
   SignalClient(WebSocketConnector wsConnector) : _wsConnector = wsConnector {
     events.listen((event) {
-      logger.fine('[SignalEvent] $event');
+      // GRAVIX (2026-10-11, perf): guarded. The interpolation stringified every
+      // signal event (protobuf lists as text) in release too, where INFO drops it.
+      if (logger.isLoggable(Level.FINE)) logger.fine('[SignalEvent] $event');
     });
 
     onDispose(() async {
@@ -112,6 +115,41 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     });
   }
 
+  /// GRAVIX (0.4.15): the dial timeout of the next [connect] only.
+  @internal
+  Duration? gravixNextDialTimeout;
+
+  /// GRAVIX (2026-10-11, GravixRecoveryOptions.silentHostFailFast): the host
+  /// whose last signal dial failed with no connection up at all, and when.
+  String? _gravixSilentHost;
+  DateTime? _gravixSilentAt;
+  static const _gravixSilentMemory = Duration(seconds: 60);
+
+  bool _gravixWasSilent(String host) {
+    final at = _gravixSilentAt;
+    return _gravixSilentHost == host && at != null && DateTime.timestamp().difference(at) < _gravixSilentMemory;
+  }
+
+  /// GRAVIX (2026-10-11, silentHostFailFast): a reconnect attempt that ends
+  /// without leaving the url forgets the silent host (Engine.restartConnection):
+  /// failing fast only pays when it leads to another region.
+  @internal
+  void gravixForgetSilentHost() {
+    _gravixSilentHost = null;
+    _gravixSilentAt = null;
+  }
+
+  void _gravixNoteDialFailure(String host, Object error) {
+    if (error is! GravixDialTimeoutException) return;
+    if (error.noConnection) {
+      _gravixSilentHost = host;
+      _gravixSilentAt = DateTime.timestamp();
+    } else if (_gravixSilentHost == host) {
+      // a connection came up: the host answers (a slow path, not a silent host)
+      gravixForgetSilentHost();
+    }
+  }
+
   @internal
   Future<void> connect(
     String uriString,
@@ -121,6 +159,18 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     bool reconnect = false,
     lk_models.ReconnectReason? reconnectReason,
   }) async {
+    // GRAVIX (0.4.15): the WebSocket open timeout of this dial only (a short
+    // same-url retry, set by the engine); null = timeouts.connection
+    final gravixDialTimeout = gravixNextDialTimeout;
+    gravixNextDialTimeout = null;
+    final dialTimeout = gravixDialTimeout ?? connectOptions.timeouts.connection;
+    // GRAVIX (2026-10-11, GravixRecoveryOptions.boundedSignalConnect): every
+    // network step of this connect -- the dial, and the validate request after a
+    // failed dial -- ends at [dialTimeout] and closes its socket. Soak 2026-10-11
+    // (route to the SFUs blackholed for ~2 min): the full reconnect's validate
+    // request had no timeout and held the host's reconnect for 133 s (Android's
+    // SYN timeout), 46 s past the path's return. Null: the 0.4.14 connect.
+    final gravixDialBound = roomOptions.recovery.boundedSignalConnect ? dialTimeout : null;
     if (!kIsWeb && !lkPlatformIsTest()) {
       _connectivityResult = await Connectivity().checkConnectivity();
       await _connectivitySubscription?.cancel();
@@ -184,27 +234,73 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         );
       }
       // Attempt to connect
-      final dialing = _wsConnector(
-        rtcUri,
-        options: WebSocketEventHandlers(
-          onData: (dynamic m) {
-            if (gen == _connectGen) return _onSocketData(m);
-          },
-          onDispose: () {
-            socketClosed = true;
-            if (gen == _connectGen) _onSocketDispose();
-          },
-          onError: (dynamic e) {
-            if (gen == _connectGen) _onSocketError(e);
-          },
-        ),
-        headers: {'Authorization': 'Bearer $token'},
-        networkOptions: roomOptions.networkOptions,
-        // the taken standby itself: its client and its upgrade bound
-        preconnected: taken.usable ? taken : null,
+      final handlers = WebSocketEventHandlers(
+        onData: (dynamic m) {
+          if (gen == _connectGen) return _onSocketData(m);
+        },
+        onDispose: () {
+          socketClosed = true;
+          if (gen == _connectGen) _onSocketDispose();
+        },
+        onError: (dynamic e) {
+          if (gen == _connectGen) _onSocketError(e);
+        },
       );
+      final headers = {'Authorization': 'Bearer $token'};
+      // the taken standby itself: its client and its upgrade bound
+      final preconnected = taken.usable ? taken : null;
+      final connector = _wsConnector;
+      final bounded = gravixDialBound != null && connector is GravixBoundedWebSocketConnector;
+      // GRAVIX (2026-10-11, signalDialCap): a fresh join's dial on the default
+      // timeout may take up to the cap, raced by a parallel connection every
+      // [dialTimeout]. Device recheck 2026-10-11 ("Very Bad Network", RTT 1-2 s,
+      // 25-35 % loss): a dial not through within 10 s failed the join, on main
+      // 36862c4 too, on a path that works. Not a resume (the server's disconnect
+      // grace, the resume -> full escalation) nor the short same-url retry.
+      final cap = roomOptions.recovery.signalDialCap;
+      final hedged = bounded && !reconnect && gravixDialTimeout == null && cap != null && cap > dialTimeout;
+      final dialCap = hedged ? cap : dialTimeout;
+      // GRAVIX (2026-10-11, silentHostFailFast): the last dial to this host got
+      // no connection at all (REGION-FAILOVER r552: two resumes, then a 30 s
+      // race and a 10 s validate to a DROPped blr1). This one must get a
+      // connection within [dialTimeout], without a race; one that comes up keeps
+      // [dialCap] for the upgrade's answer.
+      final failFast = bounded && roomOptions.recovery.silentHostFailFast;
+      final silentBefore = failFast && hedged && _gravixWasSilent(rtcUri.host);
+      // GRAVIX (2026-10-11, signalUpgradeWindow): RECHECK r366 / r375 ("Very Bad
+      // Network"): the race won (TCP + TLS up at 14.3 / 24.3 s) and the 30 s cap
+      // closed the dial before the upgrade's answer. Once a connection is up the
+      // host is alive: the upgrade gets its own window, up to the ceiling.
+      final window = roomOptions.recovery.signalUpgradeWindow;
+      final ceiling = roomOptions.recovery.signalDialCeiling;
+      final extended = hedged && window != null;
+      final dialEnd = extended && ceiling > dialCap ? ceiling : dialCap;
+      // GRAVIX (2026-10-11, boundedSignalConnect): the dial closes its socket at
+      // this bound instead of leaving it to the OS (see websocket/io.dart _bounded)
+      final dialing = bounded
+          ? connector(
+              rtcUri,
+              options: handlers,
+              headers: headers,
+              networkOptions: roomOptions.networkOptions,
+              preconnected: preconnected,
+              connectTimeout: dialCap,
+              hedgeAfter: hedged && !silentBefore ? dialTimeout : null,
+              connectWithin: silentBefore ? dialTimeout : null,
+              upgradeWindow: extended ? window : null,
+              dialCeiling: extended ? ceiling : null,
+            )
+          : connector(
+              rtcUri,
+              options: handlers,
+              headers: headers,
+              networkOptions: roomOptions.networkOptions,
+              preconnected: preconnected,
+            );
       try {
-        final ws = await dialing.timeout(connectOptions.timeouts.connection);
+        // (failFast: the connector ends the dial itself at its bounds and says
+        // whether any connection came up; this is only the safety net)
+        final ws = await dialing.timeout(failFast || extended ? dialEnd + const Duration(seconds: 1) : dialCap);
         if (gen != _connectGen || isDisposed) {
           // superseded while dialling (cleanUp / a newer connect): this socket
           // must not become the session. A fresh join's socket gets the leave
@@ -222,7 +318,9 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
           throw WebSocketException('socket closed during connect');
         }
         _ws = ws;
-      } catch (_) {
+        if (failFast) gravixForgetSilentHost();
+      } catch (e) {
+        if (failFast) _gravixNoteDialFailure(rtcUri.host, e);
         // GRAVIX: a dial that answers after the join gave up (the connection
         // timeout) is a server session nobody reads -- a ghost participant until
         // the SFU's ping timeout: close it when it lands. (Caught broadly: this
@@ -272,6 +370,17 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       // Skip validation if reconnect mode
       if (reconnect) rethrow;
 
+      // GRAVIX (2026-10-11, silentHostFailFast): no connection to this host came
+      // up, so its /rtc/validate would time out the same way (r552: 10 s more
+      // before the failover); a 401/403 can only come over a connection.
+      if (roomOptions.recovery.silentHostFailFast &&
+          socketError is GravixDialTimeoutException &&
+          socketError.noConnection) {
+        logger.fine('no connection to ${rtcUri.host} came up: not asking it /rtc/validate');
+        events.emit(SignalDisconnectedEvent(reason: DisconnectReason.signalingConnectionFailure));
+        rethrow;
+      }
+
       // Attempt Validation
       var finalError = socketError;
       try {
@@ -289,6 +398,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
           validateUri,
           headers: {'Authorization': 'Bearer $token'},
           networkOptions: roomOptions.networkOptions,
+          // GRAVIX (2026-10-11): bounded like the dial (null: unbounded, 0.4.14)
+          timeout: gravixDialBound,
         );
         if (validateResponse.statusCode != 200) {
           finalError = ConnectException(

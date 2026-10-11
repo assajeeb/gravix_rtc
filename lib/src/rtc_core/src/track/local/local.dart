@@ -17,10 +17,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
 
+import '../../audio/audio_engine_error.dart';
 import '../../audio/audio_frame_capture.dart';
 import '../../events.dart';
 import '../../exceptions.dart';
@@ -28,6 +30,7 @@ import '../../extensions.dart';
 import '../../internal/events.dart';
 import '../../logger.dart';
 import '../../participant/remote.dart';
+import '../../support/native.dart';
 import '../../support/platform.dart';
 import '../../types/other.dart';
 import '../options.dart';
@@ -248,6 +251,21 @@ abstract class LocalTrack extends Track {
           : false,
       'video': options is VideoCaptureOptions ? options.toMediaConstraintsMap() : false,
     };
+
+    if (options is AudioCaptureOptions && lkPlatformIsApple()) {
+      // GRAVIX 0.4.15 (ported from the upstream client SDK 2.12.0): the WebRTC
+      // audio device only checks microphone permission and fails when it is
+      // missing, so the SDK requests it before opening the mic. On iOS this
+      // fails fast while the app is not in the foreground instead of
+      // suspending getUserMedia (and the publish queue behind it) on a prompt
+      // the system cannot show yet.
+      try {
+        await Native.ensureMicrophoneAccess();
+      } on PlatformException catch (error) {
+        throw audioEngineExceptionFrom(error) ??
+            TrackCreateException(error.message ?? 'Microphone permission is not granted');
+      }
+    }
 
     final rtc.MediaStream stream;
     if (options is ScreenShareCaptureOptions) {

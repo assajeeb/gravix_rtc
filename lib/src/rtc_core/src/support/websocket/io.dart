@@ -16,7 +16,9 @@
 import 'dart:async';
 import 'dart:io' as io;
 
-import '../../exceptions.dart';
+// `show`: the whole library would shadow dart:async's TimeoutException, which a
+// bounded dial throws (the same type as the signal client's own dial timeout)
+import '../../exceptions.dart' show CertificatePinningException;
 import '../../extensions.dart';
 import '../../logger.dart';
 import '../../options.dart';
@@ -30,13 +32,72 @@ Future<GravixRtcWebSocketIO> lkWebSocketConnect(
   Map<String, String>? headers,
   NetworkOptions? networkOptions = const NetworkOptions(),
   Object? preconnected,
+  Duration? connectTimeout,
+  Duration? hedgeAfter,
+  Duration? connectWithin,
+  Duration? upgradeWindow,
+  Duration? dialCeiling,
 }) => GravixRtcWebSocketIO.connect(
   uri,
   options: options,
   headers: headers,
   networkOptions: networkOptions,
   preconnected: preconnected,
+  connectTimeout: connectTimeout,
+  hedgeAfter: hedgeAfter,
+  connectWithin: connectWithin,
+  upgradeWindow: upgradeWindow,
+  dialCeiling: dialCeiling,
 );
+
+/// GRAVIX (2026-10-11): the HTTP clients of one bounded dial; [fire] (the
+/// bound passed) force-closes them, which cancels a TCP / TLS connect still in
+/// progress and drops a connection whose upgrade has not been answered.
+class _GravixDialAbort {
+  _GravixDialAbort(this.bound, this.hedge);
+  final Duration bound;
+
+  /// GRAVIX (2026-10-11, silentHostFailFast): a connection of this dial came up
+  /// (TCP, and TLS for wss): the host answers. [observed]: the dial's
+  /// connections can be seen (its own clients, or a standby connection, which
+  /// is up already); not through WebSocket.connect's shared client.
+  bool connected = false;
+  bool observed = false;
+
+  /// GRAVIX (2026-10-11, signalUpgradeWindow): told once, when the first
+  /// connection comes up.
+  void Function()? onConnected;
+
+  void markConnected() {
+    if (connected) return;
+    connected = true;
+    onConnected?.call();
+  }
+
+  /// GRAVIX (2026-10-11): the dial's connections are raced (null: one
+  /// connection, connect-timed-out at [bound])
+  final GravixConnectHedge? hedge;
+  final _clients = <io.HttpClient>[];
+  bool fired = false;
+
+  /// Registers [client] (closed at once when the bound already passed).
+  io.HttpClient track(io.HttpClient client) {
+    _clients.add(client);
+    if (fired) _close(client);
+    return client;
+  }
+
+  void fire() {
+    fired = true;
+    _clients.forEach(_close);
+  }
+
+  static void _close(io.HttpClient client) {
+    try {
+      client.close(force: true);
+    } catch (_) {}
+  }
+}
 
 class GravixRtcWebSocketIO extends GravixRtcWebSocket {
   final io.WebSocket _ws;
@@ -82,13 +143,149 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
     }
   }
 
+  /// [connectTimeout] (GRAVIX, 2026-10-11): see [_bounded]; null = the dial is
+  /// unbounded here (the 0.4.14 dial: the caller's timeout abandons it, its
+  /// socket keeps connecting until the OS gives up). [hedgeAfter] (below
+  /// [connectTimeout]): a connection not up after it gets another one in
+  /// parallel, again every [hedgeAfter] (GravixConnectHedge, http_client/io.dart).
   static Future<GravixRtcWebSocketIO> connect(
     Uri uri, {
     WebSocketEventHandlers? options,
     Map<String, String>? headers,
     NetworkOptions? networkOptions = const NetworkOptions(),
     Object? preconnected,
-  }) async {
+    Duration? connectTimeout,
+    Duration? hedgeAfter,
+    Duration? connectWithin,
+    Duration? upgradeWindow,
+    Duration? dialCeiling,
+  }) {
+    if (connectTimeout == null) return _connect(uri, options, headers, networkOptions, preconnected, null);
+    final hedge = hedgeAfter != null && hedgeAfter > Duration.zero && hedgeAfter < connectTimeout
+        ? GravixConnectHedge(hedgeAfter)
+        : null;
+    return _bounded(
+      connectTimeout,
+      hedge,
+      connectWithin != null && connectWithin > Duration.zero && connectWithin < connectTimeout ? connectWithin : null,
+      upgradeWindow,
+      dialCeiling,
+      (abort) => _connect(uri, options, headers, networkOptions, preconnected, abort),
+    );
+  }
+
+  /// The dial, bounded: past [bound] it fails with a (dart:async)
+  /// TimeoutException and every connection it opened or was opening is closed.
+  ///
+  /// Soak 2026-10-11 02:35-02:39 (runs/s01_fix): the ISP blackholed the route to
+  /// the SFUs while Wi-Fi stayed up. The signal client gave each dial up after its
+  /// 10 s timeout, but the dial itself went on: `io.WebSocket.connect` uses a
+  /// shared HttpClient without a connection timeout, so every SYN kept being
+  /// retried until Android gave up (errno 110 at 02:38:11, :21, :34 for dials
+  /// started at 02:36:02, :12, :21 -- ~133 s on the Infinix). A dial still
+  /// connecting when the path came back could even open late: a server session
+  /// nobody reads. Now the dial uses its own client, connect-timed-out at the
+  /// socket (TCP + TLS) and force-closed at [bound] (which also covers an upgrade
+  /// that is never answered). TimeoutException, not WebSocketException: the
+  /// engine escalates a resume on a refused socket at once, and on dial timeouts
+  /// only after two (Engine._unrecoveredResumesBeforeFull); a blackholed path
+  /// must keep reading as a timeout.
+  ///
+  /// With a [hedge] (device recheck 2026-10-11, "Very Bad Network": a dial not
+  /// through within 10 s failed the join on a path that works), the connections
+  /// are raced inside the dial's client and [bound] is the whole dial's cap.
+  ///
+  /// Failing at a bound, the error is a [GravixDialTimeoutException] whose
+  /// `noConnection` says whether any connection came up. [connectWithin]
+  /// (silentHostFailFast): no connection up by then -> fail then, without
+  /// waiting for [bound] (REGION-FAILOVER r552: a 30 s raced dial to a host
+  /// that had answered no connection for 20 s).
+  ///
+  /// [upgradeWindow] (signalUpgradeWindow; RECHECK r366 / r375: TCP + TLS up at
+  /// 14.3 / 24.3 s, the upgrade unanswered at the 30 s cap): when the first
+  /// connection comes up, the end moves to that moment + [upgradeWindow], capped
+  /// at [dialCeiling] from the start, never earlier than [bound].
+  static Future<GravixRtcWebSocketIO> _bounded(
+    Duration bound,
+    GravixConnectHedge? hedge,
+    Duration? connectWithin,
+    Duration? upgradeWindow,
+    Duration? dialCeiling,
+    Future<GravixRtcWebSocketIO> Function(_GravixDialAbort abort) dial,
+  ) {
+    final abort = _GravixDialAbort(bound, hedge);
+    final result = Completer<GravixRtcWebSocketIO>();
+    final watch = Stopwatch()..start();
+    void expire(Duration at) {
+      if (result.isCompleted) return;
+      logger.fine('[WebSocketIO] not connected within ${at.inMilliseconds} ms, aborting the dial');
+      abort.fire();
+      result.completeError(
+        GravixDialTimeoutException(
+          'signal dial not connected within the bound',
+          at,
+          noConnection: abort.observed && !abort.connected,
+        ),
+      );
+    }
+
+    var timer = Timer(bound, () => expire(bound));
+    if (upgradeWindow != null) {
+      abort.onConnected = () {
+        if (result.isCompleted) return;
+        final up = watch.elapsed;
+        var end = up + upgradeWindow;
+        if (dialCeiling != null && end > dialCeiling) end = dialCeiling;
+        if (end <= bound) return;
+        timer.cancel();
+        logger.fine(
+          '[WebSocketIO] connection up after ${up.inMilliseconds} ms: the upgrade may take until '
+          '${end.inMilliseconds} ms',
+        );
+        timer = Timer(end - watch.elapsed, () => expire(end));
+      };
+    }
+    final connectTimer = connectWithin == null
+        ? null
+        : Timer(connectWithin, () {
+            if (result.isCompleted || !abort.observed || abort.connected) return;
+            logger.fine(
+              '[WebSocketIO] no connection within ${connectWithin.inMilliseconds} ms '
+              '(the last dial to this host had none either), aborting the dial',
+            );
+            abort.fire();
+            result.completeError(
+              GravixDialTimeoutException('signal dial: no connection came up', connectWithin, noConnection: true),
+            );
+          });
+    dial(abort).then(
+      (ws) {
+        timer.cancel();
+        connectTimer?.cancel();
+        if (result.isCompleted) {
+          // opened as the bound passed: nobody will read it
+          unawaited(ws.dispose());
+          return;
+        }
+        result.complete(ws);
+      },
+      onError: (Object e, StackTrace st) {
+        timer.cancel();
+        connectTimer?.cancel();
+        if (!result.isCompleted) result.completeError(e, st);
+      },
+    );
+    return result.future;
+  }
+
+  static Future<GravixRtcWebSocketIO> _connect(
+    Uri uri,
+    WebSocketEventHandlers? options,
+    Map<String, String>? headers,
+    NetworkOptions? networkOptions,
+    Object? preconnected,
+    _GravixDialAbort? abort,
+  ) async {
     logger.fine('[WebSocketIO] Connecting(uri: ${uri.toString()})...');
     final resolvedNetworkOptions = networkOptions ?? const NetworkOptions();
     // The standby client: its keep-alive pool holds a TLS connection to this host,
@@ -105,13 +302,43 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
       warmClient = preconnected;
     }
     if (warmClient != null) {
-      final raced = await _raceStandby(uri, warmClient, bound, headers, resolvedNetworkOptions, options);
+      // (bounded: the bound closes the warm connection too, its upgrade unanswered)
+      abort?.track(warmClient);
+      // (a standby connection is up already: never a silent host)
+      abort
+        ?..observed = true
+        ..markConnected();
+      final raced = await _raceStandby(uri, warmClient, bound, headers, resolvedNetworkOptions, options, abort);
       if (raced != null) return raced;
       // the warm connection failed outright (not an answer from the server): cold,
       // as if there had been no standby
     }
-    final useCustomClient = resolvedNetworkOptions.certificatePinning?.isEnabled ?? false;
-    final customClient = useCustomClient ? createSdkIoHttpClient(resolvedNetworkOptions) : null;
+    // GRAVIX (2026-10-11): a bounded dial gets its own client instead of
+    // WebSocket.connect's shared one, so the bound can close it; its socket
+    // connect is timed out as well, and the app's WebSocket.userAgent still
+    // applies. Not when the app installed HttpOverrides: the shared client was
+    // made by whatever overrides were current at the process's first WebSocket
+    // (under flutter_test: the test runner's own socket, before the binding's
+    // mock), and the dial keeps it, as before -- still bounded by the signal
+    // client's timeout, only its socket is left to the OS.
+    final ownClient = abort != null && io.HttpOverrides.current == null;
+    final useCustomClient = ownClient || (resolvedNetworkOptions.certificatePinning?.isEnabled ?? false);
+    final customClient = useCustomClient
+        ? createSdkIoHttpClient(
+            resolvedNetworkOptions,
+            hedge: abort?.hedge,
+            // (silentHostFailFast: did any connection of this dial come up?)
+            beforeUse: abort?.markConnected,
+          )
+        : null;
+    if (customClient != null && abort != null) {
+      abort.observed = true;
+      // (raced: a single connection is not timed out on its own, the race and
+      // the cap end it)
+      if (abort.hedge == null) customClient.connectionTimeout = abort.bound;
+      if (ownClient) customClient.userAgent = io.WebSocket.userAgent;
+      abort.track(customClient);
+    }
     try {
       final ws = await io.WebSocket.connect(uri.toString(), headers: headers, customClient: customClient);
       logger.fine('[WebSocketIO] Connected');
@@ -160,6 +387,7 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
     Map<String, String>? headers,
     NetworkOptions networkOptions,
     WebSocketEventHandlers? options,
+    _GravixDialAbort? abort,
   ) async {
     final watch = Stopwatch()..start();
     var abandoned = false;
@@ -223,6 +451,7 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
     final freshClient = createSdkIoHttpClient(
       networkOptions,
       beforeUse: () {
+        abort?.markConnected();
         if (warmWs != null) throw StateError('standby upgrade answered first');
         abandoned = true;
         // closes the warm connection's socket: its pending upgrade fails at once
@@ -230,7 +459,13 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
           warmClient.close(force: true);
         } catch (_) {}
       },
+      hedge: abort?.hedge,
     );
+    if (abort != null) {
+      // GRAVIX (2026-10-11): the fresh dial ends at the dial's bound as well
+      if (abort.hedge == null) freshClient.connectionTimeout = abort.bound;
+      abort.track(freshClient);
+    }
     final fresh = io.WebSocket.connect(uri.toString(), headers: headers, customClient: freshClient);
     final freshSettled = Completer<void>();
     io.WebSocket? freshWs;

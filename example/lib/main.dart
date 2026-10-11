@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:gravix_rtc/gravix_rtc.dart';
 
+import 'echo_variants.dart';
 import 'harness.dart';
 
 Future<void> main() async {
@@ -12,7 +14,116 @@ Future<void> main() async {
   // Launch-intent extras / --dart-define decide whether this start is a scripted
   // measurement run (docs: example/README.md, "Join-latency harness").
   final harness = await HarnessConfig.load();
+  await _setupAudioDeviceTests(harness);
   runApp(MeetingApp(harness: harness, appStartedAt: appStartedAt));
+}
+
+/// Device tests of the 0.4.15 microphone / speaker work (the device test plan
+/// in the run log). All off unless a --dart-define turns them on:
+///   GRAVIX_AUDIO_MEDIA=true   media-mode process (MODE_NORMAL / USAGE_MEDIA,
+///                             bypassVoiceProcessing), like a recordable-audio app
+///   GRAVIX_FGS=true           call foreground service on
+///   GRAVIX_FGS_CLAIM_AT_START=false  the 0.4.14 service start (A/B)
+///   GRAVIX_BT_CHATROOM=true   Bluetooth chatroom model
+///   GRAVIX_MIC_RECOVER=false  report-only mic state (A/B)
+///   GRAVIX_KEEPALIVE=on|transsionOnly  silent background keep-alive (Hiber)
+///   GRAVIX_FREEZE_DETECT=true  "process was frozen" reports
+///   GRAVIX_SILENT_DETECT=true  digital-silence capture detection
+///   GRAVIX_AUDIO_PAKHI=true   media profile exactly like the field app Pakhi
+///                             (2026-10-10 other-app audio test): WebRTC
+///                             initialized with the media configuration,
+///                             androidUseHardwareAudioProcessing false and
+///                             bypassVoiceProcessing true (MIC source), then
+///                             GravixRtcClient.initialize WITHOUT bypass, so
+///                             software AEC3/NS/AGC stay on
+///   GRAVIX_OTHER_APP_AUDIO=mode  GravixAudioDeviceOptions.otherAppAudio
+///                             (off|detect|platformEffects|
+///                             voiceCommunicationCapture|muteMicInBackground);
+///                             the harness extra `otherAppAudio` wins
+///   GRAVIX_AEC_VARIANT=`variant` / launch extra `aecVariant` (2026-10-10
+///                             media-mode echo experiments, echo_variants.dart:
+///                             pakhi | pakhiLL | pakhiMono | pakhiTrials |
+///                             oldPakhi | mediaVcSw | nofx | comm); the extra
+///                             wins. GRAVIX_AUDIO_PAKHI=true = `pakhi`.
+/// Mic state and route changes go to logcat under the tag GRAVIX_MIC.
+Future<void> _setupAudioDeviceTests(HarnessConfig harness) async {
+  const media = bool.fromEnvironment('GRAVIX_AUDIO_MEDIA');
+  const pakhi = bool.fromEnvironment('GRAVIX_AUDIO_PAKHI');
+  const variantDefine = String.fromEnvironment('GRAVIX_AEC_VARIANT');
+  final variant = harness.str('aecVariant').isNotEmpty
+      ? harness.str('aecVariant')
+      : (variantDefine.isNotEmpty ? variantDefine : (pakhi ? 'pakhi' : ''));
+  const fgs = bool.fromEnvironment('GRAVIX_FGS');
+  const claim = bool.fromEnvironment('GRAVIX_FGS_CLAIM_AT_START', defaultValue: true);
+  const chatroom = bool.fromEnvironment('GRAVIX_BT_CHATROOM');
+  const recover = bool.fromEnvironment('GRAVIX_MIC_RECOVER', defaultValue: true);
+  const keepAliveName = String.fromEnvironment('GRAVIX_KEEPALIVE', defaultValue: 'off');
+  const freezeDetect = bool.fromEnvironment('GRAVIX_FREEZE_DETECT');
+  const silentDetect = bool.fromEnvironment('GRAVIX_SILENT_DETECT');
+  final keepAlive = GravixBackgroundKeepAlive.values.firstWhere(
+    (m) => m.name == keepAliveName,
+    orElse: () => GravixBackgroundKeepAlive.off,
+  );
+  const otherDefine = String.fromEnvironment('GRAVIX_OTHER_APP_AUDIO');
+  final otherName = harness.str('otherAppAudio').isNotEmpty ? harness.str('otherAppAudio') : otherDefine;
+  final otherApp = GravixOtherAppAudioMode.values.firstWhere(
+    (m) => m.name == otherName,
+    orElse: () => GravixOtherAppAudioMode.off,
+  );
+  // GRAVIX_AUDIO_PAKHI=true resolves to the `pakhi` echo variant: the same
+  // WebRTC.initialize (media, HW processing off, bypass) + GravixRtcClient
+  // initialize without bypass that the other-app audio test used.
+  if (variant.isNotEmpty) {
+    await setupEchoVariant(
+      variant,
+      initialize: (options) => rtc.WebRTC.initialize(options: options),
+      mediaConfiguration: rtc.AndroidAudioConfiguration.media.toMap(),
+      trials: harness.str('aec3Trials'),
+      webrtcLog: harness.str('webrtcLog'),
+    );
+  } else if (media) {
+    await GravixRtcClient.initialize(
+      bypassVoiceProcessing: true,
+      // ignore: experimental_member_use
+      initialAudioSessionOptions: const AudioSessionOptions.mediaPlayback(),
+    );
+  }
+  if (fgs) {
+    GravixForegroundService.defaults = const GravixForegroundServiceOptions(
+      enabled: true,
+      showLeaveAction: true,
+      claimMicrophoneAtStart: claim,
+    );
+  }
+  GravixAudioDevice.options = GravixAudioDeviceOptions(
+    recoverMicAfterInterruption: recover,
+    bluetoothChatroom: chatroom,
+    backgroundKeepAlive: keepAlive,
+    detectProcessFreeze: freezeDetect,
+    silentCaptureDetection: silentDetect,
+    otherAppAudio: otherApp,
+  );
+  unawaited(gravixLogLine('GRAVIX_MIC',
+      'config media=$media pakhi=$pakhi otherAppAudio=${otherApp.name} fgs=$fgs claimAtStart=$claim '
+      'chatroom=$chatroom recover=$recover '
+      'keepAlive=${keepAlive.name} freezeDetect=$freezeDetect silentDetect=$silentDetect '
+      'aggressiveFreezer=${await GravixAudioDevice.isAggressiveFreezer()}'));
+  GravixAudioDevice.processFreezes.listen((e) {
+    unawaited(gravixLogLine('GRAVIX_MIC',
+        'frozen frozenForMs=${e.frozenFor.inMilliseconds} wallGapMs=${e.wallGap.inMilliseconds}'));
+  });
+  GravixAudioDevice.otherAppAudioPlayingChanged.listen((playing) {
+    unawaited(gravixLogLine('GRAVIX_MIC', 'otherAppAudio playing=$playing'));
+  });
+  GravixAudioDevice.micStateChanges.listen((e) {
+    unawaited(gravixLogLine('GRAVIX_MIC',
+        'state=${e.state.name} reason=${e.reason.name} fgsTypes=${GravixForegroundService.activeTypes}'));
+  });
+  GravixAudioDevice.onAudioRouteChanged.listen((r) {
+    unawaited(gravixLogLine('GRAVIX_MIC',
+        'route current=${r.current.name} available=${r.available.map((e) => e.name).toList()} '
+        'explicit=${r.explicit?.name} reason=${r.reason}'));
+  });
 }
 
 /// Minimal Gravix Cloud meeting app for testing between two devices.
@@ -770,7 +881,9 @@ class _Controls extends StatelessWidget {
               icon: muted ? Icons.mic_off : Icons.mic,
               color: muted ? Colors.redAccent : null,
               tooltip: muted ? 'Unmute mic' : 'Mute mic',
-              onPressed: () => room.muteLocalAudio(muted),
+              // muteLocalAudio(mute): a tap flips the current state (device
+              // run 2026-10-10, bug 1: passing `muted` made the button a no-op)
+              onPressed: () => room.muteLocalAudio(!muted),
             ),
           ),
           ValueListenableBuilder<bool>(
@@ -786,6 +899,14 @@ class _Controls extends StatelessWidget {
             icon: Icons.cameraswitch,
             tooltip: 'Switch camera',
             onPressed: () => room.switchCamera(),
+          ),
+          // 0.4.15 device tests: cycles speaker -> earpiece -> bluetooth ->
+          // wired -> automatic through GravixAudioDevice; the answer and the
+          // route events are logged under GRAVIX_MIC.
+          _CircleButton(
+            icon: Icons.speaker_phone,
+            tooltip: 'Next audio route',
+            onPressed: _nextAudioRoute,
           ),
           _CircleButton(
             icon: Icons.volume_off,
@@ -827,4 +948,25 @@ class _CircleButton extends StatelessWidget {
       style: IconButton.styleFrom(backgroundColor: Colors.white10),
     );
   }
+}
+
+const _routeCycle = <GravixAudioRoute?>[
+  GravixAudioRoute.speaker,
+  GravixAudioRoute.earpiece,
+  GravixAudioRoute.bluetooth,
+  GravixAudioRoute.wiredHeadset,
+  null, // automatic
+];
+var _routeIndex = -1;
+
+Future<void> _nextAudioRoute() async {
+  _routeIndex = (_routeIndex + 1) % _routeCycle.length;
+  final route = _routeCycle[_routeIndex];
+  final ok = route == null
+      ? await GravixAudioDevice.clearAudioRoute()
+      : await GravixAudioDevice.setAudioRoute(route);
+  final info = await GravixAudioDevice.getAudioRoutes();
+  await gravixLogLine('GRAVIX_MIC',
+      'select ${route?.name ?? 'automatic'} applied=$ok current=${info.current.name} '
+      'available=${info.available.map((e) => e.name).toList()}');
 }
