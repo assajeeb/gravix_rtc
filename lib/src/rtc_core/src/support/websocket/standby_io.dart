@@ -32,6 +32,7 @@ import 'package:meta/meta.dart';
 import '../../logger.dart';
 import '../../options.dart';
 import '../http_client/io.dart';
+import 'signal_isolate_io.dart' show GravixRemoteStandbyClient, GravixSignalIsolateRuntime;
 import 'standby_types.dart';
 
 /// A standby connection is used only while it is this young (the JS SDK's window,
@@ -244,6 +245,11 @@ abstract final class GravixSignalStandby {
   /// probe); it sets how long the join's upgrade over this connection may take
   /// before a fresh dial races it ([gravixStandbyUpgradeBound]).
   static Future<bool> open(String url, String token, {NetworkOptions? networkOptions, int? rttHintMs}) async {
+    // GRAVIX (2026-10-12, GravixSignalIsolate): the pool lives where the join's
+    // socket will (a warm dart:io connection cannot move between isolates)
+    if (GravixSignalIsolateRuntime.enabled) {
+      return GravixSignalIsolateRuntime.standbyOpen(url, token, networkOptions, rttHintMs);
+    }
     try {
       final key = _key(url, token);
       _prune();
@@ -260,6 +266,9 @@ abstract final class GravixSignalStandby {
   }
 
   static GravixStandbyState state(String url, String token) {
+    if (GravixSignalIsolateRuntime.enabled) {
+      return stateFromSnapshot(GravixSignalIsolateRuntime.standbySnapshot, url, token);
+    }
     final key = _key(url, token);
     final t = now();
     final sb = _open[key];
@@ -296,6 +305,9 @@ abstract final class GravixSignalStandby {
   /// the exact one still opening (waited for, within [wait]); one to the same
   /// host still opening (`awaitedSameHost`, within [wait]).
   static Future<GravixStandbyTaken> take(String url, String token, {Duration wait = kGravixStandbyWait}) async {
+    // GRAVIX (2026-10-12, GravixSignalIsolate): taken in the signal isolate, as
+    // the first step of the dial it is handed to (no round trip of its own)
+    if (GravixSignalIsolateRuntime.enabled) return GravixSignalIsolateRuntime.standbyTake(url, token, wait);
     final String exactKey;
     try {
       exactKey = _key(url, token);
@@ -408,6 +420,7 @@ abstract final class GravixSignalStandby {
   /// replacement is open), so a tap in between waits for the new one (bounded by
   /// [kGravixStandbyJoinWait]) instead of taking the suspect one.
   static Future<void> reopenAll() async {
+    if (GravixSignalIsolateRuntime.enabled) return GravixSignalIsolateRuntime.standbyReopenAll();
     try {
       final old = _open.values.toList();
       _open.clear();
@@ -425,11 +438,16 @@ abstract final class GravixSignalStandby {
   }
 
   /// New sockets [client] (a taken standby client) has opened so far.
-  static int connectsOf(Object? client) => client == null ? 0 : (_counters[client]?.connects ?? 0);
+  static int connectsOf(Object? client) {
+    // (taken in the signal isolate: as of the end of the dial it served)
+    if (client is GravixRemoteStandbyClient) return client.connects;
+    return client == null ? 0 : (_counters[client]?.connects ?? 0);
+  }
 
   /// The join is done with a taken client: its pooled connection became the
   /// WebSocket (detached from the client) or is not needed any more.
   static void release(Object? client) {
+    // (a client taken in the signal isolate was released there, when its dial ended)
     if (client is io.HttpClient) {
       try {
         client.close();
@@ -439,6 +457,7 @@ abstract final class GravixSignalStandby {
 
   /// Closes every standby connection (tests; an app going to the background).
   static Future<void> closeAll() async {
+    if (GravixSignalIsolateRuntime.enabled) return GravixSignalIsolateRuntime.standbyCloseAll();
     for (final sb in _open.values) {
       _close(sb);
     }
@@ -457,5 +476,45 @@ abstract final class GravixSignalStandby {
         }, onError: (Object _) {}),
       );
     }
+  }
+
+  /// GRAVIX (2026-10-12, GravixSignalIsolate): the pool as plain data, for the
+  /// app isolate's synchronous [state] while the pool lives in the signal
+  /// isolate. Per key: [opened at (µs, open ones), opening (1/0), dead: opened
+  /// at, closed at (µs)].
+  static Map<String, List<int?>> snapshot() {
+    final out = <String, List<int?>>{};
+    for (final k in {..._open.keys, ..._opening.keys, ..._dead.keys}) {
+      final d = _dead[k];
+      out[k] = <int?>[
+        _open[k]?.openedAt.microsecondsSinceEpoch,
+        _opening.containsKey(k) ? 1 : 0,
+        d?.openedAt.microsecondsSinceEpoch,
+        d?.closedAt.microsecondsSinceEpoch,
+      ];
+    }
+    return out;
+  }
+
+  /// [state] over a [snapshot] (the same rules).
+  static GravixStandbyState stateFromSnapshot(Map<String, List<int?>> snap, String url, String token) {
+    final e = snap[_key(url, token)];
+    if (e == null) return const GravixStandbyState('none');
+    final t = now();
+    final openedUs = e[0];
+    final opening = e[1] == 1;
+    if (openedUs != null) {
+      final age = t.difference(DateTime.fromMicrosecondsSinceEpoch(openedUs));
+      if (age < kGravixStandbyMaxAge) return GravixStandbyState('open', ageMs: age.inMilliseconds, rotating: opening);
+    }
+    if (opening) return const GravixStandbyState('opening');
+    final deadOpened = e[2], deadClosed = e[3];
+    if (deadOpened != null || openedUs != null) {
+      return GravixStandbyState(
+        'dead',
+        ageMs: deadOpened != null && deadClosed != null ? (deadClosed - deadOpened) ~/ 1000 : null,
+      );
+    }
+    return const GravixStandbyState('none');
   }
 }

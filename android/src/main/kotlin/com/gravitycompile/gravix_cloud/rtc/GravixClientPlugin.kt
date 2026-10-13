@@ -48,6 +48,7 @@ import org.webrtc.audio.AudioProcessingMode
 import org.webrtc.audio.AudioProcessingOptions
 import org.webrtc.audio.AudioProcessingOptionsResult
 import org.webrtc.audio.AudioProcessingState
+import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -340,13 +341,18 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     com.gravitycompile.gravix_cloud.music.MusicMixerPlugin.installIfWanted(audioDeviceModule)
     val executor = audioDeviceModuleExecutorOrError(result, "rejectedPlatformUnavailable") ?: return
     val options = audioProcessingOptions(call)
+    // GRAVIX (2026-10-13): false = prepare the recorder only, the engine starts
+    // its record thread (GravixAndroidRecorder.startThreadAtCapture in Dart)
+    val startThread = call.argument<Boolean>("gravixStartRecordThread") ?: true
     try {
       executor.execute {
         try {
           // prewarmRecording applies Android platform AP and prepares recording
           // without setting the client-start flag. WebRTC exposes this as void,
           // so only thrown failures can be surfaced here.
-          audioDeviceModule.prewarmRecording(options)
+          if (startThread || !prepareRecordingWithoutThread(audioDeviceModule, options)) {
+            audioDeviceModule.prewarmRecording(options)
+          }
           mainHandler.post {
             result.success(null)
           }
@@ -370,6 +376,46 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       result.error("rejectedPlatformUnavailable", "audio device module executor is unavailable", null)
     }
   }
+
+  /**
+   * GRAVIX (2026-10-13): [JavaAudioDeviceModule.prewarmRecording] without its
+   * last step. prewarmRecording = apply the platform audio processing options
+   * + initRecordingIfNeeded (the AudioRecord and its buffer) +
+   * prewarmRecordingIfNeeded (starts the record thread). Field (an Android phone, 1 of
+   * ~15 host joins): the engine's InitRecording adopting a RUNNING pre-warmed
+   * recorder is racy - WebRtcAudioRecord.initRecording flags the native init
+   * and caches the direct buffer before the native side has set its frames per
+   * buffer, and the record thread delivered a buffer in that gap: SIGABRT
+   * (libc++ span index out of range under nativeDataIsRecorded). Without the
+   * thread, the engine's StartRecording starts it after its InitRecording
+   * finished. WebRtcAudioRecord is package-private: reached by reflection, as
+   * the mixer hook does (MusicMixerPlugin.installOn).
+   *
+   * A recorder prepared for a track that is never published is not recording
+   * (no microphone indicator) and is taken over by the next capture's
+   * InitRecording. Returns false when it could not be prepared this way: the
+   * caller pre-warms as before.
+   */
+  private fun prepareRecordingWithoutThread(adm: JavaAudioDeviceModule, options: AudioProcessingOptions): Boolean =
+    prepareRecorderWithoutThread(adm.audioInput, options)
+
+  private fun prepareRecorderWithoutThread(input: Any?, options: AudioProcessingOptions): Boolean =
+    try {
+      if (input == null) throw IllegalStateException("no audio input")
+      val cls = input.javaClass
+      cls.getDeclaredMethod("applyPlatformAudioProcessingOptions", AudioProcessingOptions::class.java)
+        .apply { isAccessible = true }
+        .invoke(input, options)
+      val prepared = cls.getDeclaredMethod("initRecordingIfNeeded")
+        .apply { isAccessible = true }
+        .invoke(input) as? Boolean
+      // false (no AudioRecord now) is fine: the engine's InitRecording creates it
+      if (prepared != true) Log.w(TAG, "recorder not prepared; the engine opens it")
+      true
+    } catch (error: Throwable) {
+      Log.w(TAG, "recorder prepare without its thread failed; pre-warming as before", error)
+      false
+    }
 
   // Microphone mute inside the audio device module, recorder left running
   // (field 2026-09-30): disabling the mic track makes the engine stop the

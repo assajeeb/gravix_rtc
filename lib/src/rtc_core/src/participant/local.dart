@@ -31,6 +31,7 @@ import 'package:path/path.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/engine.dart';
+import '../core/gravix_join_mic.dart';
 import '../core/room.dart';
 import '../core/signal_client.dart';
 import '../core/transport.dart';
@@ -206,12 +207,51 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     return result! as LocalTrackPublication<LocalAudioTrack>;
   }
 
+  /// GRAVIX (2026-10-12, fast publish): publishes the join's microphone
+  /// ([GravixJoinMicAttempt], see GravixJoinMicrophone) at the JoinResponse,
+  /// on the microphone's publish queue: a setMicrophoneEnabled that comes in
+  /// meanwhile (GravixRoomService's mic step) waits for it and then finds the
+  /// publication instead of publishing a second microphone. Null when nothing
+  /// was published (the attempt ended, the capture failed, the microphone is
+  /// not wanted any more, or one is published already); the hold on the
+  /// publisher's first offer is released in every case.
+  @internal
+  Future<LocalTrackPublication<LocalAudioTrack>?> gravixPublishJoinMicrophone(GravixJoinMicAttempt join) async {
+    final result = await _publishRunners.forSource(TrackSource.microphone).run(() async {
+      if (join.isAborted) return null;
+      if (getTrackPublicationBySource(TrackSource.microphone) != null) {
+        logger.fine('join microphone: a microphone is published already');
+        join.releaseOffer(false);
+        return null;
+      }
+      final track = await join.trackForPublish();
+      if (track == null || join.isAborted) return null;
+      if (!(join.options.wanted?.call() ?? true)) {
+        logger.fine('join microphone: not wanted any more; not published');
+        join.releaseOffer(false);
+        return null;
+      }
+      return _publishAudioTrack(track, publishOptions: join.options.publishOptions, gravixJoin: join);
+    });
+    final pub = result as LocalTrackPublication<LocalAudioTrack>?;
+    // a mute tapped while the publish was in flight
+    if (pub != null && !join.isAborted && !(join.options.wanted?.call() ?? true)) {
+      await pub.mute(stopOnMute: room.roomOptions.defaultAudioCaptureOptions.stopAudioCaptureOnMute);
+    }
+    return pub;
+  }
+
   Future<LocalTrackPublication<LocalAudioTrack>?> _publishAudioTrack(
     LocalAudioTrack track, {
     AudioPublishOptions? publishOptions,
     // GRAVIX (0.4.15): republish a muted track whose capture is stopped without
     // a capture (see rePublishAllTracks)
     bool gravixDetached = false,
+    // GRAVIX (2026-10-12, fast publish): the join's microphone. The AddTrack
+    // and the transceiver go out side by side (whatever enabledPublishCodecs
+    // says: the sequential branch adds the transceiver one round trip later);
+    // the AddTrack wait ends when the join attempt does.
+    GravixJoinMicAttempt? gravixJoin,
   }) async {
     if (audioTrackPublications.any((e) => e.track?.mediaStreamTrack.id == track.mediaStreamTrack.id)) {
       throw TrackPublishException('track already exists');
@@ -255,13 +295,19 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           encodings,
           gravixDetached: gravixDetached,
         );
+        // GRAVIX (2026-10-12): the join's microphone takes over the publisher's
+        // held first offer (no await between: the engine must not make it too)
+        gravixJoin?.noteNegotiating(firstOffer: !room.engine.gravixHasNegotiated);
         await room.engine.negotiate();
         return lk_models.TrackInfo();
       }
 
       late lk_models.TrackInfo trackInfo;
-      if (room.engine.enabledPublishCodecs?.isNotEmpty ?? false) {
-        final rets = await Future.wait<lk_models.TrackInfo>([room.engine.addTrack(req), negotiate(publishOptions)]);
+      if (gravixJoin != null || (room.engine.enabledPublishCodecs?.isNotEmpty ?? false)) {
+        final rets = await Future.wait<lk_models.TrackInfo>([
+          room.engine.addTrack(req, gravixAbort: gravixJoin?.abortSignal),
+          negotiate(publishOptions),
+        ]);
         trackInfo = rets[0];
       } else {
         trackInfo = await room.engine.addTrack(req);

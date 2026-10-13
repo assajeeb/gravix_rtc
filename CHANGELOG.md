@@ -1,5 +1,112 @@
 # Changelog
 
+## 0.4.16 — 2026-10-13
+
+Faster joins (the host's microphone in the first offer, signalling off a busy app isolate), the
+signal round trip from the start of the session and without the app's own delay, an opt-in fix for a
+native Android crash as the microphone starts, and the retired Gravix servers refused. The
+retired-server guard and the first ping are always on; everything else is opt-in and off by default.
+
+### Breaking: retired Gravix servers are refused
+- Connecting to a host of Gravix's retired server deployment (the servers that ran before the current
+  regions) now fails at once with a typed `RetiredServerException` instead of connecting. `host` names
+  it and the message is "retired Gravix server (<host>): use the url from your token response".
+  `Room.connect`, `Room.prepareConnection` and `GravixRoomService.connect` throw it before any network
+  request (no DNS lookup, region-list fetch, probe or WebSocket); `GravixStandby.open` and `standby()`
+  resolve false. The hosts are in `RetiredServerException.retiredHosts`;
+  `RetiredServerException.retiredHostOf(url)` checks a url.
+- A token response whose `url` is on a retired host is a `GravixTokenException` (`malformed`) with the
+  `RetiredServerException` as its `cause` (`connectWithTokenProvider` returns false with it in
+  `lastTokenError`). Region entries on a retired host are dropped from `region_urls`;
+  `GravixTokenProvider.endpoint` refuses a retired host when it is created; the default region probes
+  refuse one without sending a request.
+- What to do: connect with the `url` your token response returns, never a hard-coded server url. Apps
+  that already do so are not affected.
+- Unchanged: the current region hosts, the gateway's `/v1/token` path and the wire protocol.
+
+### Fixed: `Room.signalRttMs` from the start of the session, and without the app's own delay
+- The first signal ping goes out as soon as the join is answered, then every `pingInterval` as before.
+  `Room.signalRttMs` (what an app's network indicator reads) used to stay 0 for the first ping interval
+  of every session.
+- After a resume the pings start again at once. Before, a resume stopped them for the rest of the
+  session: `signalRttMs` froze at its last value and the ping timeout no longer watched the resumed
+  connection. A full reconnect is a new join and was already covered.
+- With `GravixSignalIsolate` on, the round trip is the network's: the signal isolate stamps the ping's
+  write and the pong's arrival, so work on the app's isolate in between no longer counts. Right after
+  an app's launch, a phone a few ms from its region read 221-1710 ms (10-30 ms from a settled app).
+  With the switch off the measurement is unchanged.
+- Added `Room.signalRttMinMs` (the smallest of the last 5 round trips of the current signal
+  connection) and `Room.signalRtt` (`GravixSignalRtt`: `recentMs`, `count`, `minMs`, `lastMs`, and
+  `networkOnly`: every recent sample was timed in the signal isolate), so an app can skip samples
+  taken while it was busy and show a number it trusts. The window starts again on every new signal
+  connection; `signalRttMs` keeps its last value as before.
+- Added `Room.requestSignalPing()`: one ping now, so a fresh round trip is known one round trip later
+  instead of at the next periodic ping (e.g. right after a join). It sends nothing and returns false
+  when the signal connection is not up, when the server asked for no pings, or within 1 s of the last
+  ping.
+
+### Fixed: Android, a native crash as the microphone starts (`GravixAndroidRecorder`, opt-in)
+- On Android the microphone capture start pre-warms the recorder: it creates the AudioRecord and
+  starts its record thread, which the WebRTC engine adopts when the track is published. The adoption
+  is racy: on one Android phone about 1 join in 15 aborted the app natively (SIGABRT, "span index out
+  of range" under `WebRtcAudioRecord.nativeDataIsRecorded`) when the running thread delivered a buffer
+  before the engine had finished initialising its recording.
+- `GravixAndroidRecorder.startThreadAtCapture = false` (once, before the first microphone capture):
+  the capture start only prepares the recorder (audio processing options, room-music mixer hook,
+  AudioRecord) and the engine starts the record thread itself, after its initialisation finished. On
+  the phone that crashed the record order was right in 15 of 15 joins. The AudioRecord's start (about
+  150 ms there) is paid when the engine starts recording instead of ahead of it. When the recorder
+  cannot be prepared that way the SDK pre-warms as before.
+- `true` (default) is the previous behaviour and the rollback. Android only; iOS is unchanged.
+
+### Added: the host's microphone in the join's first offer (`publishMicOnJoin`, opt-in)
+- `GravixRoomService.connect(publishMic: true, publishMicOnJoin: true)` (also
+  `connectWithTokenProvider`) and, in the core, `Room.connect(joinMicrophone: GravixJoinMicrophone(...))`.
+  The microphone capture starts with the join, in parallel with the signalling, and the microphone is
+  in the publisher connection's first offer: it is live as soon as that connection connects. Before,
+  it was published after `connect()` returned, with a second offer/answer (on a real Android phone
+  close to its region: 0.93 s after the room connected).
+- Join retries (`ConnectOptions.joinRetries`) keep working: a failed attempt's publication and capture
+  are undone before the next attempt. A join that fails, or is left, stops the capture before
+  `connect()` returns, so the OS microphone indicator does not stay on.
+- The first offer waits at most `GravixJoinMicrophone.offerWait` (1 s) for a capture that is still
+  starting; a later capture is published with an offer of its own. A failed capture, a participant
+  without permission to publish a microphone, or a mute during the join (`setMicEnabled(false)`)
+  publish nothing and stop the capture.
+- Timelines: `GravixJoinPhase.micPublishedInJoin` (`detail`: `inFirstOffer`, `attempt`); the service
+  timeline's `micPublished` is the join's publish; `GravixJoinPhases.micLiveAt` is when the microphone
+  went live.
+- Pass it only when the microphone permission is already granted. Off by default (the previous
+  behaviour); it takes precedence over `earlyMicTrack`, and is ignored beside `FastConnectOptions` or
+  the pre-connect buffer. A resume keeps the publication; a full rejoin republishes it once. No server
+  change is needed.
+
+### Added: `GravixSignalIsolate`, the signalling WebSocket off the app's isolate (opt-in)
+- `GravixSignalIsolate.enabled = true` (once, at app start, before the first `GravixStandby.open` or
+  join) runs the signal dial, its TLS and WebSocket framing, and the standby pool in a background
+  isolate. Right after an app's launch its own work fills its isolate and delays every signalling
+  step; with the switch on, measured on a saturated app isolate: a viewer's media ready 3.5 s -> 2.0 s,
+  a host's 5.1 s -> 2.5 s, `wsOpen` ~1 s -> 0.22 s. An idle app is unchanged.
+- The signalling protocol itself (reconnect, resume, leave, the join timeline) and the flutter_webrtc
+  peer connections stay on the app's isolate.
+- `false` (default) is the rollback. Standby connections opened before switching on are closed. A dial
+  stays on the app's isolate when the app installed `HttpOverrides` / `IOOverrides` (they apply per
+  isolate) or the background isolate cannot start. `GravixSignalIsolate.warmUp()` starts it ahead.
+  No-op on web.
+- `GravixSignalIsolate.ignoreHttpOverrides = true` (off by default): for an app whose `HttpOverrides`
+  only tune its own HTTP clients (e.g. `HttpOverrides.global` setting timeouts), signal dials and
+  standbys run in the background isolate without them. `IOOverrides` still keep a dial on the app's
+  isolate.
+- `GravixJoinPhase.wsOpen` (`Room.watchJoinPhases`) carries `detail['signalIsolate']` while the switch
+  is on.
+
+### Added: `GravixStandby.lowRttUpgradeFloor` (opt-in)
+- The shortest wait for a join's upgrade over a standby connection when the app passed
+  `standby(rttMs: ...)` below 30 ms. Null (default) = 0.5 s, unchanged. On a busy app the upgrade's
+  reply can arrive after 0.5 s and the join dials again, ~1.4 s slower; a longer floor (e.g. 1 s) lets
+  that reply win, and delays the fresh dial by as much when the standby connection is really dead.
+  RTTs of 30 ms and more keep 3 x RTT (0.5-1.5 s).
+
 ## 0.4.15 — 2026-10-11
 
 Recovery after network drops and region failover, from field reports and real-device testing

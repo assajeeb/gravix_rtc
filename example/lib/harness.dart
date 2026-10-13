@@ -89,6 +89,9 @@ class HarnessConfig {
     // <slot:earlyCallAudio>
     'earlyCallAudio': String.fromEnvironment('earlyCallAudio'),
     // </slot:earlyCallAudio>
+    // <slot:publishMicOnJoin>
+    'publishMicOnJoin': String.fromEnvironment('publishMicOnJoin'),
+    // </slot:publishMicOnJoin>
     // <slot:singlePc>
     // </slot:singlePc>
   };
@@ -197,6 +200,9 @@ class _HarnessScreenState extends State<HarnessScreen> {
     // <slot:earlyCallAudio>
     'earlyCallAudio',
     // </slot:earlyCallAudio>
+    // <slot:publishMicOnJoin>
+    'publishMicOnJoin',
+    // </slot:publishMicOnJoin>
     // <slot:singlePc>
     // </slot:singlePc>
     'autoTap',
@@ -414,6 +420,9 @@ class _HarnessScreenState extends State<HarnessScreen> {
         // <slot:earlyCallAudio>
         earlyCallAudio: _c.flag('earlyCallAudio'),
         // </slot:earlyCallAudio>
+        // <slot:publishMicOnJoin>
+        publishMicOnJoin: _c.flag('publishMicOnJoin'),
+        // </slot:publishMicOnJoin>
         // <slot:singlePc>
         // </slot:singlePc>
         joinTimeline: GravixJoinTimelineInput(
@@ -453,6 +462,9 @@ class _HarnessScreenState extends State<HarnessScreen> {
             // <slot:earlyCallAudio>
             'earlyCallAudio': _c.flag('earlyCallAudio'),
             // </slot:earlyCallAudio>
+            // <slot:publishMicOnJoin>
+            'publishMicOnJoin': _c.flag('publishMicOnJoin'),
+            // </slot:publishMicOnJoin>
             // <slot:singlePc>
             // </slot:singlePc>
             'msAppStartToTap': tapAt

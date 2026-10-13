@@ -28,6 +28,8 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import '../rtc_core/src/exceptions.dart' show RetiredServerException;
+
 /// One candidate region from the token response's `region_urls`.
 @immutable
 class GravixRegionUrl {
@@ -300,11 +302,15 @@ List<GravixRegionUrl> gravixRegionEntriesFrom(Map<String, dynamic>? tokenRespons
   if (raw is! List) return const [];
   final entries = <GravixRegionUrl>[];
   for (final entry in raw) {
+    // 2026-10-12: an entry on a retired Gravix host is dropped (never probed nor
+    // dialled), like an empty one; see RetiredServerException.
     if (entry is String) {
-      if (entry.isNotEmpty) entries.add(GravixRegionUrl(region: kGravixUnknownRegion, url: entry));
+      if (entry.isNotEmpty && RetiredServerException.retiredHostOf(entry) == null) {
+        entries.add(GravixRegionUrl(region: kGravixUnknownRegion, url: entry));
+      }
     } else if (entry is Map) {
       final url = entry['url'];
-      if (url is String && url.isNotEmpty) {
+      if (url is String && url.isNotEmpty && RetiredServerException.retiredHostOf(url) == null) {
         final region = entry['region'];
         final probeUrl = entry['probe_url'];
         entries.add(

@@ -154,6 +154,45 @@ renegotiates the same PC that carries every subscription, so a publish glitch is
 a subscribe glitch; resume/full-reconnect run through different code than the
 dual-PC paths this fork's region failover was tested on.
 
+## A host's microphone in the first offer: `publishMicOnJoin`
+
+Without it a host's join is two negotiations of the publisher connection: the SFU's
+JoinResponse says `fast_publish`, the SDK negotiates the publisher connection at once with
+its data channels only, and the microphone is published after `connect()` returned
+(capture start, AddTrack, a second offer/answer). Measured on a real Android phone 6 ms
+from its SFU: room connected at +888 ms after the tap, microphone live at +1814 ms.
+
+```dart
+final ok = await room.connect(
+  url: url,
+  token: token,
+  publishMic: true,
+  publishMicOnJoin: true,           // only with the microphone permission granted
+  joinTimeline: GravixJoinTimelineInput(tapAt: tapDownAt),
+);
+```
+
+What it does (`Room.connect(joinMicrophone: GravixJoinMicrophone(...))` in the core):
+
+1. The capture starts when the join attempt starts, beside the WebSocket and the join.
+2. At the JoinResponse the AddTrack request goes out and the audio transceiver is added;
+   only then is the publisher's first offer made, so it carries the microphone. The SFU
+   matches the offer's audio to the AddTrack that preceded it on the same socket.
+3. The microphone is live when the publisher connection connects: `micLiveAt` of
+   `GravixJoinPhases` is then the publisher connection's connect time, and
+   `GravixJoinPhase.micPublishedInJoin` says `inFirstOffer: true`.
+
+Bounds and failure handling:
+
+- The first offer waits for a capture still starting at most `offerWait` (1 s) after the
+  JoinResponse; then it goes out without it and the microphone follows with its own offer.
+- A join retry (`ConnectOptions.joinRetries`) undoes the failed attempt's publication and
+  capture; the next attempt captures and publishes again. One publication, one AddTrack
+  per session.
+- A failed or left join stops the capture before `connect()` returns.
+- A mute tapped during the join is honoured: nothing is published (or it is muted right
+  after a publish that was already in flight).
+
 ## What is not known yet
 
 - **TLS reuse.** `prewarm`'s HEAD and the WebSocket use different dart:io clients.

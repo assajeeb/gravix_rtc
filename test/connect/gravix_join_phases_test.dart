@@ -67,6 +67,28 @@ void main() {
     }
   });
 
+  // 2026-10-13: apps that drive Room themselves see whether the join's
+  // socket lived in the signal isolate (GravixSignalIsolate), on their wsOpen line.
+  test('wsOpen names the standby outcome and, when reported, the signal isolate', () async {
+    final signal = room.engine.signalClient;
+    signal.gravixStandby = {'outcome': 'used', 'signalIsolate': true};
+    signal.events.emit(const SignalConnectedEvent());
+    await _flush();
+    final open = phases.reached[GravixJoinPhase.wsOpen]!;
+    expect(open.detail['standby'], 'used');
+    expect(open.detail['signalIsolate'], true);
+  });
+
+  test('wsOpen without the signal isolate switch: no signalIsolate key', () async {
+    final signal = room.engine.signalClient;
+    signal.gravixStandby = {'outcome': 'none'};
+    signal.events.emit(const SignalConnectedEvent());
+    await _flush();
+    final open = phases.reached[GravixJoinPhase.wsOpen]!;
+    expect(open.detail['standby'], 'none');
+    expect(open.detail.containsKey('signalIsolate'), isFalse);
+  });
+
   test('a state other than connected is not a phase', () async {
     room.engine.events.emit(
       const EngineSubscriberPeerStateUpdatedEvent(

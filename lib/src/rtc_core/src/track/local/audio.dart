@@ -286,7 +286,13 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
       await AudioManager.instance.ensureAppleAudioSessionPolicy();
       // Match Swift: start the ADM before publishing so capture-time audio
       // processing options are applied before WebRTC opens the microphone.
-      if (await gravixStartExplicitRecording(() => Native.startLocalRecording(currentOptions.processing.toMap()))) {
+      final args = <String, dynamic>{
+        ...currentOptions.processing.toMap(),
+        // GRAVIX (2026-10-13): who starts the Android record thread
+        // (GravixAndroidRecorder; the native side's default is the capture start)
+        if (_gravixExplicitRecordingIsAndroid()) 'gravixStartRecordThread': GravixAndroidRecorder.startThreadAtCapture,
+      };
+      if (await gravixStartExplicitRecording(() => Native.startLocalRecording(args))) {
         _explicitRecording = true;
       }
     }
@@ -357,6 +363,32 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
     return track;
   }
+}
+
+/// GRAVIX (2026-10-13): who starts the Android recorder's record thread.
+///
+/// The explicit start at a microphone capture (`startLocalRecording`, see
+/// [LocalAudioTrack.startCapture]) pre-warms the Android recorder: it applies
+/// the platform audio processing options, installs the room-music mixer hook,
+/// creates the AudioRecord AND starts its record thread, which the engine
+/// adopts when the track is published. Field (an Android phone, 2026-10-13, 1 of ~15
+/// host joins): SIGABRT in AudioRecordJava, a libc++ hardening assertion (span
+/// index out of range) under `WebRtcAudioRecord.nativeDataIsRecorded`. The adoption
+/// is racy: WebRtcAudioRecord.initRecording marks the native init done and
+/// caches the direct buffer BEFORE the native side has set its frames per
+/// buffer, and the running record thread delivered a buffer in that gap
+/// (`direct buffer capacity: 1920` 17.958, abort 17.959, `frames_per_buffer:
+/// 480` 17.960).
+///
+/// [startThreadAtCapture] false: the capture start only prepares the recorder
+/// (options, mixer hook, AudioRecord) and the engine starts its thread in its
+/// own StartRecording, after its InitRecording finished; nothing runs before
+/// the native side is ready. The cost: the AudioRecord's start (about 150 ms
+/// on that phone) is paid when the engine starts recording instead of ahead of
+/// it. Set it before the first microphone capture. Android only; true (the
+/// default) is the behaviour before.
+abstract final class GravixAndroidRecorder {
+  static bool startThreadAtCapture = true;
 }
 
 /// Runs the explicit audio-recording start. Returns false, and the caller goes

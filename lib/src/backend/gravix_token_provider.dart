@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../connect/gravix_region_report.dart';
+import '../rtc_core/src/exceptions.dart' show RetiredServerException;
 import '../rtc_core/src/token_source/jwt.dart';
 import '../rtc_core/src/token_source/token_source.dart';
 
@@ -216,7 +217,9 @@ class GravixJoinCredentials {
   ///     unwrap it by hand is how the region list gets dropped;
   ///  3. the upstream token-source shape `{participant_token, server_url}`.
   ///
-  /// Throws [GravixTokenException] (`malformed`) when there is no token or url.
+  /// Throws [GravixTokenException] (`malformed`) when there is no token or url,
+  /// or the url is on a retired Gravix server (its `cause` is then a
+  /// [RetiredServerException]). Region entries on a retired host are dropped.
   factory GravixJoinCredentials.fromResponse(
     Map<String, dynamic> response, {
     DateTime? now,
@@ -235,6 +238,16 @@ class GravixJoinCredentials {
       throw GravixTokenException(
         GravixTokenErrorReason.malformed,
         'token response has no ${token == null ? '"token"' : '"url"'} (keys: ${body.keys.join(', ')})',
+      );
+    }
+    // 2026-10-12: a url on a retired Gravix host is as unusable as no url: the
+    // join would refuse it. Said here, where the token server is the one to fix.
+    final retired = RetiredServerException.retiredHostOf(url);
+    if (retired != null) {
+      throw GravixTokenException(
+        GravixTokenErrorReason.malformed,
+        'token response url is a retired Gravix server ($retired): the token server must return a current region url',
+        cause: RetiredServerException(retired),
       );
     }
     final fetchedAt = now ?? DateTime.now();
@@ -390,7 +403,8 @@ class GravixTokenProvider implements TokenSourceConfigurable {
   /// as JSON with [headers] (the app's session — a cookie, a bearer token, a
   /// Parse session token; NEVER the gateway secret) and expects the gateway's
   /// `/v1/token` response back. See [GravixJoinCredentials.fromResponse] for
-  /// the accepted shapes.
+  /// the accepted shapes. Throws [RetiredServerException] when [url] is on a
+  /// retired Gravix host.
   factory GravixTokenProvider.endpoint(
     Uri url, {
     Map<String, String> headers = const <String, String>{},
@@ -401,6 +415,9 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     http.Client? client,
     @visibleForTesting DateTime Function()? now,
   }) {
+    // 2026-10-12: the retired gateway host is refused here, at construction
+    // (RetiredServerException), not on the first join.
+    RetiredServerException.check(url.toString());
     final clock = now ?? DateTime.now;
     return GravixTokenProvider._(
       (request) async {

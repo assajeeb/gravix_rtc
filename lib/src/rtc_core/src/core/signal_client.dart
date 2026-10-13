@@ -37,6 +37,7 @@ import '../support/disposable.dart';
 import '../support/http_client.dart';
 import '../support/platform.dart';
 import '../support/websocket.dart';
+import '../support/websocket/signal_isolate.dart' show GravixSignalIsolateRuntime;
 import '../support/websocket/standby.dart';
 import '../types/other.dart';
 import '../utils.dart' show Utils, UriExt;
@@ -59,8 +60,80 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
   int _pingCount = 0;
 
   /// Signal round-trip time in milliseconds, calculated from pingReq/pongResp.
+  ///
+  /// GRAVIX (2026-10-13): over a socket in the signal isolate
+  /// (GravixSignalIsolate) the network's round trip: that isolate stamps the
+  /// ping's write and the pong's arrival ([GravixRtcWebSocket.gravixSendPing]),
+  /// so a busy app isolate in between is not counted ([rttNetworkOnly]).
+  /// Otherwise as before: stamped when this isolate sent the ping and when it
+  /// decoded the pong, the app isolate's delay included.
   int get rtt => _rtt;
   int _rtt = 0;
+
+  /// GRAVIX (2026-10-13): how many recent round trips [rttRecent] keeps.
+  static const rttWindow = 5;
+
+  /// GRAVIX (2026-10-13): the last [rttWindow] round trips of the current
+  /// connection, ms, oldest first (cleared by [cleanUp]: a new connection may
+  /// be a new path). Unmodifiable.
+  List<int> get rttRecent => List.unmodifiable(_rttRecent);
+  final _rttRecent = Queue<int>();
+
+  /// GRAVIX (2026-10-13): round trips measured since this client was created;
+  /// only grows (a sample is new when the count grew since an earlier read).
+  int get rttCount => _rttCount;
+  int _rttCount = 0;
+
+  /// GRAVIX (2026-10-13): the last round trip was timed in the signal
+  /// isolate (network only); false: on this isolate, where the app's own work
+  /// between the ping and the pong is counted too.
+  bool get rttNetworkOnly => _rttNetworkOnly;
+  bool _rttNetworkOnly = false;
+
+  /// GRAVIX (2026-10-13): every sample in [rttRecent] was timed in the signal
+  /// isolate (false when the window is empty). An app can trust such a
+  /// window even while its own isolate is busy.
+  bool get rttRecentNetworkOnly => _rttRecentNetwork.isNotEmpty && _rttRecentNetwork.every((n) => n);
+  final _rttRecentNetwork = Queue<bool>();
+
+  /// GRAVIX (2026-10-13): [requestPing] sends nothing within this of the last
+  /// ping (requested or periodic): that one's pong is on its way.
+  static const requestedPingGap = Duration(seconds: 1);
+  DateTime? _lastPingAt;
+
+  /// GRAVIX (2026-10-13, Room.requestSignalPing): one ping now, so a fresh
+  /// round trip is known one round trip later instead of at the next periodic
+  /// ping (every 5 s on the fleet: the SFU's PingIntervalSeconds). For an app
+  /// whose own isolate just got idle (its join done): its earlier samples may
+  /// carry its delay (see [rttNetworkOnly]). Returns whether it was sent: not
+  /// when the socket is not connected, when the server asked for no pings
+  /// (no ping config in the JoinResponse), or within [requestedPingGap] of
+  /// the last ping.
+  bool requestPing() {
+    if (isDisposed || _connectionState != ConnectionState.connected || _ws == null) return false;
+    if (_pingIntervalDuration == null || _pingTimeoutDuration == null) return false;
+    final last = _lastPingAt;
+    if (last != null && DateTime.timestamp().difference(last) < requestedPingGap) return false;
+    _sendPing();
+    return true;
+  }
+
+  void _noteRtt(int ms, {required bool networkOnly}) {
+    _rtt = ms;
+    _rttNetworkOnly = networkOnly;
+    _rttCount++;
+    _rttRecent.addLast(ms);
+    _rttRecentNetwork.addLast(networkOnly);
+    while (_rttRecent.length > rttWindow) {
+      _rttRecent.removeFirst();
+      _rttRecentNetwork.removeFirst();
+    }
+  }
+
+  /// GRAVIX (2026-10-13, first ping): the ping due at the JoinResponse /
+  /// ReconnectResponse, held until the socket counts as connected (a first
+  /// frame read before the dial returned).
+  bool _firstPingPending = false;
   String? participantSid;
 
   int _requestId = 0;
@@ -349,12 +422,16 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
                 ? GravixSignalStandby.connectsOf(taken.client) == taken.connectsAtTake
                 : (taken.usable ? false : null),
             'mechanism': GravixSignalStandby.mechanism,
+            // GRAVIX (2026-10-12): the socket lives in the signal isolate
+            // (GravixSignalIsolate); only reported when the switch is on
+            if (GravixSignalIsolateRuntime.enabled) 'signalIsolate': _ws?.gravixViaIsolate ?? false,
           };
         }
         GravixSignalStandby.release(taken.client);
       }
       // Successful connection
       _connectionState = ConnectionState.connected;
+      if (_firstPingPending) _sendFirstPing();
       events.emit(const SignalConnectedEvent());
     } catch (socketError) {
       if (socketError is CertificatePinningException) {
@@ -473,9 +550,14 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     _ws = null;
     _queue.clear();
     _clearPingInterval();
+    _rttRecent.clear();
+    _rttRecentNetwork.clear();
   }
 
-  void _sendRequest(lk_rtc.SignalRequest req, {bool enqueueIfReconnecting = true}) {
+  /// [pingTimestamp] (GRAVIX, 2026-10-13): [req] is the ping request with that
+  /// timestamp; the socket times its round trip where it can
+  /// ([GravixRtcWebSocket.gravixSendPing]).
+  void _sendRequest(lk_rtc.SignalRequest req, {bool enqueueIfReconnecting = true, int? pingTimestamp}) {
     if (isDisposed) {
       logger.warning('[$objectId] Could not send message, already disposed');
       return;
@@ -491,7 +573,13 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
       return;
     }
 
-    _ws?.send(req.writeToBuffer());
+    final ws = _ws;
+    if (ws == null) return;
+    if (pingTimestamp != null) {
+      ws.gravixSendPing(req.writeToBuffer(), pingTimestamp);
+    } else {
+      ws.send(req.writeToBuffer());
+    }
   }
 
   Future<void> _onSocketData(dynamic message) async {
@@ -504,7 +592,9 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
           _pingTimeoutDuration = Duration(seconds: msg.join.pingTimeout);
           _pingIntervalDuration = Duration(seconds: msg.join.pingInterval);
           logger.info('ping config timeout: ${msg.join.pingTimeout}, interval: ${msg.join.pingInterval} ');
-          _startPingInterval();
+          // GRAVIX (2026-10-13, first ping): one ping now, so the round trip is
+          // known one round trip after the JoinResponse, not one interval later
+          _startPingInterval(pingNow: true);
         }
         participantSid = msg.join.participant.sid;
         events.emit(SignalJoinResponseEvent(response: msg.join));
@@ -583,11 +673,19 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         _resetPingTimeout();
         break;
       case lk_rtc.SignalResponse_Message.pongResp:
-        _rtt = DateTime.timestamp().millisecondsSinceEpoch - msg.pongResp.lastPingTimestamp.toInt();
+        // GRAVIX (2026-10-13, network RTT): the socket's own timing when it has
+        // one for this ping (the signal isolate's), else today's measurement
+        final ts = msg.pongResp.lastPingTimestamp.toInt();
+        final timed = _ws?.gravixPongRttMs(ts);
+        _noteRtt(timed ?? DateTime.timestamp().millisecondsSinceEpoch - ts, networkOnly: timed != null);
         _pingCount++;
         _resetPingTimeout();
         break;
       case lk_rtc.SignalResponse_Message.reconnect:
+        // GRAVIX (2026-10-13, first ping): the resume's cleanUp() stopped the
+        // pings and only a JoinResponse started them again (upstream too), so a
+        // resumed session never pinged: ping now and every interval again.
+        if (_pingIntervalDuration != null && _pingTimeoutDuration != null) _startPingInterval(pingNow: true);
         events.emit(SignalReconnectResponseEvent(response: msg.reconnect));
         break;
       case lk_rtc.SignalResponse_Message.requestResponse:
@@ -621,13 +719,18 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
   }
 
   void _sendPing() {
+    _lastPingAt = DateTime.timestamp();
     final now = DateTime.timestamp().millisecondsSinceEpoch;
     // Send both ping and pingReq for compatibility with old and new servers
     _sendRequest(lk_rtc.SignalRequest()..ping = Int64(now));
-    _sendRequest(lk_rtc.SignalRequest()..pingReq = lk_rtc.Ping(timestamp: Int64(now), rtt: Int64(_rtt)));
+    _sendRequest(
+      lk_rtc.SignalRequest()..pingReq = lk_rtc.Ping(timestamp: Int64(now), rtt: Int64(_rtt)),
+      pingTimestamp: now,
+    );
   }
 
-  void _startPingInterval() {
+  /// [pingNow]: also one ping right away (GRAVIX, 2026-10-13).
+  void _startPingInterval({bool pingNow = false}) {
     _clearPingInterval();
     _resetPingTimeout();
 
@@ -637,12 +740,25 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     }
 
     _pingIntervalTimer ??= Timer.periodic(_pingIntervalDuration!, (_) => _sendPing());
+    if (pingNow) _sendFirstPing();
+  }
+
+  /// GRAVIX (2026-10-13, first ping): sends the first ping now when the socket
+  /// counts as connected, else when it does ([connect]).
+  void _sendFirstPing() {
+    if (_connectionState == ConnectionState.connected && _ws != null) {
+      _firstPingPending = false;
+      _sendPing();
+    } else {
+      _firstPingPending = true;
+    }
   }
 
   void _clearPingInterval() {
     _clearPingTimeout();
     _pingIntervalTimer?.cancel();
     _pingIntervalTimer = null;
+    _firstPingPending = false;
   }
 
   void _resetPingTimeout() {

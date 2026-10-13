@@ -146,6 +146,19 @@ class EngineJoinResponseEvent with EngineEvent, InternalEvent {
   String toString() => '${runtimeType}(response: ${response})';
 }
 
+/// GRAVIX (2026-10-12, fast publish): the join's microphone
+/// (GravixJoinMicrophone) was published inside the join. [inFirstOffer]: it
+/// was in the publisher connection's first offer.
+@internal
+class EngineJoinMicPublishedEvent with EngineEvent, InternalEvent {
+  final bool inFirstOffer;
+  final int attempt;
+  const EngineJoinMicPublishedEvent({required this.inFirstOffer, required this.attempt});
+
+  @override
+  String toString() => '${runtimeType}(inFirstOffer: ${inFirstOffer}, attempt: ${attempt})';
+}
+
 @internal
 class EngineConnectingEvent with InternalEvent, EngineEvent {
   const EngineConnectingEvent();

@@ -11,7 +11,7 @@ import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
 // `show` is load-bearing: exceptions.dart declares its own TimeoutException, and a
 // package declaration silently shadows dart:async's. Importing it whole made
 // `on TimeoutException` in _race stop matching, with no analyzer warning.
-import '../rtc_core/src/exceptions.dart' show ConnectException, ConnectionErrorReason;
+import '../rtc_core/src/exceptions.dart' show ConnectException, ConnectionErrorReason, RetiredServerException;
 import 'gravix_connection_report.dart';
 import 'gravix_region_probe_client.dart' show GravixRegionProbeClient;
 import 'gravix_region_report.dart';
@@ -79,6 +79,7 @@ class GravixRegionProber {
   /// ([GravixRegionProbeClient]) so its samples after the first measure one round
   /// trip instead of DNS + TCP + TLS + HTTP again.
   static Future<String?> defaultVerifiedProbe(String probeUrl, {http.Client? client}) async {
+    RetiredServerException.check(probeUrl); // 2026-10-12: no request to a retired Gravix host
     final uri = Uri.parse(probeUrl);
     final response = client != null ? await client.get(uri) : await sdkHttpGet(uri);
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -105,6 +106,7 @@ class GravixRegionProber {
   ///
   /// [client]: as for [defaultVerifiedProbe].
   static Future<void> defaultProbe(String url, {http.Client? client}) async {
+    RetiredServerException.check(url); // 2026-10-12: no request to a retired Gravix host
     final uri = Uri.parse(toHttpUrl(url));
     var status = (client != null ? await client.head(uri) : await sdkHttpHead(uri)).statusCode;
     if (_methodNotSupported.contains(status)) {
@@ -409,12 +411,10 @@ List<String> gravixRegionUrlsFrom(Map<String, dynamic>? tokenResponse) {
   if (raw is! List) return const [];
   final urls = <String>[];
   for (final entry in raw) {
-    if (entry is String) {
-      if (entry.isNotEmpty) urls.add(entry);
-    } else if (entry is Map) {
-      final url = entry['url'];
-      if (url is String && url.isNotEmpty) urls.add(url);
-    }
+    final url = entry is Map ? entry['url'] : entry;
+    // 2026-10-12: an entry on a retired Gravix host is dropped, as in
+    // gravixRegionEntriesFrom; see RetiredServerException.
+    if (url is String && url.isNotEmpty && RetiredServerException.retiredHostOf(url) == null) urls.add(url);
   }
   return List<String>.unmodifiable(urls);
 }

@@ -17,6 +17,7 @@ import 'dart:async' show TimeoutException;
 
 import '../options.dart';
 import '../support/disposable.dart';
+import 'websocket/signal_isolate.dart' show GravixSignalIsolateRuntime;
 import 'websocket/standby_types.dart' show GravixStandbyDial;
 import 'websocket/io.dart' if (dart.library.js_interop) 'websocket/web.dart';
 
@@ -82,6 +83,22 @@ abstract class GravixRtcWebSocket extends Disposable {
   /// (the join timeline's `standby.path`); null otherwise.
   GravixStandbyDial? gravixDial;
 
+  /// GRAVIX (2026-10-12): this socket lives in the signal isolate
+  /// (GravixSignalIsolate; websocket/signal_isolate_io.dart).
+  bool get gravixViaIsolate => false;
+
+  /// GRAVIX (2026-10-13, network RTT): sends a ping request ([data], a
+  /// SignalRequest whose `pingReq.timestamp` is [pingTimestamp]) and, where the
+  /// socket can, times its round trip itself: the signal isolate stamps the
+  /// frame's write and its pong's arrival there, so the app isolate's delay in
+  /// between is not counted ([gravixPongRttMs]). Here: a plain [send].
+  void gravixSendPing(List<int> data, int pingTimestamp) => send(data);
+
+  /// GRAVIX (2026-10-13): the round trip, ms, of the ping [pingTimestamp] as
+  /// this socket timed it ([gravixSendPing]) when its pong was the last one
+  /// received; null when it did not time it (the caller measures it then).
+  int? gravixPongRttMs(int pingTimestamp) => null;
+
   static Future<GravixRtcWebSocket> connect(
     Uri uri, {
     WebSocketEventHandlers? options,
@@ -108,16 +125,60 @@ abstract class GravixRtcWebSocket extends Disposable {
     // past dialCeiling from its start, and never less than connectTimeout
     Duration? upgradeWindow,
     Duration? dialCeiling,
-  }) => lkWebSocketConnect(
-    uri,
-    options: options,
-    headers: headers,
-    networkOptions: networkOptions,
-    preconnected: preconnected,
-    connectTimeout: connectTimeout,
-    hedgeAfter: hedgeAfter,
-    connectWithin: connectWithin,
-    upgradeWindow: upgradeWindow,
-    dialCeiling: dialCeiling,
-  );
+  }) => GravixSignalIsolateRuntime.routes(preconnected)
+      // GRAVIX (2026-10-12, opt-in GravixSignalIsolate): the same dial, in the
+      // signal isolate (websocket/signal_isolate_io.dart)
+      ? GravixSignalIsolateRuntime.connect(
+          uri,
+          options: options,
+          headers: headers,
+          networkOptions: networkOptions,
+          preconnected: preconnected,
+          connectTimeout: connectTimeout,
+          hedgeAfter: hedgeAfter,
+          connectWithin: connectWithin,
+          upgradeWindow: upgradeWindow,
+          dialCeiling: dialCeiling,
+        )
+      : _local(
+          uri,
+          options: options,
+          headers: headers,
+          networkOptions: networkOptions,
+          preconnected: preconnected,
+          connectTimeout: connectTimeout,
+          hedgeAfter: hedgeAfter,
+          connectWithin: connectWithin,
+          upgradeWindow: upgradeWindow,
+          dialCeiling: dialCeiling,
+        );
+
+  /// The dial on this isolate (a standby take meant for the signal isolate,
+  /// handed to a dial that is not going there, took nothing).
+  static Future<GravixRtcWebSocket> _local(
+    Uri uri, {
+    WebSocketEventHandlers? options,
+    Map<String, String>? headers,
+    NetworkOptions? networkOptions,
+    Object? preconnected,
+    Duration? connectTimeout,
+    Duration? hedgeAfter,
+    Duration? connectWithin,
+    Duration? upgradeWindow,
+    Duration? dialCeiling,
+  }) {
+    GravixSignalIsolateRuntime.notRouted(preconnected);
+    return lkWebSocketConnect(
+      uri,
+      options: options,
+      headers: headers,
+      networkOptions: networkOptions,
+      preconnected: preconnected,
+      connectTimeout: connectTimeout,
+      hedgeAfter: hedgeAfter,
+      connectWithin: connectWithin,
+      upgradeWindow: upgradeWindow,
+      dialCeiling: dialCeiling,
+    );
+  }
 }

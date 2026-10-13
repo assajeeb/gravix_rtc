@@ -696,6 +696,26 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   @internal
   bool gravixDeferJoinFailure = false;
 
+  /// GRAVIX (2026-10-12, fast publish): set by Room.connect for a join attempt
+  /// that publishes its microphone inside the join (GravixJoinMicrophone). The
+  /// publisher offer a JoinResponse asks for (fastPublish, or a publisher-primary
+  /// session) is then not made at once: the join's microphone publish makes it,
+  /// with the audio transceiver in it, once its capture is ready. The future
+  /// completes true when the publish asked for the offer itself, false when it
+  /// gave up (no capture in time, no permission, a failure, the attempt ended):
+  /// the engine then makes the data-channel-only offer as before. Without it
+  /// the offer went out 20 ms (the debounce) after the JoinResponse, before any
+  /// track could be added, and the microphone needed a second offer/answer
+  /// (REAL Android, 6 ms to the SFU: the mic went live 0.93 s after the room
+  /// connected). Null (default): exactly the old behaviour.
+  @internal
+  Future<bool> Function()? gravixJoinOfferHold;
+
+  /// GRAVIX (2026-10-12, fast publish): whether this session's publisher has
+  /// been asked to negotiate (an offer made or debouncing).
+  @internal
+  bool get gravixHasNegotiated => _hasPublished;
+
   /// The DisconnectReason a failed fresh [connect] reports for [error].
   @internal
   static DisconnectReason gravixJoinFailureReason(Object error) =>
@@ -728,8 +748,11 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     _clearPendingReconnect();
   }
 
+  /// [gravixAbort] (GRAVIX, 2026-10-12): completing it ends the wait for the
+  /// TrackPublished at once (a join attempt that failed: its socket will never
+  /// deliver it, and the next attempt must not wait behind it).
   @internal
-  Future<lk_models.TrackInfo> addTrack(lk_rtc.AddTrackRequest req) async {
+  Future<lk_models.TrackInfo> addTrack(lk_rtc.AddTrackRequest req, {Future<void>? gravixAbort}) async {
     // Race TrackPublished against a RequestResponse refusal for the same cid,
     // so a server rejection (e.g. video above the plan's resolution cap) fails
     // the publish promptly with the server's reason instead of a timeout.
@@ -757,6 +780,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         }
       }),
     );
+    if (gravixAbort != null) {
+      unawaited(
+        gravixAbort.then((_) {
+          if (!completer.isCompleted) {
+            completer.completeError(TrackPublishException('addTrack ${req.cid}: the join attempt ended'));
+          }
+        }),
+      );
+    }
     try {
       signalClient.sendAddTrack(req);
       return await completer.future.timeout(
@@ -2494,7 +2526,23 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         /// for subscriberPrimary, we negotiate when necessary (lazy)
         /// and if `response.fastPublish == true`, we need to negotiate
         /// immediately
-        await negotiate();
+        final hold = gravixFullReconnectInProgress ? null : gravixJoinOfferHold;
+        if (hold == null) {
+          await negotiate();
+        } else {
+          // GRAVIX (2026-10-12, fast publish): the join's microphone makes this
+          // offer (see gravixJoinOfferHold). Not awaited: the JoinResponse is
+          // handled on (the room creates its participants meanwhile). Only on
+          // the publisher it was held for: a failed attempt's late release must
+          // not negotiate the next attempt's connection.
+          final heldFor = publisher;
+          unawaited(
+            hold().then((tookOver) async {
+              if (tookOver || _isClosed || publisher == null || !identical(publisher, heldFor)) return;
+              await negotiate();
+            }),
+          );
+        }
       }
 
       events.emit(EngineJoinResponseEvent(response: event.response));

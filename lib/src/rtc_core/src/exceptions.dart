@@ -35,6 +35,56 @@ class ConnectException extends GravixRtcException {
   ConnectException(String msg, {required this.reason, this.statusCode = 0}) : super._(msg);
 }
 
+/// The url names a host of Gravix's RETIRED server deployment (the media server
+/// that ran before the current Gravix regions), so the SDK refuses it before any
+/// network I/O: no DNS lookup, no HEAD, no region-list fetch, no WebSocket.
+///
+/// Why fail instead of connecting: an app that still has an old host as a
+/// hard-coded url (or as a fallback for a token response without `url`) would
+/// run whole calls outside the current regions - no region routing, no relay,
+/// slow joins - and the old server's missing region list looks like an SDK
+/// bug. A typed error at the first call says what is wrong; a slow call on the
+/// wrong server says nothing.
+///
+/// Thrown by `Room.connect`, `Room.prepareConnection` and
+/// `GravixRoomService.connect`; `GravixStandby.open` resolves false instead
+/// (it never throws), a token response whose `url` is retired is a
+/// `GravixTokenException` (malformed) with this as its `cause`, and region
+/// entries on a retired host are dropped. Only the exact hosts in
+/// [retiredHosts] are retired: the wire protocol, the current region hosts and
+/// the gateway's `/v1/token` path are unchanged.
+class RetiredServerException extends GravixRtcException {
+  /// The retired host the url named, lower case.
+  final String host;
+
+  RetiredServerException(this.host) : super._('retired Gravix server ($host): use the url from your token response');
+
+  /// The hosts of the retired deployment. Exact host names, not suffixes: a
+  /// region host such as `sgp1.` + the same domain is current.
+  static const List<String> retiredHosts = ['rtc.gravixcloud.com', 'rtc-blr1.gravixcloud.com', 'token.gravixcloud.com'];
+
+  /// The retired host [url] points at, or null. Any scheme (`wss`, `ws`,
+  /// `https`, `http`) or none (a bare `host[:port][/path]`); the host is
+  /// compared case-insensitively, without its port or a trailing dot.
+  static String? retiredHostOf(String url) {
+    final trimmed = url.trim();
+    var host = Uri.tryParse(trimmed)?.host ?? '';
+    // A bare host has no authority, or parses as a scheme (`host:443`).
+    if (host.isEmpty) host = Uri.tryParse('wss://$trimmed')?.host ?? '';
+    host = host.toLowerCase();
+    while (host.endsWith('.')) {
+      host = host.substring(0, host.length - 1);
+    }
+    return retiredHosts.contains(host) ? host : null;
+  }
+
+  /// Throws a [RetiredServerException] when [url] points at a retired host.
+  static void check(String url) {
+    final host = retiredHostOf(url);
+    if (host != null) throw RetiredServerException(host);
+  }
+}
+
 /// An exception occurred while attempting to disconnect.
 /// Common reasons:
 /// - Network condition is not good.

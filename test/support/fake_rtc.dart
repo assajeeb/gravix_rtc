@@ -67,6 +67,18 @@ class FakeWs extends GravixRtcWebSocket {
     if (closed) return;
     final req = lk_rtc.SignalRequest.fromBuffer(data);
     sent.add(req);
+    // the server answers a ping (pingReq) with its pong after [FakeSignalServer.pongDelay]
+    if (req.hasPingReq() && server?.answerPings == true) {
+      server!.pingsAt.add(DateTime.now());
+      final ts = req.pingReq.timestamp;
+      Timer(server!.pongDelay, () {
+        deliver(
+          lk_rtc.SignalResponse(
+            pongResp: lk_rtc.Pong(lastPingTimestamp: ts, timestamp: ts),
+          ),
+        );
+      });
+    }
     // the server answers a publisher offer
     if (req.hasOffer() && server?.answerOffers == true) {
       server!.offersSeen++;
@@ -149,6 +161,15 @@ class FakeSignalServer {
   /// True for a socket whose AddTrack requests the server never answers.
   bool Function(FakeWs ws)? holdAddTrack;
 
+  /// Answer pings (pingReq) with a pong after [pongDelay] (default true; the
+  /// client pings only after a JoinResponse with a ping timeout, see
+  /// [fakeJoinResponse]).
+  bool answerPings = true;
+  Duration pongDelay = const Duration(milliseconds: 2);
+
+  /// When each pingReq reached the server, in order (any socket).
+  final pingsAt = <DateTime>[];
+
   /// Answer publisher offers (default false: the test answers or not).
   bool answerOffers = false;
   int offersSeen = 0;
@@ -197,6 +218,9 @@ lk_rtc.JoinResponse fakeJoinResponse({
   String identity = 'me',
   String sid = 'PA_me',
   String serverRegion = '',
+  // the server's ping config, seconds (0: none -- the client then never pings)
+  int pingTimeout = 0,
+  int pingInterval = 0,
 }) => lk_rtc.JoinResponse(
   room: lk_models.Room(name: 'r', sid: 'RM_r'),
   participant: lk_models.ParticipantInfo(sid: sid, identity: identity),
@@ -204,6 +228,8 @@ lk_rtc.JoinResponse fakeJoinResponse({
   subscriberPrimary: subscriberPrimary,
   serverVersion: '1.9.0',
   serverRegion: serverRegion,
+  pingTimeout: pingTimeout,
+  pingInterval: pingInterval,
 );
 
 /// A capture track; [stop] is what a stopOnMute mute does to the native track.

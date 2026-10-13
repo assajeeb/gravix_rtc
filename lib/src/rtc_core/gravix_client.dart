@@ -23,6 +23,7 @@ export 'src/connection_check/events.dart';
 export 'src/constants.dart';
 export 'src/core/room.dart';
 export 'src/core/room_preconnect.dart';
+export 'src/core/gravix_join_mic.dart' show GravixJoinMicrophone;
 export 'src/core/reconnect_policy.dart';
 export 'src/data_stream/stream_reader.dart';
 export 'src/data_stream/stream_writer.dart';

@@ -76,6 +76,12 @@ Duration kGravixStandbyUpgradeTimeout = const Duration(milliseconds: 1500);
 /// than the SFU's own join handling on a normal join.
 const Duration kGravixStandbyUpgradeFloor = Duration(milliseconds: 500);
 
+/// GRAVIX (2026-10-12): see `GravixStandby.lowRttUpgradeFloor`. Null = off.
+Duration? gravixStandbyLowRttUpgradeFloor;
+
+/// Below this RTT (ms) [gravixStandbyLowRttUpgradeFloor] applies.
+const int kGravixStandbyLowRttMs = 30;
+
 /// The upgrade bound for a connection whose round trip is about [rttMs]:
 /// 3 x RTT, clamped to [kGravixStandbyUpgradeFloor]..[kGravixStandbyUpgradeTimeout];
 /// [kGravixStandbyUpgradeTimeout] without an RTT.
@@ -83,7 +89,9 @@ Duration gravixStandbyUpgradeBound(int? rttMs) {
   final cap = kGravixStandbyUpgradeTimeout;
   if (rttMs == null || rttMs <= 0) return cap;
   final ms = rttMs * 3;
-  final floor = kGravixStandbyUpgradeFloor < cap ? kGravixStandbyUpgradeFloor : cap;
+  final lowRttFloor = gravixStandbyLowRttUpgradeFloor;
+  final base = lowRttFloor != null && rttMs < kGravixStandbyLowRttMs ? lowRttFloor : kGravixStandbyUpgradeFloor;
+  final floor = base < cap ? base : cap;
   if (ms < floor.inMilliseconds) return floor;
   if (ms > cap.inMilliseconds) return cap;
   return Duration(milliseconds: ms);

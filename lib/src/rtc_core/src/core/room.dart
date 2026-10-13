@@ -22,6 +22,7 @@ import 'package:meta/meta.dart';
 
 import '../audio/audio_manager.dart';
 import '../core/signal_client.dart';
+import 'gravix_join_mic.dart';
 import '../data_stream/errors.dart';
 import '../data_stream/stream_reader.dart';
 import '../e2ee/e2ee_manager.dart';
@@ -508,6 +509,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// the current client to connect to if a token is provided.
 
   Future<void> prepareConnection(String url, String? token) async {
+    // GRAVIX (2026-10-12): a retired Gravix host gets no HEAD and no region-list
+    // fetch; the typed error says why (RetiredServerException).
+    RetiredServerException.check(url);
     if (engine.connectionState != ConnectionState.disconnected) {
       return;
     }
@@ -539,7 +543,13 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     ConnectOptions? connectOptions,
     @Deprecated('deprecated, please use roomOptions in Room constructor') RoomOptions? roomOptions,
     FastConnectOptions? fastConnectOptions,
+    // GRAVIX (2026-10-12, fast publish): see [GravixJoinMicrophone]
+    GravixJoinMicrophone? joinMicrophone,
   }) async {
+    // GRAVIX (2026-10-12): first, before any state changes or I/O - in
+    // particular before isCloudUrl below, which would fetch the retired
+    // server's (missing) region list. See RetiredServerException.
+    RetiredServerException.check(url);
     var effectiveRoomOptions = roomOptions ?? this.roomOptions;
     if (lkPlatformIs(PlatformType.web) &&
         (effectiveRoomOptions.networkOptions.certificatePinning?.isEnabled ?? false)) {
@@ -643,10 +653,26 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     final maxRetries = connectOptions.joinRetries < 0 || fastConnectOptions != null || preConnectAudioBuffer.isRecording
         ? 0
         : connectOptions.joinRetries;
+    // GRAVIX (2026-10-12, fast publish): the microphone published inside the
+    // join (GravixJoinMicrophone). Unlike the two above it keeps the retries:
+    // each attempt owns its capture and its publication, and a failed attempt's
+    // are undone before the next one starts. Not beside them: they publish a
+    // microphone inside the join already.
+    final joinMic =
+        joinMicrophone != null &&
+            !preConnectAudioBuffer.isRecording &&
+            !(fastConnectOptions != null &&
+                (fastConnectOptions.microphone.enabled == true || fastConnectOptions.microphone.track != null))
+        ? joinMicrophone
+        : null;
+    if (joinMicrophone != null && joinMic == null) {
+      logger.warning('joinMicrophone ignored: FastConnectOptions or the pre-connect buffer publish the microphone');
+    }
     try {
       for (var attempt = 0; ; attempt++) {
         final mayRetry = attempt < maxRetries;
         engine.gravixDeferJoinFailure = mayRetry;
+        if (joinMic != null) _gravixArmJoinMic(GravixJoinMicAttempt(joinMic, attempt: attempt + 1));
         try {
           await _gravixConnectAttempt(url, token, connectOptions, effectiveRoomOptions, fastConnectOptions);
           didConnect = true;
@@ -654,21 +680,32 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.connect);
           return;
         } catch (e) {
+          // the attempt is over: the join microphone's waits end now
+          final micAttempt = _gravixJoinMic;
+          micAttempt?.abort();
           // the last attempt: the engine reported the failure itself, as before
           if (!mayRetry) rethrow;
           final retry = attempt + 1;
           // not a media-connect failure, a leave (ours, or the server's Leave,
           // which closes the engine), or an attempt that published a local
-          // track: no retry, the join fails as it always did
+          // track (other than the join's own microphone): no retry, the join
+          // fails as it always did
           if (!gravixIsJoinRetryable(e) ||
               _gravixLeaving ||
               isDisposed ||
               engine.isClosed ||
-              (_localParticipant?.trackPublications.isNotEmpty ?? false)) {
+              _gravixHasPublications(except: micAttempt)) {
             _gravixGiveUpJoin(e);
             rethrow;
           }
           await _gravixCleanUpFailedJoinAttempt();
+          // after the engine's clean-up (no publisher left to renegotiate): the
+          // attempt's microphone publication and capture; the next attempt
+          // captures and publishes again on its own session
+          final failed = micAttempt;
+          if (failed != null) {
+            await failed.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
+          }
           final delay = connectOptions.joinRetryDelay(retry);
           logger.warning(
             'join attempt ${attempt + 1} failed ($e); joining again in ${delay.inMilliseconds} ms '
@@ -684,11 +721,96 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       }
     } finally {
       engine.gravixDeferJoinFailure = false;
+      engine.gravixJoinOfferHold = null;
+      final micAttempt = _gravixJoinMic;
+      _gravixJoinMic = null;
       if (!didConnect) {
+        // GRAVIX (2026-10-12): the failed join's microphone capture stops before
+        // connect() fails (privacy: no microphone indicator after a failed
+        // join). Its publication is removed here too: the room's own clean-up
+        // (on the join failure's EngineDisconnectedEvent) may have run before a
+        // publish still in flight added it, and a publication left behind on the
+        // kept local participant would be found by the next join.
+        await micAttempt?.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
         await NativeAudioManagement.stop();
         GravixForegroundService.roomReleased(this);
       }
     }
+  }
+
+  /// GRAVIX (2026-10-12, fast publish): the join attempt's microphone
+  /// (GravixJoinMicrophone), while Room.connect runs it.
+  GravixJoinMicAttempt? _gravixJoinMic;
+
+  void _gravixArmJoinMic(GravixJoinMicAttempt m) {
+    _gravixJoinMic = m;
+    engine.gravixJoinOfferHold = m.offerHold;
+  }
+
+  /// The core's region fallback dials another url within the same attempt: a
+  /// microphone the first url's session already took is undone and captured
+  /// afresh for the new session (one that was not started yet is kept).
+  Future<void> _gravixRenewJoinMicForFallback() async {
+    final m = _gravixJoinMic;
+    if (m == null || !(m.started || m.isAborted)) return;
+    m.abort();
+    await m.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
+    _gravixArmJoinMic(GravixJoinMicAttempt(m.options, attempt: m.attempt));
+  }
+
+  /// Whether the local participant has a publication other than [except]'s
+  /// microphone (that one is undone before a retry).
+  bool _gravixHasPublications({GravixJoinMicAttempt? except}) {
+    final pubs = _localParticipant?.trackPublications.values;
+    if (pubs == null || pubs.isEmpty) return false;
+    final mic = except?.createdTrack;
+    return pubs.any((p) => mic == null || !identical(p.track, mic));
+  }
+
+  static bool _gravixMayPublishMicrophone(lk_models.ParticipantInfo info) {
+    // no permission block: nothing says no (the server decides)
+    if (!info.hasPermission()) return true;
+    final p = info.permission;
+    if (!p.canPublish) return false;
+    return p.canPublishSources.isEmpty || p.canPublishSources.contains(lk_models.TrackSource.MICROPHONE);
+  }
+
+  /// GRAVIX (2026-10-12, fast publish): starts the join attempt's microphone
+  /// publish at its JoinResponse, without holding the rest of the JoinResponse
+  /// handling. Its AddTrack and transceiver make the publisher's held first
+  /// offer (Engine.gravixJoinOfferHold).
+  void _gravixStartJoinMicrophone(GravixJoinMicAttempt join, lk_models.ParticipantInfo info) {
+    final local = _localParticipant;
+    if (local == null || join.started || join.isAborted) return;
+    if (!_gravixMayPublishMicrophone(info)) {
+      logger.info('join microphone: this participant may not publish a microphone; not published');
+      join.releaseOffer(false);
+      join.disposeCapture();
+      return;
+    }
+    join.publishing = () async {
+      try {
+        final pub = await local.gravixPublishJoinMicrophone(join);
+        if (pub == null) {
+          // nothing published (not wanted, the capture failed, the attempt ended,
+          // a microphone published otherwise): the capture is not needed
+          join.disposeCapture();
+          return null;
+        }
+        join.publication = pub;
+        if (!join.isAborted) {
+          engine.events.emit(
+            EngineJoinMicPublishedEvent(inFirstOffer: join.inFirstOffer ?? false, attempt: join.attempt),
+          );
+        }
+        return pub;
+      } catch (e) {
+        if (!join.isAborted) logger.warning('join microphone: publish failed ($e); the join goes on without it');
+        join.releaseOffer(false);
+        join.disposeCapture();
+        return null;
+      }
+    }();
   }
 
   /// One join attempt: the url (or the region the provider picked), and on a
@@ -735,6 +857,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           logger.fine('Initial connection failed with ConnectionError: $e. Retrying with another region: ${nextUrl}');
           // a deferred failure was not cleaned up by the event handler
           if (engine.gravixDeferJoinFailure) await _gravixCleanUpFailedJoinAttempt();
+          await _gravixRenewJoinMicForFallback();
           await engine.connect(
             nextUrl,
             token,
@@ -916,6 +1039,14 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (engine.gravixFullReconnectInProgress ||
           (existingLocal != null && existingLocal.sid != event.response.participant.sid)) {
         await _localParticipant!.updateFromInfo(event.response.participant);
+      }
+
+      // GRAVIX (2026-10-12, fast publish): the join's microphone, into the
+      // publisher's first offer (a fresh join only: a full reconnect republishes
+      // what is published)
+      final joinMic = _gravixJoinMic;
+      if (joinMic != null && !engine.gravixFullReconnectInProgress) {
+        _gravixStartJoinMicrophone(joinMic, event.response.participant);
       }
 
       // Check if preconnect buffer is recording and publish its track

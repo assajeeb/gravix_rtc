@@ -2,7 +2,10 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../rtc_core/src/core/room.dart';
+import '../rtc_core/src/exceptions.dart' show RetiredServerException;
 import '../rtc_core/src/support/websocket/standby.dart';
 import '../rtc_core/src/utils.dart';
 
@@ -31,6 +34,13 @@ abstract final class GravixStandby {
   /// probe); the join's upgrade over the standby connection gets 3 x RTT
   /// (0.5-1.5 s; 1.5 s unknown) before a fresh dial races it.
   static Future<bool> open(String url, String token, {int? rttMs}) async {
+    // 2026-10-12: nothing is opened to a retired Gravix host (false, as for any
+    // standby that could not open; the join itself throws RetiredServerException).
+    final retired = RetiredServerException.retiredHostOf(url);
+    if (retired != null) {
+      debugPrint('Gravix standby: ${RetiredServerException(retired).message}');
+      return false;
+    }
     try {
       unawaited(Utils.warmClientInfo());
       return await GravixSignalStandby.open(url, token, rttHintMs: rttMs);
@@ -38,6 +48,20 @@ abstract final class GravixStandby {
       return false;
     }
   }
+
+  /// Opt-in (2026-10-12): the shortest wait for the join's upgrade over a
+  /// standby connection when the app passed an [open] `rttMs` below 30 ms.
+  /// Null (default) = 0.5 s, as before.
+  ///
+  /// On such a path 3 x RTT is ~20 ms and the wait is the 0.5 s floor, which is
+  /// about the APP, not the network: on a real Android phone 6 ms from its SFU,
+  /// with a busy main isolate, the upgrade's reply was read after the floor, the
+  /// join dialled again (timeline `standby.outcome: stalled_redialed`) and paid
+  /// +1.4 s. A floor of e.g. 1 s lets such a late reply win. The cost: when the
+  /// standby connection is really dead (a network change since it was opened),
+  /// the fresh dial starts that much later. Higher RTTs keep 3 x RTT (0.5-1.5 s).
+  static Duration? get lowRttUpgradeFloor => gravixStandbyLowRttUpgradeFloor;
+  static set lowRttUpgradeFloor(Duration? floor) => gravixStandbyLowRttUpgradeFloor = floor;
 
   /// Call when the app comes back to the foreground: every standby connection is
   /// closed and opened again (one opened while the app was paused is not

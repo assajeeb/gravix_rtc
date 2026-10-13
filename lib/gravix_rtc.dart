@@ -46,6 +46,7 @@ export 'src/connect/gravix_region_report.dart';
 export 'src/connect/gravix_region_selection.dart';
 export 'src/connect/gravix_region_shortlist.dart';
 export 'src/connect/gravix_standby.dart';
+export 'src/connect/gravix_signal_isolate.dart';
 export 'src/connect/gravix_restart_strategy.dart';
 export 'src/beauty/default_gravix_beauty_filter.dart';
 export 'src/beauty/gravix_beauty_filter.dart';

@@ -39,6 +39,7 @@ import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMu
 import '../rtc_core/src/track/local/mic_republish.dart';
 import '../rtc_core/src/internal/events.dart'
     show
+        EngineJoinMicPublishedEvent,
         EngineJoinResponseEvent,
         EnginePeerStateUpdatedEvent,
         SignalConnectedEvent,
@@ -105,7 +106,9 @@ class GravixRoomService implements GravixAudioHost {
     @visibleForTesting Future<void> Function(String httpUrl)? prepareConnection,
     @visibleForTesting Future<bool> Function()? requestMicPermission,
     @visibleForTesting Future<void> Function(bool enabled)? applyMic,
+    @visibleForTesting Future<LocalAudioTrack> Function(AudioCaptureOptions options)? createMicTrack,
   }) : _applyMic = applyMic,
+       _createMicTrackSeam = createMicTrack,
        _prepareConnection = prepareConnection ?? _defaultPrepareConnection,
        _requestMicPermission = requestMicPermission ?? _defaultRequestMicPermission,
        assert(videoEffect == null || beauty == null, 'pass videoEffect OR the deprecated beauty, not both'),
@@ -316,7 +319,12 @@ class GravixRoomService implements GravixAudioHost {
 
   Future<void> _connectRoom(Room room, String url, String token) =>
       _connectRoomSeam?.call(room, url, token) ??
-      room.connect(url, token, connectOptions: _attemptConnectOptions ?? connectOptions);
+      room.connect(
+        url,
+        token,
+        connectOptions: _attemptConnectOptions ?? connectOptions,
+        joinMicrophone: _attemptJoinMic,
+      );
 
   /// GRAVIX (0.4.15): region failover, resume and rejoin behaviour of every room
   /// this service joins ([RoomOptions.recovery]). `GravixRecoveryOptions.legacy`
@@ -335,6 +343,15 @@ class GravixRoomService implements GravixAudioHost {
 
   @visibleForTesting
   ConnectOptions? get debugAttemptConnectOptions => _attemptConnectOptions;
+
+  /// The microphone the join in flight publishes inside the join
+  /// (connect's `publishMicOnJoin`); null otherwise.
+  GravixJoinMicrophone? _attemptJoinMic;
+
+  @visibleForTesting
+  GravixJoinMicrophone? get debugAttemptJoinMicrophone => _attemptJoinMic;
+
+  final Future<LocalAudioTrack> Function(AudioCaptureOptions options)? _createMicTrackSeam;
 
   /// GRAVIX(0.4.13): the Room a connect() is joining, until it is connected or
   /// has failed; disconnect() marks it as left so its join stops retrying.
@@ -563,7 +580,8 @@ class GravixRoomService implements GravixAudioHost {
   // ═══════════════════════════════════════════════════════════════════════════
   //  CONNECT  — replaces createRtcEngine + initialize + joinChannel
   // ═══════════════════════════════════════════════════════════════════════════
-  /// [url]        e.g. 'wss://rtc.example.com'
+  /// [url]        e.g. 'wss://rtc.example.com'; a retired Gravix host fails with
+  ///              [RetiredServerException] before anything is sent
   /// [token]      JWT from your token server (room + identity=uid + canPublish)
   /// [publishMic] start publishing audio immediately (host = true, viewer = false)
   /// [enableVideo]video rooms only — start publishing camera too
@@ -664,6 +682,21 @@ class GravixRoomService implements GravixAudioHost {
     //   room-code screen lights the OS privacy indicator and takes the audio mode
     //   from other apps while the user has not joined anything.
     bool earlyMicTrack = false,
+    // [publishMicOnJoin] opt-in (2026-10-12, fast publish). With [publishMic]: the
+    //   microphone is part of the join instead of a step after it. Its capture
+    //   starts in parallel with the signalling (as [earlyMicTrack]), and at the
+    //   JoinResponse its AddTrack and audio transceiver go into the publisher
+    //   connection's FIRST offer, so the mic is live when the publisher connection
+    //   connects (Room.connect's GravixJoinMicrophone). Without it the mic is
+    //   published after connect() and needs a second offer/answer: real Android
+    //   phone 6 ms from its SFU, mic live 0.93 s after the room connected. Join
+    //   retries keep working (each attempt captures and publishes again; a failed
+    //   attempt's capture is stopped); a join that fails or is left stops the
+    //   capture before connect() returns. A mute tapped during the join is
+    //   honoured (not published, or muted right after). Pass it only when the
+    //   microphone permission is already granted. Takes precedence over
+    //   [earlyMicTrack]. Off = exactly the old order.
+    bool publishMicOnJoin = false,
     // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
     //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
     //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
@@ -678,6 +711,12 @@ class GravixRoomService implements GravixAudioHost {
     //   background/foreground to [setAppBackgrounded].
     GravixForegroundServiceOptions? foregroundService,
   }) {
+    // GRAVIX (2026-10-12): a retired Gravix host fails here, before the session
+    // bookkeeping, the audio session or any probe. A failed Future rather than
+    // `false`: _connectOnce turns every error into `false`, and this one must
+    // reach the app typed (RetiredServerException says what to do).
+    final retired = RetiredServerException.retiredHostOf(url);
+    if (retired != null) return Future<bool>.error(RetiredServerException(retired));
     // GRAVIX(one-session, 2026-10-05): one session per room + identity. Field: a
     // second join for the same identity raced the first one's resume on another
     // node, moved the room's origin and cost ~2.5 min of instability.
@@ -737,6 +776,7 @@ class GravixRoomService implements GravixAudioHost {
           red: red,
           redLossThresholdPct: redLossThresholdPct,
           earlyMicTrack: earlyMicTrack,
+          publishMicOnJoin: publishMicOnJoin,
           dtx: dtx,
           foregroundService: foregroundService,
         );
@@ -861,6 +901,21 @@ class GravixRoomService implements GravixAudioHost {
     //   room-code screen lights the OS privacy indicator and takes the audio mode
     //   from other apps while the user has not joined anything.
     bool earlyMicTrack = false,
+    // [publishMicOnJoin] opt-in (2026-10-12, fast publish). With [publishMic]: the
+    //   microphone is part of the join instead of a step after it. Its capture
+    //   starts in parallel with the signalling (as [earlyMicTrack]), and at the
+    //   JoinResponse its AddTrack and audio transceiver go into the publisher
+    //   connection's FIRST offer, so the mic is live when the publisher connection
+    //   connects (Room.connect's GravixJoinMicrophone). Without it the mic is
+    //   published after connect() and needs a second offer/answer: real Android
+    //   phone 6 ms from its SFU, mic live 0.93 s after the room connected. Join
+    //   retries keep working (each attempt captures and publishes again; a failed
+    //   attempt's capture is stopped); a join that fails or is left stops the
+    //   capture before connect() returns. A mute tapped during the join is
+    //   honoured (not published, or muted right after). Pass it only when the
+    //   microphone permission is already granted. Takes precedence over
+    //   [earlyMicTrack]. Off = exactly the old order.
+    bool publishMicOnJoin = false,
     // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
     //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
     //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
@@ -893,9 +948,15 @@ class GravixRoomService implements GravixAudioHost {
     // pulls them straight out of the token response and keeps the slug that
     // `gravixRegionUrlsFrom` throws away; without them the cross-SDK report
     // still emits, with `unknown` slugs.
-    _regionEntries = regionEntries.isNotEmpty
-        ? regionEntries
-        : [for (final u in regionUrls) GravixRegionUrl(region: kGravixUnknownRegion, url: u)];
+    _regionEntries = [
+      for (final e
+          in regionEntries.isNotEmpty
+              ? regionEntries
+              : [for (final u in regionUrls) GravixRegionUrl(region: kGravixUnknownRegion, url: u)])
+        // 2026-10-12: a region on a retired Gravix host is never probed nor
+        // dialled (Room.connect would refuse it anyway, failing the ladder rung).
+        if (RetiredServerException.retiredHostOf(e.url) == null) e,
+    ];
     final effectiveRegionUrls = [for (final e in _regionEntries) e.url];
     _connectionId = _newConnectionId();
     _connectStartedAt = DateTime.now();
@@ -966,17 +1027,54 @@ class GravixRoomService implements GravixAudioHost {
       final leftover = _earlyMic;
       _earlyMic = null;
       if (leftover != null) unawaited(_disposeEarlyMic(leftover));
-      if (earlyMicTrack && publishMic && _applyMic == null) {
-        final early = audioReady.then((_) async {
+      final leftoverJoinMic = _joinMicCapture;
+      _joinMicCapture = null;
+      if (leftoverJoinMic != null) unawaited(_disposeEarlyMic(leftoverJoinMic));
+      Future<LocalAudioTrack> createMicTrack() => audioReady.then((_) async {
+        try {
+          await music.install();
+        } catch (_) {}
+        timeline?.notePath('svc:earlyMicStart');
+        await GravixEngineMicMute.release();
+        final seam = _createMicTrackSeam;
+        final t = await (seam != null ? seam(_audioCaptureOptions) : LocalAudioTrack.create(_audioCaptureOptions));
+        timeline?.notePath('svc:earlyMicReady');
+        return t;
+      });
+      // publishMicOnJoin (2026-10-12, fast publish): the capture starts now, in
+      // parallel with the probe race and the signalling, and the room takes it
+      // at its first join attempt (Room.connect's GravixJoinMicrophone puts it
+      // into the publisher's first offer). A retry, or the next url of the
+      // ladder, captures afresh (the room stopped the failed attempt's). Not
+      // through _earlyMic: the room owns the capture once it took it, and the
+      // mic step then finds the publication.
+      if (publishMicOnJoin && publishMic && _applyMic == null) {
+        // started here too (the recorder start, ~0.15 s on a phone, was the
+        // first part of the old mic step): it then overlaps the probe race and
+        // the dial; the room's own start is a no-op
+        final capture = createMicTrack().then((t) async {
           try {
-            await music.install();
-          } catch (_) {}
-          timeline?.notePath('svc:earlyMicStart');
-          await GravixEngineMicMute.release();
-          final t = await LocalAudioTrack.create(_audioCaptureOptions);
-          timeline?.notePath('svc:earlyMicReady');
+            await t.start();
+          } catch (e) {
+            await _disposeEarlyMic(Future<LocalAudioTrack>.value(t));
+            rethrow;
+          }
           return t;
         });
+        capture.ignore();
+        _joinMicCapture = capture;
+        _attemptJoinMic = GravixJoinMicrophone(
+          createTrack: () {
+            final c = _joinMicCapture;
+            _joinMicCapture = null;
+            return c ?? createMicTrack();
+          },
+          // a mute tapped during the join (setMicEnabled(false)) wins, as it does
+          // over publishMic on the old path
+          wanted: () => _wantedMic != false && !_joinLeaveRequested,
+        );
+      } else if (earlyMicTrack && publishMic && _applyMic == null) {
+        final early = createMicTrack();
         early.ignore();
         _earlyMic = early;
       }
@@ -1250,6 +1348,7 @@ class GravixRoomService implements GravixAudioHost {
       _room = room;
       _joiningRoom = null;
       _attemptConnectOptions = null;
+      _endJoinMic();
       roomMusic.attach(room);
       if (regionProbe && regionReprobeOnRestart && effectiveRegionUrls.isNotEmpty) {
         room.engine.restartRegionStrategy = GravixProbeRestartStrategy(
@@ -1398,6 +1497,9 @@ class GravixRoomService implements GravixAudioHost {
       debugPrint('❌ Gravix connect error: $e');
       _joiningRoom = null;
       _attemptConnectOptions = null;
+      // publishMicOnJoin: a capture the room never took (the join failed before
+      // its first attempt) is stopped; the room stopped the ones it took
+      _endJoinMic();
       // earlyMicTrack: a join that failed before its mic step must not leave the
       // capture running (the app may not call disconnect() after a failed join)
       final early = _earlyMic;
@@ -1721,6 +1823,8 @@ class GravixRoomService implements GravixAudioHost {
     bool dtx = false,
     // see connect's `foregroundService`
     GravixForegroundServiceOptions? foregroundService,
+    // see connect's `publishMicOnJoin`
+    bool publishMicOnJoin = false,
   }) async {
     lastTokenError = null;
     final GravixJoinCredentials credentials;
@@ -1763,6 +1867,7 @@ class GravixRoomService implements GravixAudioHost {
       // </candidate:earlyCallAudio>
       dtx: dtx,
       foregroundService: foregroundService,
+      publishMicOnJoin: publishMicOnJoin,
     );
   }
 
@@ -2187,6 +2292,14 @@ class GravixRoomService implements GravixAudioHost {
     };
     _timelineCancels
       ..add(engine.signalClient.events.on<SignalConnectingEvent>((_) => timeline.mark(GravixJoinStep.wsConnectStart)))
+      // publishMicOnJoin: the mic is published by the join itself (the mic step
+      // after connect() then only finds it; mark keeps this first time)
+      ..add(
+        engine.events.on<EngineJoinMicPublishedEvent>((e) {
+          timeline.notePath('svc:micPublishedInJoin', detail: e.inFirstOffer);
+          timeline.mark(GravixJoinStep.micPublished);
+        }),
+      )
       ..add(
         engine.signalClient.events.on<SignalConnectedEvent>((_) {
           timeline
@@ -2748,6 +2861,19 @@ class GravixRoomService implements GravixAudioHost {
     }
   }
 
+  /// publishMicOnJoin: the capture started with the join, until the room takes
+  /// it (GravixJoinMicrophone.createTrack).
+  Future<LocalAudioTrack>? _joinMicCapture;
+
+  /// The join is over (connected or failed): no attempt takes a capture any
+  /// more; one that was never taken is stopped.
+  void _endJoinMic() {
+    _attemptJoinMic = null;
+    final c = _joinMicCapture;
+    _joinMicCapture = null;
+    if (c != null) unawaited(_disposeEarlyMic(c));
+  }
+
   static Future<void> _disposeEarlyMic(Future<LocalAudioTrack> early) async {
     try {
       final t = await early;
@@ -3066,6 +3192,9 @@ class GravixRoomService implements GravixAudioHost {
       final early = _earlyMic;
       _earlyMic = null;
       if (early != null) await _disposeEarlyMic(early);
+      final joinMic = _joinMicCapture;
+      _joinMicCapture = null;
+      if (joinMic != null) await _disposeEarlyMic(joinMic);
       _room = null;
       _joinWatch = null;
       GravixForegroundService.removeBackgroundSink(this);

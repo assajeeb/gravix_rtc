@@ -145,4 +145,68 @@ void main() {
   test('a start that works reports started', () async {
     expect(await gravixStartExplicitRecording(() async {}), isTrue);
   });
+
+  // 2026-10-13, field (an Android app, 1 of ~15 host joins): SIGABRT in
+  // AudioRecordJava, libc++ "span<T>::operator[]: index out of range" under
+  // WebRtcAudioRecord.nativeDataIsRecorded. The record thread the pre-warm had
+  // started delivered a buffer between the engine's InitRecording caching the
+  // direct buffer (`direct buffer capacity: 1920`, 17.958) and setting
+  // frames_per_buffer (`frames_per_buffer: 480`, 17.960). An app can ask that
+  // the recorder is only prepared at the capture start (options, mixer hook,
+  // AudioRecord) and that its thread is started by the engine itself, after its
+  // InitRecording finished.
+  group('Android: who starts the record thread (GravixAndroidRecorder)', () {
+    late List<MethodCall> calls;
+
+    setUp(() {
+      calls = [];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        (call) async {
+          calls.add(call);
+          return null;
+        },
+      );
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('gravix_client'),
+        null,
+      );
+      gravixExplicitRecordingDebugPlatform = null;
+      GravixAndroidRecorder.startThreadAtCapture = true;
+    });
+
+    LocalAudioTrack track() =>
+        LocalAudioTrack(TrackSource.microphone, _FakeStream(), _FakeTrack(), const AudioCaptureOptions());
+
+    Map<Object?, Object?> startArgs() {
+      final start = calls.where((c) => c.method == 'startLocalRecording').single;
+      return start.arguments as Map<Object?, Object?>;
+    }
+
+    test('default: as before, the capture start starts the record thread', () async {
+      expect(GravixAndroidRecorder.startThreadAtCapture, isTrue);
+      gravixExplicitRecordingDebugPlatform = PlatformType.android;
+      await track().start();
+      expect(startArgs()['gravixStartRecordThread'], isTrue);
+    });
+
+    test('opted out: the native side only prepares the recorder; the processing options still go', () async {
+      GravixAndroidRecorder.startThreadAtCapture = false;
+      gravixExplicitRecordingDebugPlatform = PlatformType.android;
+      await track().start();
+      final args = startArgs();
+      expect(args['gravixStartRecordThread'], isFalse);
+      expect(args.keys, containsAll(<String>['echoCancellation', 'noiseSuppression', 'autoGainControl']));
+    });
+
+    test('iOS: not sent (an Android recorder detail)', () async {
+      GravixAndroidRecorder.startThreadAtCapture = false;
+      gravixExplicitRecordingDebugPlatform = PlatformType.iOS;
+      await track().start();
+      expect(startArgs().containsKey('gravixStartRecordThread'), isFalse);
+    });
+  });
 }
