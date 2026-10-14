@@ -193,6 +193,53 @@ Bounds and failure handling:
 - A mute tapped during the join is honoured: nothing is published (or it is muted right
   after a publish that was already in flight).
 
+## A video host's camera in the first offer: `joinCamera` (core, EXPERIMENTAL, 0.4.18)
+
+> **Experimental, off by default.** In device tests it gave no measurable speed-up for the camera, and
+> combined with `joinMicrophone` the microphone went live later: the shared first offer waits for the
+> camera (up to `offerWait`). Keep the microphone-only fast publish for hosts; use `joinCamera` only to
+> measure on your own devices. The API may change.
+
+The same for the camera, in the core: `Room.connect(joinCamera: GravixJoinCamera(...))`,
+alone or beside `joinMicrophone` (one first offer then carries both).
+
+```dart
+room.events.on<GravixJoinCameraFailedEvent>((e) {
+  // the room is connected without the camera: show it, publish later normally
+  log('join camera not published: ${e.reason.name} ${e.error}');
+});
+await room.connect(
+  url,
+  token,
+  joinMicrophone: GravixJoinMicrophone(createTrack: () => LocalAudioTrack.create(micOptions)),
+  joinCamera: GravixJoinCamera(
+    // the app's own camera (or a preview track); a NEW track on every call (one per join attempt)
+    createTrack: () => openMyCameraTrack(),
+    // or leave createTrack out: captureOptions: const CameraCaptureOptions(params: VideoParametersPresets.h540_169),
+    publishOptions: myVideoPublishOptions, // as for publishVideoTrack (codec, simulcast layers, encoding)
+    wanted: () => cameraOn,                // false = turned off during the join: not published
+    onReleased: (track) async => closeMyCamera(track), // a camera the room did not publish
+  ),
+);
+```
+
+- The publish is the normal camera publish (same codec choice, simulcast layers, encodings,
+  plan cap) with its AddTrack and transceiver ahead of the first offer.
+- The first offer waits at most `offerWait` (1 s) for a camera still opening; with the
+  join microphone, the microphone waits as long. A slower camera follows with its own offer.
+- A camera that cannot be published (capture failed, track ended, no permission to
+  publish a camera, the server refused it) does not fail the join: `GravixJoinCameraFailedEvent`
+  after `connect()` returned. A camera not published is always released (stopped, disposed,
+  `onReleased`): failed attempts, failed joins, leaves, also a leave right after `connect()`
+  while the publish is still in flight.
+- Retries, resume and full rejoin as for the microphone: one publication, republished once
+  by a full rejoin with the same camera.
+
+A muted join microphone (`GravixJoinMicrophone(muted: true)`) negotiates the microphone in
+the first offer without a capture and muted (nothing can be sent); `setMicrophoneEnabled(true)`
+later opens the capture without an AddTrack or an offer. It needs a token that may publish
+a microphone at the join.
+
 ## What is not known yet
 
 - **TLS reuse.** `prewarm`'s HEAD and the WebSocket use different dart:io clients.

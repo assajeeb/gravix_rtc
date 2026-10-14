@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import '../core/gravix_ice_transport.dart' show GravixIceTransport;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
@@ -157,6 +158,66 @@ class EngineJoinMicPublishedEvent with EngineEvent, InternalEvent {
 
   @override
   String toString() => '${runtimeType}(inFirstOffer: ${inFirstOffer}, attempt: ${attempt})';
+}
+
+/// GRAVIX (2026-10-13, fast publish): the join's camera (GravixJoinCamera) was
+/// published inside the join. [inFirstOffer]: it was in the publisher
+/// connection's first offer.
+@internal
+class EngineJoinCameraPublishedEvent with EngineEvent, InternalEvent {
+  final bool inFirstOffer;
+  final int attempt;
+  const EngineJoinCameraPublishedEvent({required this.inFirstOffer, required this.attempt});
+
+  @override
+  String toString() => '${runtimeType}(inFirstOffer: ${inFirstOffer}, attempt: ${attempt})';
+}
+
+/// GRAVIX (2026-10-14): the session's ICE transport changed (see
+/// GravixIceTransport).
+@internal
+class EngineIceTransportChangedEvent with EngineEvent, InternalEvent {
+  final GravixIceTransport? transport;
+  final GravixIceTransport? previous;
+  final GravixIceTransport? publisher;
+  final GravixIceTransport? subscriber;
+  const EngineIceTransportChangedEvent({this.transport, this.previous, this.publisher, this.subscriber});
+
+  @override
+  String toString() => '${runtimeType}(${previous?.name} -> ${transport?.name})';
+}
+
+/// GRAVIX (2026-10-14): a TCP session's round trip stayed above
+/// GravixRecoveryOptions.slowTcpRtt for slowTcpFor.
+@internal
+class EngineSlowTcpTransportEvent with EngineEvent, InternalEvent {
+  final Duration rtt;
+  final Duration over;
+  const EngineSlowTcpTransportEvent({required this.rtt, required this.over});
+
+  @override
+  String toString() => '${runtimeType}(rtt: ${rtt.inMilliseconds} ms, over: ${over.inMilliseconds} ms)';
+}
+
+/// GRAVIX (2026-10-14): a reconnect attempt starts (see RoomReconnectAttemptEvent).
+@internal
+class EngineReconnectAttemptEvent with EngineEvent, InternalEvent {
+  final bool full;
+  final String cause;
+  final String? reconnectReason;
+  final int attempt;
+  final bool afterNetworkChange;
+  const EngineReconnectAttemptEvent({
+    required this.full,
+    required this.cause,
+    this.reconnectReason,
+    required this.attempt,
+    required this.afterNetworkChange,
+  });
+
+  @override
+  String toString() =>
+      '${runtimeType}(${full ? 'full' : 'resume'}, cause: $cause, reason: $reconnectReason, attempt: $attempt)';
 }
 
 @internal

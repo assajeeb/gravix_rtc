@@ -31,6 +31,7 @@ import 'package:path/path.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/engine.dart';
+import '../core/gravix_join_camera.dart';
 import '../core/gravix_join_mic.dart';
 import '../core/room.dart';
 import '../core/signal_client.dart';
@@ -231,7 +232,14 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         join.releaseOffer(false);
         return null;
       }
-      return _publishAudioTrack(track, publishOptions: join.options.publishOptions, gravixJoin: join);
+      return _publishAudioTrack(
+        track,
+        publishOptions: join.options.publishOptions,
+        gravixJoin: join,
+        // a muted join microphone: a transceiver without a track (no capture,
+        // nothing can be sent), the AddTrack muted
+        gravixDetached: join.options.muted,
+      );
     });
     final pub = result as LocalTrackPublication<LocalAudioTrack>?;
     // a mute tapped while the publish was in flight
@@ -298,6 +306,13 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         // GRAVIX (2026-10-12): the join's microphone takes over the publisher's
         // held first offer (no await between: the engine must not make it too)
         gravixJoin?.noteNegotiating(firstOffer: !room.engine.gravixHasNegotiated);
+        // GRAVIX (2026-10-13): with the join's camera, the offer is made once its
+        // transceiver is added too (or it gave up): one first offer for both
+        final peers = gravixJoin?.peersReady;
+        if (peers != null) {
+          await peers();
+          if (gravixJoin!.isAborted) return lk_models.TrackInfo();
+        }
         await room.engine.negotiate();
         return lk_models.TrackInfo();
       }
@@ -373,10 +388,69 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     LocalVideoTrack track, {
     VideoPublishOptions? publishOptions,
   }) async {
+    if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(track.source);
     final result = await _publishRunners
         .forSource(track.source)
         .run(() => _publishVideoTrack(track, publishOptions: publishOptions));
     return result! as LocalTrackPublication<LocalVideoTrack>;
+  }
+
+  /// GRAVIX (2026-10-13, fast publish for video): publishes the join's camera
+  /// ([GravixJoinCameraAttempt], see GravixJoinCamera) at the JoinResponse, on
+  /// the camera's publish queue (a setCameraEnabled meanwhile waits for it and
+  /// finds the publication). The normal camera publish ([_publishVideoTrack]):
+  /// codec, simulcast layers and encodings are the normal path's. Null when
+  /// nothing was published (the attempt ended, the camera could not be opened
+  /// or ended, it is not wanted any more, or a camera is published already);
+  /// the hold on the publisher's first offer is released in every case. The
+  /// caller releases a camera that was not published.
+  @internal
+  Future<LocalTrackPublication<LocalVideoTrack>?> gravixPublishJoinCamera(GravixJoinCameraAttempt join) async {
+    final run = _publishRunners.forJoinCamera.run(() async {
+      if (join.isAborted) return null;
+      if (getTrackPublicationBySource(TrackSource.camera) != null) {
+        logger.fine('join camera: a camera is published already');
+        join.releaseOffer(false);
+        return null;
+      }
+      final track = await join.trackForPublish();
+      if (track == null || join.isAborted) return null;
+      if (!(join.options.wanted?.call() ?? true)) {
+        logger.fine('join camera: not wanted any more; not published');
+        join.releaseOffer(false);
+        return null;
+      }
+      if (getTrackPublicationBySource(TrackSource.camera) != null) {
+        logger.fine('join camera: a camera is published already');
+        join.releaseOffer(false);
+        return null;
+      }
+      return _publishVideoTrack(track, publishOptions: join.options.publishOptions, gravixJoin: join);
+    });
+    final busy = run.then<void>((_) {}, onError: (Object _) {});
+    _gravixJoinCameraBusy = busy;
+    final LocalTrackPublication? result;
+    try {
+      result = await run;
+    } finally {
+      if (identical(_gravixJoinCameraBusy, busy)) _gravixJoinCameraBusy = null;
+    }
+    final pub = result as LocalTrackPublication<LocalVideoTrack>?;
+    // turned off while the publish was in flight
+    if (pub != null && !join.isAborted && !(join.options.wanted?.call() ?? true)) {
+      await pub.mute(stopOnMute: room.roomOptions.defaultCameraCaptureOptions.stopCameraCaptureOnMute);
+    }
+    return pub;
+  }
+
+  /// GRAVIX (2026-10-13): the join's camera publish in flight (see
+  /// [gravixPublishJoinCamera]); the app's camera publishes wait for it, then
+  /// find its publication instead of opening a second camera.
+  Future<void>? _gravixJoinCameraBusy;
+
+  Future<void> _gravixAfterJoinCamera(TrackSource source) async {
+    final busy = _gravixJoinCameraBusy;
+    if (source == TrackSource.camera && busy != null) await busy;
   }
 
   Future<LocalTrackPublication<LocalVideoTrack>?> _publishVideoTrack(
@@ -384,6 +458,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     VideoPublishOptions? publishOptions,
     // GRAVIX (0.4.15): see _publishAudioTrack
     bool gravixDetached = false,
+    // GRAVIX (2026-10-13, fast publish for video): the join's camera. With the
+    // server's publish codecs (the parallel branch below, the normal path on a
+    // Gravix server) its transceiver takes over the publisher's held first
+    // offer; without them it is published as any camera, with an offer of its
+    // own. The AddTrack wait ends when the join attempt does.
+    GravixJoinCameraAttempt? gravixJoin,
   }) async {
     if (videoTrackPublications.any((e) => e.track?.mediaStreamTrack.id == track.mediaStreamTrack.id)) {
       throw TrackPublishException('track already exists');
@@ -504,6 +584,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       await track.setDegradationPreference(
         options.degradationPreference ?? getDefaultDegradationPreference(track.source),
       );
+      if (gravixJoin != null && gravixJoin.isAborted) return lk_models.TrackInfo();
 
       if (kIsWeb && lkBrowser() == BrowserType.firefox && track.kind == TrackType.AUDIO) {
         //TOOD:
@@ -536,6 +617,15 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         }
       }
 
+      if (gravixJoin != null) {
+        // GRAVIX (2026-10-13): the join's camera takes over the publisher's held
+        // first offer; with the join's microphone, the offer is made once both
+        // transceivers are added (or the other one gave up)
+        gravixJoin.noteNegotiating(firstOffer: !room.engine.gravixHasNegotiated);
+        final peers = gravixJoin.peersReady;
+        if (peers != null) await peers();
+        if (gravixJoin.isAborted) return lk_models.TrackInfo();
+      }
       await room.engine.negotiate();
 
       return lk_models.TrackInfo();
@@ -571,13 +661,18 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     late lk_models.TrackInfo trackInfo;
     if (room.engine.enabledPublishCodecs?.isNotEmpty ?? false) {
       try {
-        final rets = await Future.wait<lk_models.TrackInfo>([room.engine.addTrack(req), negotiate(publishOptions)]);
+        final rets = await Future.wait<lk_models.TrackInfo>([
+          room.engine.addTrack(req, gravixAbort: gravixJoin?.abortSignal),
+          negotiate(publishOptions),
+        ]);
         trackInfo = rets[0];
       } catch (_) {
         // negotiate() already attached a sender; on a refused/timed-out
         // addTrack drop it so a retry (e.g. at a lower resolution) starts clean.
+        // (Not for a join attempt that ended: its connection is gone, and the
+        // renegotiation must not reach the next attempt's.)
         final sender = track.transceiver?.sender;
-        if (sender != null) {
+        if (sender != null && !(gravixJoin?.isAborted ?? false)) {
           try {
             await room.engine.publisher?.pc.removeTrack(sender);
             await room.engine.negotiate();
@@ -588,7 +683,14 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         rethrow;
       }
     } else {
-      trackInfo = await room.engine.addTrack(req);
+      // GRAVIX (2026-10-13): no publish codecs announced: the join's camera is
+      // published as any camera (the server picks the codec), not in the first
+      // offer
+      if (gravixJoin != null) {
+        gravixJoin.inFirstOffer = false;
+        gravixJoin.releaseOffer(false);
+      }
+      trackInfo = await room.engine.addTrack(req, gravixAbort: gravixJoin?.abortSignal);
 
       String? primaryCodecMime;
       for (var codec in trackInfo.codecs) {
@@ -1011,7 +1113,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     AudioCaptureOptions? audioCaptureOptions,
     CameraCaptureOptions? cameraCaptureOptions,
     ScreenShareCaptureOptions? screenShareCaptureOptions,
-  }) {
+  }) async {
+    if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(source);
     return _publishRunners.forSource(source).run(() async {
       if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
         throw TrackCreateException('Screen sharing is not supported on mobile devices');

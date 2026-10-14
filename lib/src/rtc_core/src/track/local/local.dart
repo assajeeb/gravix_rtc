@@ -205,7 +205,11 @@ abstract class LocalTrack extends Track {
   Future<bool> unmute({bool stopOnMute = true}) async {
     logger.fine('LocalTrack.unmute() muted: $muted');
     if (!muted) return false; // already un-muted
-    if (!skipStopForTrackMute() && stopOnMute) {
+    // GRAVIX (2026-10-13): a track published muted without a capture (a muted
+    // join microphone, a stopped muted track republished after a rejoin) has a
+    // sender with no track: it needs a capture whatever stopOnMute says
+    final noCapture = !isActive && sender != null && sender!.track == null;
+    if ((!skipStopForTrackMute() && stopOnMute) || noCapture) {
       await restartTrack();
     }
     await enable();

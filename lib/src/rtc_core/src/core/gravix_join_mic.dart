@@ -46,7 +46,21 @@ class GravixJoinMicrophone {
     this.publishOptions,
     this.offerWait = const Duration(seconds: 1),
     this.wanted,
+    this.muted = false,
   });
+
+  /// GRAVIX (2026-10-13, opt-in): the microphone goes into the first offer
+  /// MUTED and WITHOUT a capture: [createTrack]'s track is stopped before the
+  /// publish (its native track released; the capture is never started), the
+  /// AddTrack says muted, and the audio transceiver has no track on its sender,
+  /// so no audio packet can be sent. The server keeps the track pending (no
+  /// media) and shows it to nobody. `LocalParticipant.setMicrophoneEnabled(true)`
+  /// later (e.g. a host taking a seat) opens the capture on that sender and
+  /// signals the unmute: no AddTrack, no second offer/answer at that moment.
+  /// Needs a token that may publish a microphone at the join (a listener without
+  /// publish permission gets nothing published; the join goes on). [wanted] is
+  /// still asked before the publish (false = not published).
+  final bool muted;
 
   /// Creates the microphone track for one join attempt (not started; the room
   /// starts it). Called once per attempt, at the attempt's start. A failure
@@ -82,7 +96,16 @@ class GravixJoinMicAttempt {
         throw const _JoinMicAborted();
       }
       try {
-        await t.start();
+        if (options.muted) {
+          // muted join microphone: no capture until the app enables it
+          // disabled first (a track the app started already sends nothing
+          // more), then stopped: the native track is released
+          t.mediaStreamTrack.enabled = false;
+          t.updateMuted(true, shouldNotify: false);
+          await t.stop();
+        } else {
+          await t.start();
+        }
       } catch (e) {
         await _dispose(t);
         rethrow;
@@ -114,6 +137,11 @@ class GravixJoinMicAttempt {
   /// Whether the publish asked for the publisher's FIRST offer (the microphone
   /// is in it); null until the publish negotiated.
   bool? inFirstOffer;
+
+  /// Set by the room when the join's camera (GravixJoinCamera) is published
+  /// in the same first offer: waited for between the transceiver and the
+  /// negotiation, so that one offer carries both. Null = the microphone alone.
+  Future<void> Function()? peersReady;
 
   bool get started => publishing != null;
   bool get isAborted => _aborted.isCompleted;

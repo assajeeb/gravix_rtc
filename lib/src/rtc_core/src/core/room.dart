@@ -22,6 +22,8 @@ import 'package:meta/meta.dart';
 
 import '../audio/audio_manager.dart';
 import '../core/signal_client.dart';
+import 'gravix_ice_transport.dart';
+import 'gravix_join_camera.dart';
 import 'gravix_join_mic.dart';
 import '../data_stream/errors.dart';
 import '../data_stream/stream_reader.dart';
@@ -545,6 +547,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     FastConnectOptions? fastConnectOptions,
     // GRAVIX (2026-10-12, fast publish): see [GravixJoinMicrophone]
     GravixJoinMicrophone? joinMicrophone,
+    // GRAVIX (2026-10-13, fast publish for video): see [GravixJoinCamera]
+    GravixJoinCamera? joinCamera,
   }) async {
     // GRAVIX (2026-10-12): first, before any state changes or I/O - in
     // particular before isCloudUrl below, which would fetch the retired
@@ -668,11 +672,30 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     if (joinMicrophone != null && joinMic == null) {
       logger.warning('joinMicrophone ignored: FastConnectOptions or the pre-connect buffer publish the microphone');
     }
+    // GRAVIX (2026-10-13, fast publish for video): the camera published inside
+    // the join (GravixJoinCamera), beside the join microphone when both are set
+    // (one first offer). Like the microphone it keeps the retries. Not beside a
+    // FastConnectOptions camera: that one publishes a camera inside the join.
+    final joinCam =
+        joinCamera != null &&
+            !(fastConnectOptions != null &&
+                (fastConnectOptions.camera.enabled == true || fastConnectOptions.camera.track != null))
+        ? joinCamera
+        : null;
+    if (joinCamera != null && joinCam == null) {
+      logger.warning('joinCamera ignored: FastConnectOptions publish the camera');
+    }
+    // a previous connect's camera publish still in flight is abandoned (no await
+    // on the connect path when there is none)
+    if (_gravixJoinCamInFlight != null) await _gravixAbandonJoinCameraInFlight();
     try {
       for (var attempt = 0; ; attempt++) {
         final mayRetry = attempt < maxRetries;
         engine.gravixDeferJoinFailure = mayRetry;
-        if (joinMic != null) _gravixArmJoinMic(GravixJoinMicAttempt(joinMic, attempt: attempt + 1));
+        _gravixArmJoin(
+          mic: joinMic == null ? null : GravixJoinMicAttempt(joinMic, attempt: attempt + 1),
+          cam: joinCam == null ? null : _gravixNewJoinCamera(joinCam, attempt + 1),
+        );
         try {
           await _gravixConnectAttempt(url, token, connectOptions, effectiveRoomOptions, fastConnectOptions);
           didConnect = true;
@@ -683,6 +706,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           // the attempt is over: the join microphone's waits end now
           final micAttempt = _gravixJoinMic;
           micAttempt?.abort();
+          final camAttempt = _gravixJoinCam;
+          camAttempt?.abort();
           // the last attempt: the engine reported the failure itself, as before
           if (!mayRetry) rethrow;
           final retry = attempt + 1;
@@ -694,7 +719,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
               _gravixLeaving ||
               isDisposed ||
               engine.isClosed ||
-              _gravixHasPublications(except: micAttempt)) {
+              _gravixHasPublications(except: micAttempt, exceptCamera: camAttempt)) {
             _gravixGiveUpJoin(e);
             rethrow;
           }
@@ -706,6 +731,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           if (failed != null) {
             await failed.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
           }
+          // the attempt's camera too (privacy: released before the retry opens
+          // the next one)
+          await camAttempt?.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
           final delay = connectOptions.joinRetryDelay(retry);
           logger.warning(
             'join attempt ${attempt + 1} failed ($e); joining again in ${delay.inMilliseconds} ms '
@@ -724,7 +752,14 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       engine.gravixJoinOfferHold = null;
       final micAttempt = _gravixJoinMic;
       _gravixJoinMic = null;
+      final camAttempt = _gravixJoinCam;
+      _gravixJoinCam = null;
+      if (didConnect && camAttempt != null) _gravixFinishJoinCamera(camAttempt);
       if (!didConnect) {
+        // GRAVIX (2026-10-13): the failed join's camera is released before
+        // connect() fails (privacy: no camera left open after a failed join),
+        // with its publication, as the microphone below
+        await camAttempt?.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
         // GRAVIX (2026-10-12): the failed join's microphone capture stops before
         // connect() fails (privacy: no microphone indicator after a failed
         // join). Its publication is removed here too: the room's own clean-up
@@ -742,29 +777,174 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// (GravixJoinMicrophone), while Room.connect runs it.
   GravixJoinMicAttempt? _gravixJoinMic;
 
-  void _gravixArmJoinMic(GravixJoinMicAttempt m) {
-    _gravixJoinMic = m;
-    engine.gravixJoinOfferHold = m.offerHold;
+  /// GRAVIX (2026-10-13, fast publish for video): the join attempt's camera
+  /// (GravixJoinCamera), while Room.connect runs it.
+  GravixJoinCameraAttempt? _gravixJoinCam;
+
+  /// The join's camera after connect() returned, until its publish settled (a
+  /// camera still opening, or a publish with an offer of its own): a leave
+  /// meanwhile releases it.
+  GravixJoinCameraAttempt? _gravixJoinCamInFlight;
+
+  GravixJoinCameraAttempt _gravixNewJoinCamera(GravixJoinCamera options, int attempt) {
+    final create =
+        options.createTrack ??
+        () {
+          return GravixJoinCamera.openCamera(options.captureOptions ?? roomOptions.defaultCameraCaptureOptions);
+        };
+    return GravixJoinCameraAttempt(options, attempt: attempt, create: create);
+  }
+
+  /// Arms one join attempt's publishes. The microphone alone holds the
+  /// publisher's first offer as before (0.4.16). With the camera, the offer is
+  /// held until both have added their transceiver or given up, and each waits
+  /// for the other before it negotiates: ONE first offer carries both.
+  void _gravixArmJoin({GravixJoinMicAttempt? mic, GravixJoinCameraAttempt? cam}) {
+    _gravixJoinMic = mic;
+    _gravixJoinCam = cam;
+    if (cam == null) {
+      engine.gravixJoinOfferHold = mic?.offerHold;
+      return;
+    }
+    if (mic == null) {
+      engine.gravixJoinOfferHold = cam.offerHold;
+      return;
+    }
+    mic.peersReady = cam.offerHold;
+    cam.peersReady = mic.offerHold;
+    engine.gravixJoinOfferHold = () async {
+      final tookOver = await Future.wait<bool>([mic.offerHold(), cam.offerHold()]);
+      return tookOver.any((t) => t);
+    };
   }
 
   /// The core's region fallback dials another url within the same attempt: a
-  /// microphone the first url's session already took is undone and captured
-  /// afresh for the new session (one that was not started yet is kept).
+  /// microphone (camera) the first url's session already took is undone and
+  /// captured afresh for the new session (one that was not started yet is kept).
   Future<void> _gravixRenewJoinMicForFallback() async {
-    final m = _gravixJoinMic;
-    if (m == null || !(m.started || m.isAborted)) return;
-    m.abort();
-    await m.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
-    _gravixArmJoinMic(GravixJoinMicAttempt(m.options, attempt: m.attempt));
+    var m = _gravixJoinMic;
+    var c = _gravixJoinCam;
+    if (m != null && (m.started || m.isAborted)) {
+      m.abort();
+      await m.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
+      m = GravixJoinMicAttempt(m.options, attempt: m.attempt);
+    }
+    if (c != null && (c.started || c.isAborted)) {
+      c.abort();
+      await c.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
+      c = _gravixNewJoinCamera(c.options, c.attempt);
+    }
+    if (m == null && c == null) return;
+    // re-armed even when kept: the hold and the pairing belong to the new session
+    m?.peersReady = null;
+    c?.peersReady = null;
+    _gravixArmJoin(mic: m, cam: c);
   }
 
   /// Whether the local participant has a publication other than [except]'s
-  /// microphone (that one is undone before a retry).
-  bool _gravixHasPublications({GravixJoinMicAttempt? except}) {
+  /// microphone and [exceptCamera]'s camera (they are undone before a retry).
+  bool _gravixHasPublications({GravixJoinMicAttempt? except, GravixJoinCameraAttempt? exceptCamera}) {
     final pubs = _localParticipant?.trackPublications.values;
     if (pubs == null || pubs.isEmpty) return false;
     final mic = except?.createdTrack;
-    return pubs.any((p) => mic == null || !identical(p.track, mic));
+    final cam = exceptCamera?.createdTrack;
+    return pubs.any((p) => !(mic != null && identical(p.track, mic)) && !(cam != null && identical(p.track, cam)));
+  }
+
+  static bool _gravixMayPublishCamera(lk_models.ParticipantInfo info) {
+    // no permission block: nothing says no (the server decides)
+    if (!info.hasPermission()) return true;
+    final p = info.permission;
+    if (!p.canPublish) return false;
+    return p.canPublishSources.isEmpty || p.canPublishSources.contains(lk_models.TrackSource.CAMERA);
+  }
+
+  static GravixJoinCameraFailure _gravixJoinCameraFailureOf(Object e) {
+    if (e is GravixSessionReplacedException) return GravixJoinCameraFailure.sessionReplaced;
+    if (e is TrackPublishException && e.message.startsWith('addTrack rejected')) {
+      return GravixJoinCameraFailure.rejected;
+    }
+    return GravixJoinCameraFailure.publishFailed;
+  }
+
+  /// GRAVIX (2026-10-13, fast publish for video): starts the join attempt's
+  /// camera publish at its JoinResponse (see [_gravixStartJoinMicrophone]).
+  /// Every way that does not end in a publication releases the camera.
+  void _gravixStartJoinCamera(GravixJoinCameraAttempt join, lk_models.ParticipantInfo info) {
+    final local = _localParticipant;
+    if (local == null || join.started || join.isAborted) return;
+    join.publishing = () async {
+      try {
+        if (!_gravixMayPublishCamera(info)) {
+          logger.info('join camera: this participant may not publish a camera; not published');
+          join.fail(GravixJoinCameraFailure.notAllowed);
+          join.releaseOffer(false);
+          await join.release();
+          return null;
+        }
+        final pub = await local.gravixPublishJoinCamera(join);
+        if (pub == null) {
+          // nothing published (not wanted, the capture failed or ended, the
+          // attempt ended, a camera published otherwise): release it
+          join.releaseOffer(false);
+          await join.release();
+          return null;
+        }
+        join.notePublished(pub);
+        if (join.isAborted) return pub; // the attempt's undo unpublishes it
+        if (join.hasEnded) {
+          // ended while it was being published (before the publication listened)
+          join.fail(GravixJoinCameraFailure.trackEnded);
+          join.publication = null;
+          await local.removePublishedTrack(pub.sid);
+          await join.release();
+          return null;
+        }
+        engine.events.emit(
+          EngineJoinCameraPublishedEvent(inFirstOffer: join.inFirstOffer ?? false, attempt: join.attempt),
+        );
+        return pub;
+      } catch (e) {
+        if (!join.isAborted) {
+          logger.warning('join camera: publish failed ($e); the join goes on without it');
+          join.fail(_gravixJoinCameraFailureOf(e), e);
+        }
+        join.releaseOffer(false);
+        await join.release();
+        return null;
+      }
+    }();
+  }
+
+  /// connect() returned: the camera's publish may still be in flight. Its
+  /// failure is reported once it settled (on a connected room).
+  void _gravixFinishJoinCamera(GravixJoinCameraAttempt c) {
+    final p = c.publishing;
+    if (p == null) {
+      // never started (no JoinResponse handling reached it): not needed
+      c.abort();
+      unawaited(c.release());
+      return;
+    }
+    _gravixJoinCamInFlight = c;
+    unawaited(
+      p.then((_) {
+        if (identical(_gravixJoinCamInFlight, c)) _gravixJoinCamInFlight = null;
+        final reason = c.failure;
+        if (reason != null && !c.isAborted && !isDisposed && !_gravixLeaving) {
+          events.emit(GravixJoinCameraFailedEvent(reason: reason, error: c.failureError, attempt: c.attempt));
+        }
+      }),
+    );
+  }
+
+  /// A leave (or a new connect) while the join's camera publish is in flight:
+  /// it is abandoned and the camera released (unpublished if it got that far).
+  Future<void> _gravixAbandonJoinCameraInFlight() async {
+    final c = _gravixJoinCamInFlight;
+    _gravixJoinCamInFlight = null;
+    if (c == null) return;
+    await c.undo(unpublish: (pub) async => _localParticipant?.removePublishedTrack(pub.sid));
   }
 
   static bool _gravixMayPublishMicrophone(lk_models.ParticipantInfo info) {
@@ -1048,6 +1228,12 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (joinMic != null && !engine.gravixFullReconnectInProgress) {
         _gravixStartJoinMicrophone(joinMic, event.response.participant);
       }
+      // GRAVIX (2026-10-13): the join's camera, beside it (after updateFromInfo:
+      // the plan's video cap is read from the participant's attributes)
+      final joinCam = _gravixJoinCam;
+      if (joinCam != null && !engine.gravixFullReconnectInProgress) {
+        _gravixStartJoinCamera(joinCam, event.response.participant);
+      }
 
       // Check if preconnect buffer is recording and publish its track
       if (preConnectAudioBuffer.isRecording && preConnectAudioBuffer.localTrack != null) {
@@ -1284,6 +1470,30 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     ..on<SignalReconnectedEvent>((event) async {
       await _sendSyncState();
     })
+    // GRAVIX (2026-10-14): the session's ICE transport (GravixIceTransport)
+    ..on<EngineIceTransportChangedEvent>(
+      (e) => events.emit(
+        RoomIceTransportChangedEvent(
+          transport: e.transport,
+          previous: e.previous,
+          publisher: e.publisher,
+          subscriber: e.subscriber,
+        ),
+      ),
+    )
+    ..on<EngineSlowTcpTransportEvent>((e) => events.emit(RoomSlowTcpTransportEvent(rtt: e.rtt, over: e.over)))
+    // GRAVIX (2026-10-14): every reconnect attempt
+    ..on<EngineReconnectAttemptEvent>(
+      (e) => events.emit(
+        RoomReconnectAttemptEvent(
+          mode: e.full ? GravixReconnectMode.full : GravixReconnectMode.resume,
+          cause: e.cause,
+          reconnectReason: e.reconnectReason,
+          attempt: e.attempt,
+          afterNetworkChange: e.afterNetworkChange,
+        ),
+      ),
+    )
     ..on<EngineAttemptReconnectEvent>((event) async {
       events.emit(
         RoomAttemptReconnectEvent(
@@ -1396,6 +1606,20 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         logger.warning('Unknown exception on addSubscribedMediaTrack() ${exception}');
       }
     });
+
+  /// GRAVIX (2026-10-14): how this session's media travels, from each peer
+  /// connection's selected ICE candidate pair: tcp when either connection runs
+  /// over ICE/TCP, relay when either is relayed, else udp. Null until the first
+  /// reading (or with `GravixRecoveryOptions.iceTransportWatch` off). Changes
+  /// are RoomIceTransportChangedEvent; a slow TCP session is
+  /// RoomSlowTcpTransportEvent.
+  GravixIceTransport? get selectedTransport => engine.gravixSelectedTransport;
+
+  /// The publisher connection's transport (see [selectedTransport]).
+  GravixIceTransport? get publisherTransport => engine.gravixPublisherTransport;
+
+  /// The subscriber connection's transport (see [selectedTransport]).
+  GravixIceTransport? get subscriberTransport => engine.gravixSubscriberTransport;
 
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
@@ -1765,6 +1989,10 @@ extension RoomPrivateMethods on Room {
   // resets internal state to a re-usable state
   Future<void> _cleanUp({bool disposeLocalParticipant = true}) async {
     logger.fine('[${objectId}] cleanUp()');
+
+    // GRAVIX (2026-10-13): the join's camera still being published after
+    // connect() returned is released (privacy: no camera left open by a leave)
+    if (_gravixJoinCamInFlight != null) await _gravixAbandonJoinCameraInFlight();
 
     // clean up RemoteParticipants
     _gravixCancelAbsent();

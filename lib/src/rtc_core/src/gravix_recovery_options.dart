@@ -45,7 +45,29 @@ class GravixRecoveryOptions {
     this.uplinkFeedbackStallFor = const Duration(seconds: 5),
     this.deferNegotiateDuringResume = true,
     this.rollbackStaleOfferOnRestart = true,
+    this.resumeReasonNetworkWindow = const Duration(seconds: 30),
+    this.freshPeerFailedGrace = const Duration(seconds: 3),
+    this.iceTransportWatch = const Duration(seconds: 5),
+    this.iceTransportWatchUdp = const Duration(seconds: 30),
+    this.slowTcpRtt = const Duration(seconds: 1),
+    this.slowTcpFor = const Duration(seconds: 10),
+    this.resumeAfterNetworkSocketError = true,
+    this.resumeBeforeFullOnNetworkFailure = true,
   });
+
+  /// GRAVIX (2026-10-14): the 0.4.16 behaviour in one step: every recovery switch
+  /// 0.4.18 added is off (resumeReasonNetworkWindow, freshPeerFailedGrace,
+  /// iceTransportWatch, resumeAfterNetworkSocketError,
+  /// resumeBeforeFullOnNetworkFailure); the 0.4.15-0.4.16 ones stay on. The
+  /// rollback of 0.4.18's recovery: `RoomOptions(recovery:
+  /// GravixRecoveryOptions.before0418)`. [legacy] turns everything off.
+  static const before0418 = GravixRecoveryOptions(
+    resumeReasonNetworkWindow: Duration.zero,
+    freshPeerFailedGrace: Duration.zero,
+    iceTransportWatch: Duration.zero,
+    resumeAfterNetworkSocketError: false,
+    resumeBeforeFullOnNetworkFailure: false,
+  );
 
   /// Everything off: the 0.4.14 behaviour.
   static const legacy = GravixRecoveryOptions(
@@ -78,6 +100,11 @@ class GravixRecoveryOptions {
     uplinkFeedbackStallFor: Duration.zero,
     deferNegotiateDuringResume: false,
     rollbackStaleOfferOnRestart: false,
+    resumeReasonNetworkWindow: Duration.zero,
+    freshPeerFailedGrace: Duration.zero,
+    iceTransportWatch: Duration.zero,
+    resumeAfterNetworkSocketError: false,
+    resumeBeforeFullOnNetworkFailure: false,
   );
 
   /// Reconnect fixes ported from the upstream client SDK 2.13.0: a server
@@ -421,6 +448,69 @@ class GravixRecoveryOptions {
   /// behaviour. Off: the 0.4.14 behaviour.
   final bool rollbackStaleOfferOnRestart;
 
+  /// GRAVIX (2026-10-14): a resume after the phone's own network changed (Wi-Fi
+  /// off or back, a handover between Wi-Fi and mobile, offline) within this
+  /// window before the reconnect began (or during it) tells the server
+  /// `RR_SIGNAL_DISCONNECTED` instead of `RR_PUBLISHER_FAILED` /
+  /// `RR_SUBSCRIBER_FAILED`. The SFU takes a peer connection failure on a
+  /// connection younger than 90 s for "UDP blocked" and prefers ICE/TCP for that
+  /// participant (5 minutes, renewed by every join); after a network change the
+  /// failure was the network's, and the TCP sessions that followed ran at
+  /// seconds of round trip. A peer connection failing on a steady network still
+  /// says RR_*_FAILED. Duration.zero: off (always RR_*_FAILED, the previous
+  /// behaviour).
+  final Duration resumeReasonNetworkWindow;
+
+  /// GRAVIX (2026-10-14): a peer connection that never connected and reports
+  /// FAILED gets this long to connect before it asks for a reconnect. Over
+  /// ICE/TCP a new connection's first checks can fail at once (checking ->
+  /// failed -> connected within ~0.1-1.7 s on a device); each such FAILED asked
+  /// for another full rejoin (8 in 2 minutes). Its own join or rejoin still
+  /// times out as before; a connection that WAS connected and fails reconnects
+  /// at once. Duration.zero: off (at once, the previous behaviour).
+  final Duration freshPeerFailedGrace;
+
+  /// GRAVIX (2026-10-14): how often the selected candidate pair of each
+  /// connected peer connection is read (one getStats per connection) for
+  /// `Room.selectedTransport` (udp / tcp / relay), RoomIceTransportChangedEvent
+  /// and RoomSlowTcpTransportEvent. The first reading comes 3 s after a
+  /// connection connected (the interval when shorter): nothing is read on the
+  /// join path. Duration.zero: off (nothing is read; the getters stay null).
+  final Duration iceTransportWatch;
+
+  /// GRAVIX (2026-10-14): while every connection runs over UDP (or a relay) the
+  /// selected pairs are read this often instead of every [iceTransportWatch]
+  /// (which stays the rate on ICE/TCP, for RoomSlowTcpTransportEvent). Nothing is
+  /// read while the app is in the background.
+  final Duration iceTransportWatchUdp;
+
+  /// GRAVIX (2026-10-14): a TCP session whose selected pair's round trip stays
+  /// above [slowTcpRtt] for [slowTcpFor] is reported once
+  /// (RoomSlowTcpTransportEvent), again after it recovered.
+  final Duration slowTcpRtt;
+
+  /// See [slowTcpRtt].
+  final Duration slowTcpFor;
+
+  /// GRAVIX (2026-10-14): a resume whose dial fails with a socket error while the
+  /// phone's network changed (within [resumeReasonNetworkWindow], 30 s when that
+  /// is off) or reads offline keeps the next attempt a RESUME: it waits for the
+  /// network and resumes, while the server still holds the session. Device run
+  /// (Wi-Fi off 5 s): the dial made as the interface went away failed, the next
+  /// attempt was a full rejoin started the instant the Wi-Fi came back. Resumes
+  /// that keep failing still become a full reconnect after two in a row. On a
+  /// steady network a socket error is a full reconnect as before. False: always
+  /// a full reconnect after a socket error (the previous behaviour).
+  final bool resumeAfterNetworkSocketError;
+
+  /// GRAVIX (2026-10-14): a connected peer connection that reports FAILED while
+  /// the phone's network changed (same window) gets one resume -- its ICE
+  /// restart -- before the full reconnect; the full reconnect follows when that
+  /// resume does not bring it back. On a steady network a FAILED is a full
+  /// reconnect at once, as before. False: always a full reconnect (the previous
+  /// behaviour).
+  final bool resumeBeforeFullOnNetworkFailure;
+
   GravixRecoveryOptions copyWith({
     bool? upstreamReconnectFixes,
     bool? measuredRegionFailover,
@@ -466,6 +556,14 @@ class GravixRecoveryOptions {
     Duration? uplinkFeedbackStallFor,
     bool? deferNegotiateDuringResume,
     bool? rollbackStaleOfferOnRestart,
+    Duration? resumeReasonNetworkWindow,
+    Duration? freshPeerFailedGrace,
+    Duration? iceTransportWatch,
+    Duration? iceTransportWatchUdp,
+    Duration? slowTcpRtt,
+    Duration? slowTcpFor,
+    bool? resumeAfterNetworkSocketError,
+    bool? resumeBeforeFullOnNetworkFailure,
   }) => GravixRecoveryOptions(
     upstreamReconnectFixes: upstreamReconnectFixes ?? this.upstreamReconnectFixes,
     measuredRegionFailover: measuredRegionFailover ?? this.measuredRegionFailover,
@@ -511,5 +609,13 @@ class GravixRecoveryOptions {
     uplinkFeedbackStallFor: uplinkFeedbackStallFor ?? this.uplinkFeedbackStallFor,
     deferNegotiateDuringResume: deferNegotiateDuringResume ?? this.deferNegotiateDuringResume,
     rollbackStaleOfferOnRestart: rollbackStaleOfferOnRestart ?? this.rollbackStaleOfferOnRestart,
+    resumeReasonNetworkWindow: resumeReasonNetworkWindow ?? this.resumeReasonNetworkWindow,
+    freshPeerFailedGrace: freshPeerFailedGrace ?? this.freshPeerFailedGrace,
+    iceTransportWatch: iceTransportWatch ?? this.iceTransportWatch,
+    iceTransportWatchUdp: iceTransportWatchUdp ?? this.iceTransportWatchUdp,
+    slowTcpRtt: slowTcpRtt ?? this.slowTcpRtt,
+    slowTcpFor: slowTcpFor ?? this.slowTcpFor,
+    resumeAfterNetworkSocketError: resumeAfterNetworkSocketError ?? this.resumeAfterNetworkSocketError,
+    resumeBeforeFullOnNetworkFailure: resumeBeforeFullOnNetworkFailure ?? this.resumeBeforeFullOnNetworkFailure,
   );
 }

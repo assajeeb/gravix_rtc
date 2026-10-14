@@ -19,6 +19,7 @@ import 'dart:async';
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 
 import 'package:collection/collection.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -54,6 +55,7 @@ import '../../../connect/gravix_viewer_fast_start.dart'; // GRAVIX: viewer fast 
 import 'add_track_rejection.dart';
 import 'reconnect_policy.dart';
 import 'signal_client.dart';
+import 'gravix_ice_transport.dart';
 import 'transport.dart';
 
 // GRAVIX (2026-09-27): the retry delay table moved to DefaultReconnectPolicy
@@ -400,6 +402,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     });
 
     onDispose(() async {
+      _gravixIceWatch.stop();
       await _gravixNetListener.dispose();
       // GRAVIX: disposed while connected (no disconnect() first): leave, so the
       // SFU does not keep a ghost participant until its ping timeout
@@ -422,6 +425,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   }) async {
     this.url = url;
     this.token = token;
+    _gravixIceWatchOff = false; // GRAVIX (2026-10-14): a new session may be watched
     // update new options (if exists)
     this.connectOptions = connectOptions ?? this.connectOptions;
     this.roomOptions = roomOptions ?? this.roomOptions;
@@ -566,6 +570,92 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   void _gravixNoteNetTrouble() => _gravixLastNetTroubleAt = DateTime.timestamp();
 
+  /// GRAVIX (2026-10-14, review F6): the connectivity reading, never throwing
+  /// (it runs inside the reconnect's catch: an exception there left the session
+  /// "reconnecting" with nothing scheduled).
+  Future<bool> _gravixReadsOffline() async {
+    try {
+      return !await signalClient.networkIsAvailable();
+    } catch (e) {
+      logger.warning('connectivity reading failed ($e); taken as online');
+      return false;
+    }
+  }
+
+  /// GRAVIX (2026-10-14, review F2): the connection whose FAILED during a network
+  /// change was given a resume (resumeBeforeFullOnNetworkFailure). When that
+  /// resume succeeds with it not back, it gets the bounded resumePeerRestartWait.
+  lk_models.ReconnectReason? _gravixNetFailResumeOf;
+
+  /// GRAVIX (2026-10-14, resumeBeforeFullOnNetworkFailure): when the last resume
+  /// started. A FAILED gets its one resume only when no resume ran since the
+  /// network last changed: a session the network change's resume restored and
+  /// that fails again is a full reconnect, as before.
+  DateTime? _gravixLastResumeAt;
+
+  bool _gravixResumedSinceNetChange() {
+    final resumedAt = _gravixLastResumeAt, troubleAt = _gravixLastNetTroubleAt;
+    return resumedAt != null && troubleAt != null && !resumedAt.isBefore(troubleAt);
+  }
+
+  /// GRAVIX (2026-10-14): the phone's network changed (or read offline) within
+  /// GravixRecoveryOptions.resumeReasonNetworkWindow (30 s when that is off)
+  /// before the reconnect began, or since.
+  bool _gravixNetChangedRecently() {
+    final at = _gravixLastNetTroubleAt;
+    if (at == null) return false;
+    final w = roomOptions.recovery.resumeReasonNetworkWindow;
+    final window = w > Duration.zero ? w : const Duration(seconds: 30);
+    final ref = (_isReconnecting ? _reconnectStart : null) ?? DateTime.timestamp();
+    return !at.isBefore(ref.subtract(window));
+  }
+
+  /// GRAVIX (2026-10-14, GravixRecoveryOptions.resumeReasonNetworkWindow): the
+  /// reason a resume tells the server. A peer connection failure right after the
+  /// phone's own network changed is the network's doing: RR_SIGNAL_DISCONNECTED,
+  /// so the SFU does not take it for "UDP blocked" and prefer ICE/TCP.
+  lk_models.ReconnectReason? _gravixResumeReasonFor(lk_models.ReconnectReason? reason) {
+    final window = roomOptions.recovery.resumeReasonNetworkWindow;
+    if (window <= Duration.zero) return reason;
+    if (reason != lk_models.ReconnectReason.RR_PUBLISHER_FAILED &&
+        reason != lk_models.ReconnectReason.RR_SUBSCRIBER_FAILED) {
+      return reason;
+    }
+    final at = _gravixLastNetTroubleAt;
+    if (at == null) return reason;
+    final start = _reconnectStart ?? DateTime.timestamp();
+    if (at.isBefore(start.subtract(window))) return reason;
+    logger.info('resume after a network change: RR_SIGNAL_DISCONNECTED (not ${reason!.name})');
+    return lk_models.ReconnectReason.RR_SIGNAL_DISCONNECTED;
+  }
+
+  /// GRAVIX (2026-10-14, GravixRecoveryOptions.freshPeerFailedGrace): the peer
+  /// connections that have been connected at least once, and a signal for each
+  /// that connects.
+  final Expando<bool> _gravixPcEverConnected = Expando('gravixPcEverConnected');
+  final Expando<Completer<void>> _gravixPcConnected = Expando('gravixPcConnected');
+
+  void _gravixNotePcConnected(Transport? t) {
+    if (t == null) return;
+    _gravixPcEverConnected[t] = true;
+    final c = _gravixPcConnected[t];
+    if (c != null && !c.isCompleted) c.complete();
+  }
+
+  /// True when the FAILED of [t] (a connection that never connected) is to be
+  /// ignored: it connected within the grace, or it is not this engine's
+  /// connection any more. False: ask for the reconnect as before.
+  Future<bool> _gravixFreshPcFailureRecovered(Transport? t, String which) async {
+    final grace = roomOptions.recovery.freshPeerFailedGrace;
+    if (t == null || grace <= Duration.zero || (_gravixPcEverConnected[t] ?? false)) return false;
+    logger.info('$which connection FAILED before it ever connected: waiting ${grace.inMilliseconds} ms for it');
+    final connected = _gravixPcConnected[t] ??= Completer<void>();
+    final ok = await connected.future.then((_) => true).timeout(grace, onTimeout: () => false);
+    if (_isClosed || !(identical(t, publisher) || identical(t, subscriber))) return true;
+    if (ok) logger.info('$which connection connected after its transient FAILED: no reconnect');
+    return ok;
+  }
+
   bool _gravixNetTroubleSince(DateTime? since) {
     final at = _gravixLastNetTroubleAt;
     return at != null && (since == null || !at.isBefore(since));
@@ -677,6 +767,65 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     return true;
   }
 
+  /// GRAVIX (2026-10-14, GravixRecoveryOptions.iceTransportWatch): the selected
+  /// candidate pair of each connected peer connection (Room.selectedTransport).
+  late final GravixIceTransportWatch _gravixIceWatch = GravixIceTransportWatch(
+    interval: roomOptions.recovery.iceTransportWatch,
+    udpInterval: roomOptions.recovery.iceTransportWatchUdp,
+    // GRAVIX (2026-10-14, review F1/F8): never during a join's tail, a reconnect,
+    // a leave or after the engine closed
+    paused: () =>
+        _isClosed ||
+        _gravixIceWatchOff ||
+        _isReconnecting ||
+        _attemptingReconnect ||
+        _inRestart ||
+        connectionState != ConnectionState.connected,
+    background: _gravixAppInBackground,
+    slowRtt: roomOptions.recovery.slowTcpRtt,
+    slowFor: roomOptions.recovery.slowTcpFor,
+    connections: () {
+      rtc.RTCPeerConnection? up(Transport? t) => (t?.pc.connectionState?.isConnected() ?? false) ? t!.pc : null;
+      return (publisher: up(publisher), subscriber: up(subscriber));
+    },
+    onChanged: (transport, previous, pub, sub) {
+      logger.info('ICE transport: ${transport?.name} (publisher ${pub?.name}, subscriber ${sub?.name})');
+      events.emit(
+        EngineIceTransportChangedEvent(transport: transport, previous: previous, publisher: pub, subscriber: sub),
+      );
+    },
+    onSlowTcp: (rtt, over) => events.emit(EngineSlowTcpTransportEvent(rtt: rtt, over: over)),
+  );
+
+  /// GRAVIX (2026-10-14, review F8): set by [cleanUp] (a leave), cleared by
+  /// [connect]: a late Connected of a connection being disposed must not re-arm
+  /// the watch.
+  bool _gravixIceWatchOff = false;
+
+  /// GRAVIX (2026-10-14, review F10): no stats reading while the app is in the
+  /// background (no observer of our own: the binding's current state).
+  static bool _gravixAppInBackground() {
+    try {
+      final s = WidgetsBinding.instance.lifecycleState;
+      return s == AppLifecycleState.paused || s == AppLifecycleState.hidden || s == AppLifecycleState.detached;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// GRAVIX (2026-10-14): see [GravixIceTransport]; null until read (or with
+  /// GravixRecoveryOptions.iceTransportWatch off).
+  @internal
+  GravixIceTransport? get gravixSelectedTransport => _gravixIceWatch.transport;
+  @internal
+  GravixIceTransport? get gravixPublisherTransport => _gravixIceWatch.publisher;
+  @internal
+  GravixIceTransport? get gravixSubscriberTransport => _gravixIceWatch.subscriber;
+
+  /// Whether the transport watch has a reading scheduled.
+  @visibleForTesting
+  bool get gravixIceWatchScheduled => _gravixIceWatch.scheduled;
+
   bool _gravixCanRecover() =>
       !_isClosed &&
       !_attemptingReconnect &&
@@ -724,6 +873,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   // resets internal state to a re-usable state
   Future<void> cleanUp() async {
     logger.fine('[$objectId] cleanUp()');
+    _gravixIceWatchOff = true;
+    _gravixIceWatch.stop();
     _gravixStopPublisherWatch();
     _gravixStopRestartWait(); // GRAVIX (2026-10-11, resumePeerRestartWait)
 
@@ -1165,7 +1316,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _gravixMark('pub:ice', state.name); // GRAVIX: Dart receipt, for the join timeline
       logger.fine('publisher iceConnectionState: $state');
       if (state == rtc.RTCIceConnectionState.RTCIceConnectionStateConnected) {
-        await _handleGettingConnectedServerAddress(publisher!.pc);
+        await _handleGettingConnectedServerAddress(publisher!.pc, isPublisher: true);
       }
     };
 
@@ -1178,7 +1329,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _gravixMark('sub:ice', state.name); // GRAVIX: Dart receipt, for the join timeline
       logger.fine('subscriber iceConnectionState: $state');
       if (state == rtc.RTCIceConnectionState.RTCIceConnectionStateConnected) {
-        await _handleGettingConnectedServerAddress(subscriber!.pc);
+        await _handleGettingConnectedServerAddress(subscriber!.pc, isPublisher: false);
       }
     };
 
@@ -1196,6 +1347,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       subscriber?.pc.onDataChannel = _onDataChannel;
     }
 
+    final sub = subscriber, pub = publisher;
     subscriber?.pc.onConnectionState = (state) async {
       _gravixMark('sub:pc', state.name); // GRAVIX: Dart receipt, for the join timeline
       final restore = _gravixConnectPingRestore; // GRAVIX(viewer-fast-start)
@@ -1209,9 +1361,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         );
       }
       if (state.isConnected()) _gravixPcUpSeq++; // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure)
+      if (state.isConnected()) _gravixNotePcConnected(sub);
       events.emit(EngineSubscriberPeerStateUpdatedEvent(state: state, isPrimary: _subscriberPrimary));
       logger.fine('subscriber connectionState: $state');
+      if (state.isConnected() && identical(sub, subscriber)) _gravixIceWatch.poke();
       if (state.isDisconnected() || state.isFailed()) {
+        if (state.isFailed() && await _gravixFreshPcFailureRecovered(sub, 'subscriber')) return;
         await handleReconnect(
           state.isFailed() ? ClientDisconnectReason.peerConnectionFailed : ClientDisconnectReason.peerConnectionClosed,
           reconnectReason: lk_models.ReconnectReason.RR_SUBSCRIBER_FAILED,
@@ -1229,9 +1384,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         _resetPublisherConnection();
       }
       if (state.isConnected()) _gravixPcUpSeq++; // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure)
+      if (state.isConnected()) _gravixNotePcConnected(pub);
       events.emit(EnginePublisherPeerStateUpdatedEvent(state: state, isPrimary: !_subscriberPrimary));
       logger.fine('publisher connectionState: $state');
+      if (state.isConnected() && identical(pub, publisher)) _gravixIceWatch.poke();
       if (state.isDisconnected() || state.isFailed()) {
+        if (state.isFailed() && await _gravixFreshPcFailureRecovered(pub, 'publisher')) return;
         await handleReconnect(
           state.isFailed() ? ClientDisconnectReason.peerConnectionFailed : ClientDisconnectReason.peerConnectionClosed,
           reconnectReason: lk_models.ReconnectReason.RR_PUBLISHER_FAILED,
@@ -1371,9 +1529,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
   }
 
-  Future<void> _handleGettingConnectedServerAddress(rtc.RTCPeerConnection pc) async {
+  Future<void> _handleGettingConnectedServerAddress(rtc.RTCPeerConnection pc, {required bool isPublisher}) async {
     try {
-      final remoteAddress = await getConnectedAddress(pc);
+      // GRAVIX (2026-10-14, review F3): one read for both the connected address
+      // and the session's ICE transport (no read of the watch's own to know it)
+      final stats = await pc.getStats();
+      final remoteAddress = gravixConnectedAddressOf(stats);
+      if (identical(pc, (isPublisher ? publisher : subscriber)?.pc)) {
+        _gravixIceWatch.observe(isPublisher: isPublisher, stats: stats);
+      }
       logger.fine('Connected address: $remoteAddress');
       if (_connectedServerAddress == null || _connectedServerAddress != remoteAddress) {
         _connectedServerAddress = remoteAddress;
@@ -1532,7 +1696,25 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     // socket close was downgraded to a resume. `leaveReconnect` is not escalated:
     // a Leave{RECONNECT} sets the flag itself, and a Leave{RESUME} (migration)
     // must stay a resume.
+    // GRAVIX (2026-10-14, GravixRecoveryOptions.resumeBeforeFullOnNetworkFailure):
+    // a connection that FAILED while the phone's network changed gets one resume
+    // (its ICE restart) before the full reconnect
+    final netFailResume =
+        _upstreamReconnectFixes &&
+        reason == ClientDisconnectReason.peerConnectionFailed &&
+        roomOptions.recovery.resumeBeforeFullOnNetworkFailure &&
+        !fullReconnectOnNext &&
+        // an attempt already running keeps the queued request: its resume's ICE
+        // restart may satisfy it (resumeSatisfiesPeerFailure)
+        !_attemptingReconnect &&
+        _gravixNetChangedRecently() &&
+        !_gravixResumedSinceNetChange();
+    if (netFailResume) {
+      _gravixNetFailResumeOf = reconnectReason;
+      logger.info('a peer connection FAILED during a network change: one resume (ICE restart) first');
+    }
     if (_upstreamReconnectFixes &&
+        !netFailResume &&
         (reason == ClientDisconnectReason.negotiationFailed || reason == ClientDisconnectReason.peerConnectionFailed)) {
       // GRAVIX (2026-10-11, resumeSatisfiesPeerFailure): a request only peer
       // connection failures made can be satisfied by a resume's ICE restart
@@ -1665,16 +1847,31 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         }
       }
 
-      if (upstreamFixes ? fullReconnect : fullReconnectOnNext) {
+      // GRAVIX (2026-10-14): every attempt is reported (RoomReconnectAttemptEvent)
+      final isFull = upstreamFixes ? fullReconnect : fullReconnectOnNext;
+      final sent = isFull ? null : _gravixResumeReasonFor(reconnectReason);
+      events.emit(
+        EngineReconnectAttemptEvent(
+          full: isFull,
+          cause: reason.name,
+          reconnectReason: sent?.name,
+          attempt: _reconnectAttempts + 1,
+          afterNetworkChange: _gravixNetChangedRecently(),
+        ),
+      );
+      if (isFull) {
         await restartConnection();
       } else {
-        await resumeConnection(reason, reconnectReason: reconnectReason);
+        await resumeConnection(reason, reconnectReason: sent);
       }
       _clearPendingReconnect();
       _attemptingReconnect = false;
       _isReconnecting = false;
       _unrecoveredResumes = 0;
       succeeded = true;
+      // GRAVIX (2026-10-14, review F1): the transport watch resumes after the
+      // reconnect, firstReadDelay later
+      _gravixIceWatch.poke();
     } catch (e) {
       if (gen != _sessionGen || _isClosed || (e is GravixResumeRejectedException && e.cancelled)) {
         // GRAVIX(one-session): a fresh connect or a disconnect cancelled this
@@ -1711,6 +1908,21 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         fullReconnectOnNext = upstreamFixes ? (fullReconnectOnNext || e.full) : e.full;
         immediate = true;
         _unrecoveredResumes = 0;
+      } else if (e is WebSocketException &&
+          !(upstreamFixes ? fullReconnect : fullReconnectOnNext) &&
+          roomOptions.recovery.resumeAfterNetworkSocketError &&
+          (_gravixNetChangedRecently() || await _gravixReadsOffline())) {
+        // GRAVIX (2026-10-14, resumeAfterNetworkSocketError): the resume's dial
+        // failed because the phone's network is changing, not because the
+        // session is gone: the next attempt waits for the network and resumes.
+        // Two such failures in a row still become a full reconnect.
+        if (++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
+          logger.info('resume dial failed $_unrecoveredResumes times during a network change; full reconnect');
+          fullReconnectOnNext = true;
+          _unrecoveredResumes = 0;
+        } else {
+          logger.info('resume dial failed during a network change ($e); resuming again');
+        }
       } else if (e is WebSocketException || e is MediaConnectException) {
         // cannot resume connection, need to do full reconnect
         fullReconnectOnNext = true;
@@ -1804,6 +2016,31 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
             case _GravixPcFailureVerdict.dispatch:
               logger.info('attemptReconnect: full reconnect requested mid-attempt, dispatching');
               unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
+          }
+        }
+      }
+      // GRAVIX (2026-10-14, review F2): the resume given to a FAILED connection
+      // during a network change succeeded on the primary alone: the failed
+      // non-primary connection gets the bounded wait, then the full reconnect
+      final netFail = _gravixNetFailResumeOf;
+      if (succeeded || fullReconnect) _gravixNetFailResumeOf = null;
+      if (upstreamFixes &&
+          succeeded &&
+          !fullReconnect &&
+          netFail != null &&
+          !fullReconnectOnNext &&
+          !_isClosed &&
+          gen == _sessionGen &&
+          _gravixRestartWaitTimer == null) {
+        final failedIsPrimary = (netFail == lk_models.ReconnectReason.RR_SUBSCRIBER_FAILED) == _subscriberPrimary;
+        final other = _subscriberPrimary ? publisher : subscriber;
+        if (!failedIsPrimary && !(other?.pc.connectionState?.isConnected() ?? true)) {
+          if (roomOptions.recovery.resumePeerRestartWait > Duration.zero) {
+            _gravixWaitForRestartingPc(gen);
+          } else {
+            logger.info('attemptReconnect: the connection that failed is not back after the resume; full reconnect');
+            fullReconnectOnNext = true;
+            unawaited(handleReconnect(ClientDisconnectReason.reconnectRetry));
           }
         }
       }
@@ -1922,6 +2159,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
 
     events.emit(const EngineResumingEvent());
+    _gravixLastResumeAt = DateTime.timestamp(); // GRAVIX (2026-10-14)
 
     final recovery = roomOptions.recovery;
     // GRAVIX (0.4.15, F1 root cause, device r023 / r025 / r032): the subscriber
@@ -1951,7 +2189,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
           connectOptions: connectOptions,
           roomOptions: roomOptions,
           reconnect: true,
-          reconnectReason: reconnectReason,
+          reconnectReason: _gravixResumeReasonFor(reconnectReason),
         );
       } catch (_) {
         // a Leave that arrived before the server closed the socket says why
@@ -2309,6 +2547,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     try {
       _gravixSessionReplaced(); // GRAVIX (0.4.15, F4)
+      // GRAVIX (2026-10-14, review F1/F7): the replaced session's watch ends here;
+      // the new one starts after the rejoin completed
+      _gravixIceWatch.stop();
       events.emit(const EngineFullRestartingEvent());
 
       // GRAVIX: a full reconnect re-probes when asked to, instead of re-joining
@@ -2932,12 +3173,17 @@ extension EngineInternalMethods on Engine {
   }
 }
 
-Future<String?> getConnectedAddress(rtc.RTCPeerConnection pc) async {
+Future<String?> getConnectedAddress(rtc.RTCPeerConnection pc) async => gravixConnectedAddressOf(await pc.getStats());
+
+/// The remote address of the selected candidate pair in [stats] (GRAVIX: split
+/// out of [getConnectedAddress] so that one read serves both it and the ICE
+/// transport watch).
+@internal
+String? gravixConnectedAddressOf(List<rtc.StatsReport> stats) {
   var selectedCandidatePairId = '';
   final candidatePairs = <String, rtc.StatsReport>{};
   // id -> candidate ip
   final candidates = <String, String>{};
-  final List<rtc.StatsReport> stats = await pc.getStats();
   for (var v in stats) {
     switch (v.type) {
       case 'transport':

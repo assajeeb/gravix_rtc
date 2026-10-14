@@ -127,7 +127,13 @@ void main() {
         roomOptions: RoomOptions(
           reconnectPolicy: FastPolicy(),
           adaptiveStream: true, // Pakhi video rooms: the 300 ms visibility timer per remote video
-          recovery: const GravixRecoveryOptions(rejoinAbsentGrace: Duration(milliseconds: 100)),
+          // (2026-10-14) the ICE transport watch's one periodic timer starts its first
+          // reading interval after a connection connected: short here so it exists
+          // before the baseline count
+          recovery: const GravixRecoveryOptions(
+            rejoinAbsentGrace: Duration(milliseconds: 100),
+            iceTransportWatch: Duration(milliseconds: 100),
+          ),
         ),
       );
 

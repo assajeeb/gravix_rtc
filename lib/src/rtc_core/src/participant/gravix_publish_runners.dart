@@ -27,6 +27,12 @@ class GravixPublishRunners<T> {
 
   SerialRunner<T> forSource(TrackSource source) =>
       GravixFastJoin.enabled && source == TrackSource.camera ? _camera : _main;
+
+  /// GRAVIX (2026-10-13): the join's camera (GravixJoinCamera) always runs on
+  /// the camera's own queue: on the shared one it would queue behind the join
+  /// microphone, which waits for the camera's transceiver (one first offer).
+  /// The app's own camera publishes wait for it (LocalParticipant).
+  SerialRunner<T> get forJoinCamera => _camera;
 }
 
 /// GRAVIX (0.4.8): the publishes `FastConnectOptions` asks for at the

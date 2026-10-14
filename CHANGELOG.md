@@ -1,5 +1,109 @@
 # Changelog
 
+## 0.4.18 — 2026-10-14
+
+Recovery after a phone's Wi-Fi drop (a short drop resumes instead of rejoining, a resume no longer
+reports the network's failure as a connection failure, no rejoin storm), every reconnect attempt as an
+event, the session's ICE transport and a slow-TCP signal, a muted join microphone, and an experimental
+`joinCamera`. 0.4.17 was not published; its changes are part of this release. The new recovery switches
+are in `GravixRecoveryOptions`, on by default (their off value is the previous behaviour).
+`RoomOptions(recovery: GravixRecoveryOptions.before0418)` turns every 0.4.18 recovery switch off in one
+step (the 0.4.16 behaviour; the 0.4.15-0.4.16 recovery stays on); `GravixRecoveryOptions.legacy` turns
+all recovery switches off. Everything else is opt-in and off by default.
+
+### Fixed: a resume after the phone's own network changed no longer says a connection failed
+- The SFU takes a peer connection failure on a connection younger than 90 s for "UDP blocked" and
+  prefers ICE/TCP for that participant (for 5 minutes, renewed by every join). After Wi-Fi going off or
+  back on, a handover between Wi-Fi and mobile, or the phone reading offline, the failure is the
+  network's: the resume now tells the server `RR_SIGNAL_DISCONNECTED` instead of `RR_PUBLISHER_FAILED` /
+  `RR_SUBSCRIBER_FAILED`. A connection failing on a steady network still says so.
+- `resumeReasonNetworkWindow` (30 s): how long before the reconnect began a network change counts.
+  `Duration.zero`: off.
+
+### Fixed: no rejoin storm from a new connection's transient FAILED
+- Over ICE/TCP a new peer connection's first checks can fail at once (checking -> failed -> connected
+  within about 0.1-1.7 s). Each such FAILED asked for another full rejoin: on a device, 8 full rejoins in
+  2 minutes, each recreating the same TCP session. A connection that never connected now gets
+  `freshPeerFailedGrace` (3 s) to connect before it asks for a reconnect; its join or rejoin still times
+  out as before, and a connection that was connected and fails reconnects at once. `Duration.zero`: off.
+
+### Fixed: a short network drop resumes the session instead of rejoining it
+- A resume whose dial failed with a socket error (the phone's network going away under it) made the
+  next attempt a full rejoin, started the instant the network came back: the far side saw the host
+  leave and join again although the server still held the session. Now, when the phone's network
+  changed (within `resumeReasonNetworkWindow`) or reads offline, the next attempt waits for the network
+  and resumes; two failed resumes in a row still become a full rejoin (`resumeAfterNetworkSocketError`).
+- A connected peer connection that reports FAILED during a network change now gets one resume (its ICE
+  restart) before the full rejoin; when that resume does not bring it back, the full rejoin follows (a
+  connection other than the primary gets `resumePeerRestartWait`, 3 s, after the resume). On a steady
+  network a FAILED is a full rejoin at once, as before (`resumeBeforeFullOnNetworkFailure`).
+
+### Added: `RoomReconnectAttemptEvent`
+- One per reconnect attempt, before its dial: `mode` (`GravixReconnectMode.resume` / `full`), `cause`
+  (e.g. `peerConnectionClosed`, `peerConnectionFailed`, `signal`, `reconnectRetry`), `reconnectReason`
+  (what a resume tells the server, e.g. `RR_SIGNAL_DISCONNECTED`; null for a full rejoin), `attempt`
+  (1 for the first of an outage) and `afterNetworkChange`. Until now only a full rejoin was visible
+  (`RoomReconnectingEvent`).
+
+### Added: the session's ICE transport
+- `Room.selectedTransport` (`GravixIceTransport.udp` / `tcp` / `relay`, from each peer connection's
+  selected candidate pair: tcp when either runs over ICE/TCP, relay when either is relayed), plus
+  `Room.publisherTransport` and `Room.subscriberTransport`. Null until the first reading.
+- `RoomIceTransportChangedEvent` (`transport`, `previous`, `publisher`, `subscriber`) when it changes.
+- `RoomSlowTcpTransportEvent` (`rtt`, `over`) once when a TCP session's round trip stays above
+  `slowTcpRtt` (1 s) for `slowTcpFor` (10 s), again after it recovered.
+- The transport is taken from the stats the SDK already reads when a connection's ICE connects (no read
+  of its own). Its own readings (one getStats per connected peer connection) come every
+  `iceTransportWatchUdp` (30 s) on UDP or a relay and every `iceTransportWatch` (5 s) on ICE/TCP, for the
+  slow-TCP detection; never while joining or reconnecting (the first one comes 3 s after a connection
+  connected or a reconnect completed) and never while the app is in the background.
+  `iceTransportWatch: Duration.zero`: off (the getters stay null). The getters are cleared on a leave and
+  on a full rejoin.
+
+### Added (experimental): the host's camera in the join's first offer (`joinCamera`, opt-in)
+- **Experimental.** Off by default. In device tests it gave no measurable speed-up for the camera, and
+  combined with `joinMicrophone` the microphone went live later (the shared first offer waits for the
+  camera). Use it only to measure on your own devices; the API may change.
+- `Room.connect(joinCamera: GravixJoinCamera(...))`, beside `joinMicrophone`. The camera opens with
+  each join attempt (`createTrack`, e.g. the app's own camera or preview track, or a capture with
+  `captureOptions`), and at the JoinResponse its AddTrack and video transceiver go into the publisher
+  connection's first offer: the camera is live when that connection connects instead of after a
+  publish of its own once `connect()` returned. With `joinMicrophone` too, ONE first offer carries both.
+- The publish is the normal camera publish with `publishOptions` (null = the room's default video
+  publish options): the same codec choice (falling back to the server's enabled codecs), simulcast
+  layers, encodings, plan cap and start bitrate as `publishVideoTrack`.
+- The first offer waits at most `GravixJoinCamera.offerWait` (1 s) for a camera that is still opening
+  (the join microphone waits as long for it); a later camera is published with an offer of its own.
+  A server that announces no publish codecs gets the camera published as any camera.
+- A camera that cannot be published does not fail the join: the room emits
+  `GravixJoinCameraFailedEvent` (`reason`: `GravixJoinCameraFailure.captureFailed`, `trackEnded`,
+  `notAllowed`, `rejected`, `sessionReplaced`, `publishFailed`; `error`; `attempt`) after `connect()`
+  returned, and the app may publish a camera the normal way afterwards. A camera turned off during
+  the join (`wanted` returns false) is not published and reports nothing.
+- Privacy: a camera that is not published is released (stopped and disposed, then
+  `GravixJoinCamera.onReleased`, for an app that closes a capture of its own) on every path: a failed
+  attempt (before a retry opens the next one), a failed join, a leave while joining, a leave after
+  `connect()` returned while the publish was still in flight, any failure. It is stopped also with
+  `RoomOptions.stopLocalTrackOnUnpublish: false`.
+- Join retries and the region fallback keep working (one camera publication, one AddTrack per
+  socket). A resume keeps the publication; a full rejoin republishes it once, with the same camera.
+- `publishVideoTrack` / `setCameraEnabled` for a camera called while the join's camera is being
+  published wait for it and find its publication.
+- `GravixJoinPhase.cameraPublishedInJoin` (`detail`: `inFirstOffer`, `attempt`).
+- Pass it only when the camera permission is already granted. Ignored beside a `FastConnectOptions`
+  camera. No server change is needed.
+
+### Added: a muted join microphone (`GravixJoinMicrophone(muted: true)`, opt-in)
+- The microphone is negotiated in the first offer but muted and WITHOUT a capture: the track
+  `createTrack` returns is stopped before the publish, the AddTrack says muted and the audio
+  transceiver's sender has no track, so no audio can be sent. `setMicrophoneEnabled(true)` later (e.g.
+  a host taking a seat) opens the capture on that sender and signals the unmute: no AddTrack and no
+  offer/answer at that moment.
+- Needs a token that may publish a microphone at the join; with a listener token nothing is
+  published (the join goes on).
+- Fixed with it: unmuting a track that was published without a capture (also a stopped muted track
+  republished after a rejoin) opens the capture even when `stopOnMute` is false.
+
 ## 0.4.16 — 2026-10-13
 
 Faster joins (the host's microphone in the first offer, signalling off a busy app isolate), the

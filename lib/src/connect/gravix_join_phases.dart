@@ -64,6 +64,14 @@ enum GravixJoinPhase {
   /// the join attempt (1 = the first). [localAudioPublished] is reported too.
   micPublishedInJoin,
 
+  /// The camera of a join with `Room.connect(joinCamera: ...)` was published
+  /// inside the join. `detail['inFirstOffer']`: true when the camera was part of
+  /// the publisher connection's first offer; false when it was published with an
+  /// offer of its own (not ready within `GravixJoinCamera.offerWait`, or the
+  /// server announced no publish codecs). `detail['attempt']`: the join attempt.
+  /// [localVideoPublished] is reported too.
+  cameraPublishedInJoin,
+
   /// The first local VIDEO track was published (the SFU accepted its AddTrack).
   /// Media flows once [publisherConnected] is reached as well: "camera live" is
   /// the later of the two (see [GravixJoinPhases.cameraLiveAt]).
@@ -134,6 +142,11 @@ class GravixJoinPhases {
           if (e.state != rtc.RTCPeerConnectionState.RTCPeerConnectionStateConnected) return;
           debugNotePeerConnected(publisher: e is EnginePublisherPeerStateUpdatedEvent, isPrimary: e.isPrimary);
         }),
+      )
+      ..add(
+        engine.events.on<EngineJoinCameraPublishedEvent>(
+          (e) => debugNoteJoinCameraPublished(inFirstOffer: e.inFirstOffer, attempt: e.attempt),
+        ),
       )
       ..add(
         engine.events.on<EngineJoinMicPublishedEvent>(
@@ -265,6 +278,11 @@ class GravixJoinPhases {
   @visibleForTesting
   void debugNoteJoinMicPublished({required bool inFirstOffer, required int attempt}) =>
       _note(GravixJoinPhase.micPublishedInJoin, {'inFirstOffer': inFirstOffer, 'attempt': attempt});
+
+  /// See [debugNotePeerConnected].
+  @visibleForTesting
+  void debugNoteJoinCameraPublished({required bool inFirstOffer, required int attempt}) =>
+      _note(GravixJoinPhase.cameraPublishedInJoin, {'inFirstOffer': inFirstOffer, 'attempt': attempt});
 
   /// See [debugNotePeerConnected].
   @visibleForTesting

@@ -14,6 +14,8 @@
 // limitations under the License.
 
 import 'core/engine.dart';
+import 'core/gravix_ice_transport.dart' show GravixIceTransport;
+import 'core/gravix_join_camera.dart' show GravixJoinCameraFailure;
 import 'core/room.dart';
 import 'core/signal_client.dart';
 import 'participant/local.dart';
@@ -133,6 +135,105 @@ class RoomJoinRetryEvent with RoomEvent {
   @override
   String toString() =>
       '${runtimeType}(retry: ${retry}/${maxRetries}, delay: ${delay.inMilliseconds}ms, error: ${error})';
+}
+
+/// GRAVIX (2026-10-13): the camera of `Room.connect(joinCamera: ...)` was not
+/// published by the join; the join itself went on (the room is connected). The
+/// camera was released (stopped and disposed, `GravixJoinCamera.onReleased`
+/// called). [reason] says why; the app may publish a camera the normal way
+/// (`setCameraEnabled(true)`, `publishVideoTrack`) once the cause is fixed.
+/// Emitted by [Room] once per `connect`, after it returned (a failure inside
+/// an attempt that is retried, or a join that fails, emits nothing).
+class GravixJoinCameraFailedEvent with RoomEvent {
+  final GravixJoinCameraFailure reason;
+
+  /// The error behind it, when there is one (the capture's, the server's refusal).
+  final Object? error;
+
+  /// The join attempt (1 = the first).
+  final int attempt;
+
+  const GravixJoinCameraFailedEvent({required this.reason, this.error, required this.attempt});
+
+  @override
+  String toString() => '${runtimeType}(reason: ${reason.name}, attempt: ${attempt}, error: ${error})';
+}
+
+/// GRAVIX (2026-10-14): the session's ICE transport changed
+/// (`Room.selectedTransport`): [transport] is tcp when either peer connection
+/// runs over ICE/TCP, relay when either is relayed, else udp. A host whose
+/// session lands on tcp after a reconnect is often slow (see
+/// RoomSlowTcpTransportEvent). Read from each connection's selected candidate
+/// pair every `GravixRecoveryOptions.iceTransportWatch` (5 s). Emitted by [Room].
+class RoomIceTransportChangedEvent with RoomEvent {
+  final GravixIceTransport? transport;
+  final GravixIceTransport? previous;
+
+  /// Each connection's own transport (null: not known yet).
+  final GravixIceTransport? publisher;
+  final GravixIceTransport? subscriber;
+
+  const RoomIceTransportChangedEvent({this.transport, this.previous, this.publisher, this.subscriber});
+
+  @override
+  String toString() =>
+      '${runtimeType}(${previous?.name} -> ${transport?.name}, publisher: ${publisher?.name}, '
+      'subscriber: ${subscriber?.name})';
+}
+
+/// GRAVIX (2026-10-14): the session runs over ICE/TCP and its round trip ([rtt],
+/// the selected pair's) stayed above `GravixRecoveryOptions.slowTcpRtt` (1 s)
+/// for [over] (at least `slowTcpFor`, 10 s). Once per episode (again after the
+/// round trip came back below the threshold). Media is likely frozen or very
+/// low quality; an app may show it or report it. Emitted by [Room].
+class RoomSlowTcpTransportEvent with RoomEvent {
+  final Duration rtt;
+  final Duration over;
+
+  const RoomSlowTcpTransportEvent({required this.rtt, required this.over});
+
+  @override
+  String toString() => '${runtimeType}(rtt: ${rtt.inMilliseconds} ms, over: ${over.inMilliseconds} ms)';
+}
+
+/// GRAVIX (2026-10-14): how a reconnect attempt recovers the session.
+enum GravixReconnectMode {
+  /// The same session: a new signal connection and an ICE restart of the peer
+  /// connections (the participant and its tracks stay on the server).
+  resume,
+
+  /// A new session: a new join and new peer connections (RoomReconnectingEvent;
+  /// the far side may see the participant leave and join again).
+  full,
+}
+
+/// GRAVIX (2026-10-14): a reconnect attempt starts (one per attempt, before its
+/// dial). [cause]: why the session is being recovered (e.g. `peerConnectionClosed`,
+/// `peerConnectionFailed`, `signal`, `reconnectRetry`, `mediaStalled`).
+/// [reconnectReason]: what a resume tells the server (`RR_SIGNAL_DISCONNECTED`,
+/// `RR_PUBLISHER_FAILED`, ...; null for a full reconnect, a join carries none).
+/// [attempt]: 1 for the first attempt of this outage. [afterNetworkChange]: the
+/// phone's network changed (or read offline) shortly before or during it.
+/// Emitted by [Room].
+class RoomReconnectAttemptEvent with RoomEvent {
+  final GravixReconnectMode mode;
+  final String cause;
+  final String? reconnectReason;
+  final int attempt;
+  final bool afterNetworkChange;
+
+  const RoomReconnectAttemptEvent({
+    required this.mode,
+    required this.cause,
+    this.reconnectReason,
+    required this.attempt,
+    required this.afterNetworkChange,
+  });
+
+  @override
+  String toString() =>
+      '${runtimeType}(${mode.name}, cause: $cause, reason: $reconnectReason, attempt: $attempt, '
+      'afterNetworkChange: $afterNetworkChange)';
 }
 
 /// Connection to room is re-established. All existing state is preserved.

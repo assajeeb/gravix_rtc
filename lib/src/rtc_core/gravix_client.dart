@@ -24,6 +24,8 @@ export 'src/constants.dart';
 export 'src/core/room.dart';
 export 'src/core/room_preconnect.dart';
 export 'src/core/gravix_join_mic.dart' show GravixJoinMicrophone;
+export 'src/core/gravix_join_camera.dart' show GravixJoinCamera, GravixJoinCameraFailure;
+export 'src/core/gravix_ice_transport.dart' show GravixIceTransport;
 export 'src/core/reconnect_policy.dart';
 export 'src/data_stream/stream_reader.dart';
 export 'src/data_stream/stream_writer.dart';
