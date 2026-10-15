@@ -76,6 +76,18 @@ Duration kGravixStandbyUpgradeTimeout = const Duration(milliseconds: 1500);
 /// than the SFU's own join handling on a normal join.
 const Duration kGravixStandbyUpgradeFloor = Duration(milliseconds: 500);
 
+/// GRAVIX (0.4.19, device run 2026-10-15): the floor when the dial runs in the
+/// signal isolate. The 0.5 s floor was about a busy MAIN isolate reading the
+/// upgrade's reply late; in the signal isolate the reply is read at once, so a
+/// stalled standby gets its fresh dial sooner. Above the SFU's own join
+/// handling (65-360 ms in the field data); the race is decided one TCP + TLS
+/// later, so a reply in that window still wins.
+const Duration kGravixStandbyIsolateUpgradeFloor = Duration(milliseconds: 400);
+
+/// True in the signal isolate (GravixSignalIsolate): [gravixStandbyUpgradeBound]
+/// uses [kGravixStandbyIsolateUpgradeFloor].
+bool gravixStandbyInSignalIsolate = false;
+
 /// GRAVIX (2026-10-12): see `GravixStandby.lowRttUpgradeFloor`. Null = off.
 Duration? gravixStandbyLowRttUpgradeFloor;
 
@@ -90,7 +102,9 @@ Duration gravixStandbyUpgradeBound(int? rttMs) {
   if (rttMs == null || rttMs <= 0) return cap;
   final ms = rttMs * 3;
   final lowRttFloor = gravixStandbyLowRttUpgradeFloor;
-  final base = lowRttFloor != null && rttMs < kGravixStandbyLowRttMs ? lowRttFloor : kGravixStandbyUpgradeFloor;
+  final base = lowRttFloor != null && rttMs < kGravixStandbyLowRttMs
+      ? lowRttFloor
+      : (gravixStandbyInSignalIsolate ? kGravixStandbyIsolateUpgradeFloor : kGravixStandbyUpgradeFloor);
   final floor = base < cap ? base : cap;
   if (ms < floor.inMilliseconds) return floor;
   if (ms > cap.inMilliseconds) return cap;

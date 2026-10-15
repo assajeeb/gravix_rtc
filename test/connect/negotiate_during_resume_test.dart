@@ -280,7 +280,13 @@ void main() {
       expect(restarting, 0);
       expect(resumed, 1);
       expect(log, contains('createOffer:v2:restart'), reason: 'the restart offer carries the current senders');
-      expect(log.last, 'remote:answer:v2', reason: 'stable on an answer to a v2 offer');
+      // (0.4.19, HOST-CAMERA) a replay identical to the answered offer is
+      // skipped after its createOffer: the last description applied counts
+      expect(
+        log.where((l) => !l.startsWith('createOffer')).last,
+        'remote:answer:v2',
+        reason: 'stable on an answer to a v2 offer',
+      );
     });
 
     test('flags on/off: on by default, off in legacy, kept by copyWith', () {

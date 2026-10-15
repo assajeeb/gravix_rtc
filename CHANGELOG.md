@@ -1,5 +1,235 @@
 # Changelog
 
+## 0.4.19 — 2026-10-15
+
+Fast joining in the package: what every app wrote by hand around `Room.connect` (the token
+cache rule, the standby pre-connects, the tap-time prejoin, the lifecycle guards, one session at
+a time, the room switch, the viewer rejoin), with one secret-free `[GravixJoin]` log line per step,
+and rooms this SDK cannot join (old servers) refused instead of failed. All of it is new and
+opt-in: `Room.connect`, `GravixRoomService`, `GravixStandby` and `GravixTokenProvider` without
+`reuse:` behave exactly as in 0.4.18. See `doc/FAST_JOIN.md`.
+Also fixes in the core's publisher negotiation that are always on: one publisher offer at a time
+(no more full rejoins from "order of m-lines" when room music changes tracks), the first answer no
+longer held behind a deferred sender change (no native round trips in front of a non-restart offer
+or a remote candidate, no replay of a change the pending offer already carried), and no SDP body in
+any log line. With the socket in the signal isolate, a standby connection's upgrade is raced by a
+fresh dial sooner (3 x RTT, at least 0.4 s). No native change.
+
+### Fixed: one publisher offer at a time (room music no longer sends the host to a full rejoin)
+- A publisher renegotiation that fired while the previous offer was still being created (createOffer,
+  munging and setLocalDescription take 60-200 ms on a phone), or while the answer's replay was, also
+  found the connection stable and created a second offer. libwebrtc names a transceiver without a mid
+  afresh in every createOffer, so it refused the second one ("The order of m-lines in subsequent offer
+  doesn't match order from previous offer/answer"), and the NegotiationError ended in a full rejoin.
+  Room music republishes the microphone twice per track change: up to 7 full rejoins in one host
+  session. It was there in 0.4.17 and 0.4.18 builds too.
+- Offer creation and answer application now run one at a time: a later call finds the offer pending and
+  is replayed after the answer; an offer created after the answer carries every change, so a satisfied
+  replay is skipped instead of sent empty. A step that never finishes holds the next one at most 10 s
+  (logged). ICE restarts keep their replay.
+- One secret-free line per publisher negotiation step through `debugPrint`, with the stable prefix
+  `[GravixPub]`: `senderAdd` / `senderRemove`, `offerCreate`, `setLocal` / `setRemote`, `offerSent`
+  (with the m-line list `kind:mid/direction`), `offerWait` / `remoteWait` (and `...WaitTimeout`),
+  `offerDefer` / `offerHold` / `offerReplay` / `offerReplaySkip`, `remoteSet <type>`, `offerRollback`.
+
+### Fixed: the first publisher answer is no longer held behind a deferred sender change
+- With publisher offers run one at a time (above: an offer being created and the answer's
+  application are serialised), a sender change made while an offer was out (e.g. the camera
+  published while the join's microphone offer was waiting for its answer) queued in front of that
+  answer, only to read the native signaling state and defer; under main-thread load that round trip
+  held the answer 24-423 ms (in 4 of 10 cold host joins of a device run), and the microphone and
+  camera went live that much later. The publisher now keeps an "offer pending" mark: a non-restart
+  offer request while it is set only marks the change for the replay after the answer
+  (`[GravixPub] offerDefer`) and returns without a chain step or a native call. ICE restarts keep
+  the serialised path.
+- The replay after an answer is skipped when its fresh offer negotiates exactly what the last
+  offer did (m-lines, mids, directions, tracks, codecs, simulcast; not the origin line or the
+  candidates and addresses gathering added)
+  (`offerReplaySkip`): the answered offer already carried the change, so no identical extra offer
+  and round trip. After an ICE restart's answer the held change is still replayed.
+- A sender change already contained in the pending offer causes no replay at all (device run:
+  in one of three cold host video joins the first offer already carried the camera and an
+  identical replay followed the answer; the skip never fired on that path). Offer requests are
+  counted; a request covered by the pending offer (made before its createOffer) logs
+  `offerCovered` and needs neither a replay nor a createOffer. Otherwise the replay's offer is
+  compared on its senders only (per m-line: kind, mid, direction, msid, ssrc, rid / simulcast).
+  The skip that never fired compared the first offer of a connection (one transport per m-line)
+  with a re-offer after BUNDLE was accepted (one transport); which line differed is not in the
+  device log. A sent replay logs `offerReplayDiff attrs=<attribute names>` (names only), a skip
+  names the other differing lines the same way.
+- A non-restart offer reads the Dart-side "offer pending" mark instead of the native signaling
+  state (an ICE restart still reads it): a real change goes out right after the answer, with
+  no native round trip in front of its createOffer.
+- A remote ICE candidate is added at once once a remote description was applied (a Dart-side
+  mark instead of a native `getRemoteDescription()` per candidate). A candidate that arrived
+  while the answer was being applied could read "no description", land after the answer's
+  pending list was flushed and stay unused until the next answer.
+
+### Fixed: no SDP body in the logs
+- A refused munged offer, the engine's offer / answer trace lines, a `NegotiationError` and a failed
+  createAnswer printed the whole SDP or the raw native error (which quotes SDP lines), i.e. the
+  ice-pwd, ice-ufrag and fingerprint. Each now names the type and the m-line list; error text is cut
+  before any SDP body, ice-pwd / ice-ufrag / fingerprint / crypto values are redacted, and the length
+  is capped. Signal offer / answer events print the type and the m-lines.
+
+### Changed: the standby connection in a join
+- Every join that took a standby connection logs what happened to it: `standbyTaken` (outcome,
+  age, wait, path, upgrade bound, dial time, reused), `standbyRaceWon=fresh|standby` when a fresh
+  dial raced a stalled upgrade, `standbyStale reason=expired|dead|stalled|failed|reopened` when it
+  could not carry the join (device run: two host joins paid ~3 s on a stalled standby and the log
+  showed only `standbyReuse`).
+- With the socket in the signal isolate, the upgrade over a standby connection gets 3 x RTT, at
+  least 0.4 s (was: the pool's RTT hint of at least 400 ms, i.e. 1.2 s, and a 0.5 s floor) before
+  a fresh dial races it; at most 1.5 s as before. Those floors were for a busy main isolate reading
+  the reply late; the two stalled joins waited the full 1.2 s before their fresh dial. Without the
+  signal isolate nothing changes. (`GravixStandby.lowRttUpgradeFloor` is not passed to the signal
+  isolate, before or now.) The fresh dial is raced, not queued: whichever connection is up first
+  carries the join, and the other is closed before the fresh join is written (one server session).
+  A standby connection that is half-open cannot be detected before its upgrade (no ping exists on
+  a connection with no WebSocket yet); the race is the safeguard.
+
+### Added: `GravixJoin`
+- `warm(request, role:, rank:, activity:)`: the token into the provider's cache and a standby
+  pre-connect to the server the join will dial; no connect, never throws. `activity: false` (a
+  periodic refresh, e.g. the own room's token every 40 s) does not count as user activity: it
+  neither wakes an idle standby pool nor keeps it rotating (`GravixStandbyPool.noteCard` /
+  `touchCard` take the same `activity:` as `setOwnJoin`).
+- `prepare(request)`: the tap's join, started now (`GravixPrejoin`); the same handle while the
+  session (room + identity + publish right) is live. Another session is stopped first and the new
+  connect starts only after its leave returned: never two sessions.
+- `prepare(request, abandonInBackground:, attachTimeout:)`: override the constructor's for that
+  one handle (a host's own Go Live join whose room screen is pushed after the app's Go Live flow
+  survives a Home press in that window; `attachTimeout: null` = never, omitted = the
+  constructor's, `GravixJoin.inheritAttachTimeout`). `attach` / `attachResult` / `attachOrThrow`
+  take the same `attachTimeout:` for their cold join.
+- `attach(request, createRoom:, connect:, leave:, joinMicrophone:, joinCamera:, abandonInBackground:)`:
+  the room screen's connected `Room` (a cold join when there was no prepare; the hooks and
+  `abandonInBackground` are used only for that cold join, a live handle keeps its own).
+- `switchTo(request, beforeConnect:)`: the new room's token and server warmed at the tap, the old
+  session stopped at once, the app's own work beside it, the new connect the moment both are done.
+- `adopt(request, room, leave:)`: a Room the app connected itself (its own reconnect, e.g. a role
+  change with a new token whose `canPublish` differs) becomes the current session, already
+  attached: found by `pending` / `attach`, left by the next `prepare` / `switchTo` and by
+  `leave()`. The previous session ends `replaced` without its leave hook (the app tore it down);
+  one still joining is abandoned normally. No lifecycle guard on an adopted room.
+- `abandon`, `leave`, `forgetAll`, `current`, `pending`; `onEvent` (`GravixJoinEvent`: timings on
+  the tap's clock, `switchStart` / `switchOldLeft` / `switchConnected` included).
+
+### Added: the app's join layer (the wrapper every app wrote around `GravixJoin`)
+- `GravixJoinHooks(createRoom:, connect:, leave:)`: an app's own connect as one value, accepted as
+  `hooks:` by `prepare`, `attach`, `attachResult`, `attachOrThrow`, `switchTo` and `adopt` (its
+  `leave`). A null field falls back to the constructor's; an explicit argument wins.
+- `attachOrThrow(request, hooks:, onHandle:, throwIf:)`: the room screen's Room; null when the
+  session ended without an error; throws the token callback's own exception (unwrapped from
+  `GravixTokenException`) or the connect's error (`throwIf`: which ones; false returns null).
+  `onHandle` gets the session's handle at the call. Started before a permission dialog, a failure
+  meanwhile is no longer reported as an unhandled async error: the later `await` throws it.
+- `attachResult(request, hooks:)`: the same, never throwing: `GravixAttach` (`room`, `handle`,
+  `error` unwrapped, `connectedBeforeAttach`, `isLive`).
+- `GravixJoin.unwrapError(e)`, `GravixJoin.isLive(room)`, `join.hasToken(request)`,
+  `join.dropToken(request)`.
+- `GravixPrejoin.parseSessionKey(key)` and `GravixJoinEvent.session`: the room / identity / publish
+  right of a session key, for a join trace.
+- `GravixPrejoinEndReason.leftBeforeShown`: `background` / `neverShown`, the reasons a room screen
+  closes normally.
+
+### Added: `GravixPrejoin` (the handle, usable without `GravixJoin`)
+- `start(key:, target:, createRoom:, connect:, leave:)`, `pendingFor(key)`, `attach()`,
+  `abandon()`, `leave()`, `connected` (the join gate), `ended` (`GravixPrejoinEndReason`).
+- `adopt(key:, room:, leave:, replaces:)`: the low-level `GravixJoin.adopt`;
+  `GravixPrejoinEndReason.replaced` and `GravixJoinEventKind.adopted`.
+- Abandoned when the app is hidden / paused / detached before `attach()` is called or the handle
+  was started in the background. The screen claims the session when it CALLS `attach()` (not when
+  the connect returned: a Home press with the room screen visible and the connect running ended
+  the join): from then on only the background before the screen's first frame was shown with the
+  app resumed leaves (`neverShown`, `leaveIfNeverShown`; a frame drawn while `inactive` does not
+  count); once shown, never (`GravixJoinEventKind.shown` may now come before `attached`).
+  `markShown()`: the app says a screen of the session is shown. Left after `attachTimeout` (20 s)
+  when no screen called `attach()`; the clock counts only foreground time (paused while the app
+  is hidden / paused, resumed with what was left; a handle started in the background starts
+  paused): a host's Go Live join kept through a Home press was timed out by the time spent away.
+  Abandon while joining ends the join at once.
+- The leave reaches the server when the app goes away: an abandon of a connecting / connected
+  handle, or one for the background (`background` / `neverShown`), calls `room.disconnect()`
+  first (not awaited: the Leave is written at once) and runs the app's leave hook after it (a
+  Back right after the tap could detach the engine ~20 ms later, before the hook reached its
+  disconnect: a ghost viewer until the server timeout, ~30 s). The real exit of an attached room
+  keeps the hook first; a detach while it runs sends the Leave at once. A detached app ends a
+  handle no screen has shown, also one prepared with `abandonInBackground: false`.
+- An abandoned join never ends joined: `Room.connect()` clears the leave mark, so a handle
+  abandoned before the app's connect hook called `connect()` was joined after the abandon (a
+  ghost). The Room is now marked so that the next `connect()` returns at once without connecting
+  (only a Room whose `connect()` was never called; other callers unchanged), and a connect that
+  joins anyway is left at once with the signal leave (`leaveAfterLateConnect`).
+- A dead Room is an ended session: a connected / attached handle whose Room was disconnected after
+  the connect (`RoomDisconnectedEvent`, or `disconnected` with its engine closed) or disposed is
+  not handed out again (`pendingFor` / `start` / `attach` / `GravixJoin.prepare` / `attach` /
+  `pending` / `current`) and ends with the new `GravixPrejoinEndReason.roomGone`; the next join is
+  fresh. A resume or full reconnect under way is not a dead Room. Its leave hook never runs, also
+  when it is superseded / abandoned / left (the app's disconnect handling owns the cleanup; a
+  viewer rejoin does not restart the audio session); the SDK disposes it only when it built it
+  with the default createRoom and leave.
+
+### Added: `GravixJoinLog` (one line per fast-join step)
+- Every step of a fast join writes one secret-free line with a stable prefix:
+  `[GravixJoin] <step> key=<room>|u<id hash>|pub=<bool> [+<ms since tap>ms] [<detail>]`.
+  Steps: `warmStart` / `warmOk` / `warmFail` / `warmRefused` / `warmSkip`, `refused`, `prepare`
+  (new / same handle / supersedes),
+  `tokenStart` / `tokenOk` / `tokenFail`, `urlChosen`, `connectStart` / `connectOk` / `connectFail`,
+  `attachCall` / `attachCold` / `attached`, `shown`, `abandon` (reason), `left`, `leaveStart` /
+  `leaveSignalFirst` / `leaveAfterLateConnect` / `leaveDone` / `leaveSkipped` / `leaveFail`,
+  `connectBlocked`, `standbyTaken` / `standbyRaceWon=fresh|standby` / `standbyStale`, `attachTimeoutPaused` /
+  `attachTimeoutResumed`, `detached`, `switchStart` / `switchOldLeft` / `switchConnected` /
+  `switchCancelled`, `adopt`, `forgetAll`, `standbyOpen` / `standbyReuse` / `standbyFail` /
+  `standbyClosed`, `rejoinScheduled` / `rejoinAttempt` / `rejoinOk` / `rejoinFail` / `rejoinRefused` /
+  `rejoinGaveUp` / `rejoinCheck` / `rejoinLiveBack`, and `error` for every caught exception in the
+  join, standby and rejoin code (its type; no silent catch).
+- Never a token, a JWT, a url path or query (hosts only), an error message or a full identity
+  (a stable FNV-1a hash); every detail is scrubbed of JWTs and secret query parameters as well.
+- `GravixJoinLog.level` (`off` / `info` / `verbose`; default `info` in release, `verbose` in debug
+  and profile), `GravixJoinLog.enabled`, `GravixJoinLog.sink` (default `debugPrint`) and a `log:`
+  sink on `GravixJoin`, `GravixPrejoin.start` / `adopt`, `GravixStandbyPool` and
+  `GravixRejoinPolicy`. `GravixPrejoin.mark` takes an optional line detail; `logStep` adds a line.
+- The warm failure says why: `warmFail ... not warmed (<reason>[, cause <type>])` (field
+  2026-10-15: `not warmed (GravixTokenException)` hid an app's refusal of old-app rooms). The
+  rejoin policy's and the standby pool's former `Gravix rejoin:` / `Gravix standby pool:` lines are
+  now these steps.
+
+### Added: rooms this SDK cannot join (old servers) are refused, not failed
+- Many live rooms are hosted by old app builds on an old server: the token callback refuses them
+  (the app's "old app version" exception) or the token answer names a retired Gravix server. Before,
+  `warm` logged `warmFail` for each and every list refresh warmed them again (one line and one token
+  call per card per rebuild).
+- A refusal is a `RetiredServerException` (built in), the new `GravixRoomRefused` thrown by the
+  token callback, or what the new `GravixJoin(isRefusal:)` says of the app's own (unwrapped)
+  exception. `join.isRefusalError(e)`, `GravixRoomRefused.classify` / `isBuiltIn` / `unwrap`.
+- `warm` of a refused room: `warmRefused key=... reason=<type>` (not `warmFail`) and the new
+  `GravixJoinEventKind.refused`; the room is remembered for `GravixJoin(refusalMemo:)` (default
+  60 s): warms inside it do nothing (no token call, no standby; one verbose `warmSkip
+  reason=refused` line at most). `join.isRefused(request)` (no I/O) for a list badge.
+- `prepare` / `attach` / `attachResult` / `attachOrThrow` of a refused room still ask the token
+  callback, end at once with the app's own error (`attachOrThrow` throws it, `GravixAttach.error`),
+  log `refused` (not `connectFail`, no `tokenFail`) and renew the memo; `GravixPrejoin.refused`;
+  `GravixPrejoin.start(isRefusal:)` (default: the built-in refusals). A token for the room and
+  `forgetAll()` end the memo.
+- `GravixRejoinPolicy(isRefusal:, onRefused:)`: a `rejoin` that throws a refusal is not a failed
+  attempt (not counted, no retry, no `onGaveUp`); `roomRefused` until `liveBack`.
+- `GravixJoin.unwrapError` now also unwraps a `GravixTokenException` nested in another.
+- Note: an exhaustive `switch` over `GravixJoinEventKind` needs a `refused` case.
+
+### Added: the pieces
+- `GravixTokenReuse` (`GravixTokenProvider.callback/endpoint/fromTokenSource(reuse:)`);
+  `GravixTokenReuse.fastJoin`: reused only while younger than half its lifetime and 5 min, with at
+  least 90 s left. Without `reuse:` the 0.4.18 rule.
+- `gravixJoinUrl(credentials)` / `GravixJoinUrlChoice.withStandby`: the url a join dials (measured
+  region, a viewer's home region within the margin, the token url otherwise; an open standby in
+  another of the token's regions wins, never over the home region).
+- `GravixStandbyPool` / `gravixPlanStandbys`: one standby per server for the servers the user is
+  likeliest to join (touched > own region > visible, at most 3), rotated every 40 s, closed after
+  3 min idle and in the background, re-opened on resume; `explain()`.
+- `GravixRejoinPolicy` and `gravixConnectWhileAlive`: the viewer rejoin (1/2/4/8 s; never after a
+  kick, another device, a deleted room or a refused join; 3 per incident, 12 per live).
+
 ## 0.4.18 — 2026-10-14
 
 Recovery after a phone's Wi-Fi drop (a short drop resumes instead of rejoining, a resume no longer

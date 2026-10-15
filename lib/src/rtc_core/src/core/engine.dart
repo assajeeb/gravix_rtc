@@ -56,6 +56,7 @@ import 'add_track_rejection.dart';
 import 'reconnect_policy.dart';
 import 'signal_client.dart';
 import 'gravix_ice_transport.dart';
+import 'gravix_pub_log.dart';
 import 'transport.dart';
 
 // GRAVIX (2026-09-27): the retry delay table moved to DefaultReconnectPolicy
@@ -1286,6 +1287,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       connectOptions: connectOptions,
     );
     publisher!.gravixConnectionLevelStartBitrate = roomOptions.recovery.startBitrateBySetupTime; // GRAVIX (0.4.15)
+    publisher!.gravixLogLabel = 'pub#$_gravixTransportGen'; // GRAVIX (0.4.19): GravixPubLog lines
     // GRAVIX (0.4.15, BUG-3): an offer the socket cannot carry is held (not made
     // and dropped), and a restart rolls back an offer that left unanswered.
     if (roomOptions.recovery.deferNegotiateDuringResume) {
@@ -1306,6 +1308,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       connectOptions: connectOptions,
     );
     _gravixConnectPingRestore = connectPing == null ? null : rtcConfiguration;
+    subscriber!.gravixLogLabel = 'sub#$_gravixTransportGen';
 
     publisher?.pc.onIceCandidate = (rtc.RTCIceCandidate candidate) {
       logger.fine('publisher onIceCandidate');
@@ -2894,7 +2897,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         '[$objectId] Received server offer(type: ${event.sd.type}, '
         '$signalingState)',
       );
-      logger.finer('sdp: ${event.sd.sdp}');
+      logger.finer('sdp: ${GravixPubLog.describe(event.sd.type, event.sd.sdp)}'); // GRAVIX: never the body
 
       await subscriber!.setRemoteDescription(event.sd);
       _gravixMark('setRemoteDescriptionDone'); // GRAVIX
@@ -2915,7 +2918,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
               answer = rtc.RTCSessionDescription(gravixPassiveDtlsAnswer(sdp), answer.type);
             }
             logger.fine('Created answer');
-            logger.finer('sdp: ${answer.sdp}');
+            logger.finer('sdp: ${GravixPubLog.describe(answer.type, answer.sdp)}');
             return answer;
           },
           setLocalDescription: (answer) => subscriber!.pc.setLocalDescription(answer),
@@ -2923,8 +2926,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
           mark: _gravixMark,
         );
       } catch (e) {
-        _gravixMark('answerFailed', e.toString()); // GRAVIX: a refused answer shows in the join timeline
-        logger.severe('[$objectId] Failed to createAnswer(): $e');
+        // GRAVIX: a refused answer shows in the join timeline (never an SDP body)
+        _gravixMark('answerFailed', GravixPubLog.safeError(e));
+        logger.severe('[$objectId] Failed to createAnswer(): ${GravixPubLog.safeError(e)}');
       }
     })
     ..on<SignalAnswerEvent>((event) async {
@@ -2932,7 +2936,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         return;
       }
       logger.fine('received answer (type: ${event.sd.type})');
-      logger.finer('sdp: ${event.sd.sdp}');
+      logger.finer('sdp: ${GravixPubLog.describe(event.sd.type, event.sd.sdp)}');
       await publisher!.setRemoteDescription(event.sd);
     })
     ..on<SignalTrickleEvent>((event) async {
@@ -3084,6 +3088,14 @@ extension EngineInternalMethods on Engine {
     final transceiver = gravixDetached
         ? await publisher!.pc.addTransceiver(kind: kind, init: transceiverInit)
         : await publisher!.pc.addTransceiver(track: track.mediaStreamTrack, kind: kind, init: transceiverInit);
+    // GRAVIX (0.4.19): no mid yet: the next applied offer gives it one
+    GravixPubLog.step(
+      'senderAdd',
+      pc: publisher!.gravixLogLabel,
+      detail:
+          'kind=${kind == rtc.RTCRtpMediaType.RTCRtpMediaTypeVideo ? 'video' : 'audio'} '
+          'source=${track.source.name} detached=$gravixDetached',
+    );
     return transceiver;
   }
 

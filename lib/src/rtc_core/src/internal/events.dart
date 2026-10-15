@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import '../core/gravix_pub_log.dart' show GravixPubLog;
 import '../core/gravix_ice_transport.dart' show GravixIceTransport;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
@@ -363,7 +364,7 @@ class SignalOfferEvent with SignalEvent, InternalEvent {
   const SignalOfferEvent({required this.sd});
 
   @override
-  String toString() => '${runtimeType}(sd: ${sd})';
+  String toString() => '${runtimeType}(sd: ${GravixPubLog.describe(sd.type, sd.sdp)})'; // GRAVIX: never the body
 }
 
 @internal
@@ -372,7 +373,7 @@ class SignalAnswerEvent with SignalEvent, InternalEvent {
   const SignalAnswerEvent({required this.sd});
 
   @override
-  String toString() => '${runtimeType}(sd: ${sd})';
+  String toString() => '${runtimeType}(sd: ${GravixPubLog.describe(sd.type, sd.sdp)})'; // GRAVIX: never the body
 }
 
 @internal

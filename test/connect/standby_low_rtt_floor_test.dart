@@ -10,7 +10,10 @@ import 'package:gravix_rtc/gravix_rtc.dart';
 import 'package:gravix_rtc/src/rtc_core/src/support/websocket/standby_types.dart';
 
 void main() {
-  tearDown(() => GravixStandby.lowRttUpgradeFloor = null);
+  tearDown(() {
+    GravixStandby.lowRttUpgradeFloor = null;
+    gravixStandbyInSignalIsolate = false;
+  });
 
   test('off (default): unchanged', () {
     expect(GravixStandby.lowRttUpgradeFloor, isNull);
@@ -32,5 +35,19 @@ void main() {
   test('never above the upgrade timeout', () {
     GravixStandby.lowRttUpgradeFloor = const Duration(seconds: 3);
     expect(gravixStandbyUpgradeBound(6), kGravixStandbyUpgradeTimeout);
+  });
+
+  // Device run B-g 2026-10-15: with the socket in the signal isolate the reply
+  // is no longer read late by a busy main isolate (the reason for the 0.5 s
+  // floor); a stalled standby now gets its fresh dial after 0.4 s (above the
+  // SFU's 65-360 ms join handling in the field data).
+  test('in the signal isolate: the floor is 0.4 s; 3 x RTT above it and the cap unchanged', () {
+    gravixStandbyInSignalIsolate = true;
+    expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 400));
+    expect(gravixStandbyUpgradeBound(110), const Duration(milliseconds: 400));
+    expect(gravixStandbyUpgradeBound(171), const Duration(milliseconds: 513));
+    expect(gravixStandbyUpgradeBound(null), const Duration(milliseconds: 1500));
+    GravixStandby.lowRttUpgradeFloor = const Duration(seconds: 1);
+    expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 1000), reason: "the app's opt-in still wins");
   });
 }

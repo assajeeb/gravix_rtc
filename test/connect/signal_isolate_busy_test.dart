@@ -145,7 +145,7 @@ void main() {
     // ignore: avoid_print
     print('RESULT signal_isolate_busy on: path=${sb['path']} wsOpenMs=$ms');
     expect(sb['outcome'], 'used');
-    expect(sb['boundMs'], 500);
+    expect(sb['boundMs'], 400, reason: 'the 0.4 s signal-isolate floor (0.4.19)');
     expect(sb['path'], 'standby', reason: 'read on time in the signal isolate: no race, no fresh dial');
     expect(ms, lessThan(500), reason: 'one task on the app isolate (one 300 ms block at most)');
     expect(sb['signalIsolate'], isTrue);

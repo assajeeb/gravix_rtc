@@ -29,6 +29,7 @@ import '../support/disposable.dart';
 import '../support/platform.dart';
 import '../types/other.dart';
 import '../utils.dart';
+import 'gravix_pub_log.dart';
 
 const ddExtensionURI = 'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension';
 
@@ -202,6 +203,86 @@ class Transport extends Disposable {
   bool renegotiate = false;
   TransportOnOffer? onOffer;
 
+  /// GRAVIX (0.4.19): the name in this transport's [GravixPubLog] lines (the
+  /// engine sets `pub#<generation>`).
+  String gravixLogLabel = 'pc';
+
+  /// GRAVIX (0.4.19, MUSIC-SDP, device 2026-10-15): one offer at a time. Offer
+  /// creation (createOffer, munging, setLocalDescription, onOffer) and the
+  /// answer's application run one after the other on this chain. Before, a
+  /// debounced negotiate() that fired while the previous offer was still being
+  /// created (60-200 ms on a phone), or while the answer's [renegotiate] replay
+  /// was, also found the connection stable and created a second offer from the
+  /// same state. libwebrtc names a transceiver that has no mid yet afresh in
+  /// every createOffer, so the second offer's m-lines did not match the first
+  /// (now pending) one: "Failed to set local offer sdp: The order of m-lines in
+  /// subsequent offer doesn't match order from previous offer/answer" (munged
+  /// and unmunged), a NegotiationError and a full rejoin. Room music republishes
+  /// the microphone twice per track change, which made it frequent (7 full
+  /// rejoins in one host session). Now the later call waits, finds the offer
+  /// pending, and is replayed after the answer ([renegotiate]).
+  Future<void> _offerChain = Future<void>.value();
+  int _offerChainDepth = 0;
+
+  /// GRAVIX (0.4.19, HOST-CAMERA, device 2026-10-15): a local offer is set and
+  /// its answer not yet applied (Dart-side; no native read). While it is set, a
+  /// non-restart offer request only marks [renegotiate] (`offerDefer`) and
+  /// returns WITHOUT entering the offer chain: a camera published while the
+  /// first (mic) offer was out queued in front of that offer's answer, only to
+  /// read have-local-offer natively and defer, and that round trip under
+  /// main-thread load held the answer 24-423 ms (mic and camera live slipped
+  /// by the same, 4 of 10 cold host joins).
+  bool _offerPending = false;
+
+  /// The sender set of the last offer set locally ([gravixSenderSet]): a
+  /// replay whose fresh offer has the same set is skipped (`offerReplaySkip`), not sent as an
+  /// identical extra round trip. Not after an ICE restart offer: a change
+  /// held during a resume is still replayed after the restart's answer (BUG-3).
+  String? _lastOfferSenders;
+  // the raw lines of the last offer set locally (only for `offerReplayDiff`)
+  String? _lastOfferSdp;
+  bool _lastOfferWasRestart = false;
+
+  /// GRAVIX (0.4.19, HOST-VIDEO-COLD, device 2026-10-15): offer requests made
+  /// so far ([negotiate] / [createAndSendOffer] calls), and how many of them the
+  /// last offer set locally covers (the count when its createOffer was issued:
+  /// every change behind those requests was made before it). A request deferred
+  /// while that offer is out and already covered by it needs no replay
+  /// (`offerCovered`).
+  int _offerRequests = 0;
+  int _coveredRequests = -1;
+
+  /// A remote description was applied (Dart-side): a remote candidate is added
+  /// at once, with no native getRemoteDescription round trip per candidate.
+  bool _remoteSet = false;
+
+  @visibleForTesting
+  bool get gravixOfferPending => _offerPending;
+
+  /// The longest a step waits for the one ahead of it: a native call that never
+  /// returns must not hold every later offer, answer and ICE restart forever.
+  @visibleForTesting
+  Duration gravixOfferChainWait = const Duration(seconds: 10);
+
+  Future<T> _serialised<T>(String what, Future<T> Function() body) {
+    if (_offerChainDepth > 0) {
+      GravixPubLog.step('${what}Wait', pc: gravixLogLabel, detail: '(${_offerChainDepth} step(s) ahead)');
+    }
+    _offerChainDepth++;
+    final result = _offerChain
+        .timeout(
+          gravixOfferChainWait,
+          onTimeout: () => GravixPubLog.step(
+            '${what}WaitTimeout',
+            pc: gravixLogLabel,
+            detail: 'the step ahead did not finish in ${gravixOfferChainWait.inMilliseconds} ms: going ahead',
+          ),
+        )
+        .then((_) => body());
+    _offerChain = result.then<void>((_) {}, onError: (Object _) {}).whenComplete(() => _offerChainDepth--);
+    return result;
+  }
+
   /// GRAVIX (0.4.15, BUG-3, REAL iPhone 2026-10-10 d7): GravixRecoveryOptions
   /// .deferNegotiateDuringResume, set by the engine: true while the signal
   /// socket cannot carry an offer (a resume is dialling). Offers are never
@@ -286,19 +367,25 @@ class Transport extends Disposable {
   @internal
   Duration? get connectionSetupTimeForOffer => _connectStopwatch?.elapsed;
 
-  late final negotiate = Utils.createDebounceFunc(
+  late final _negotiateDebounced = Utils.createDebounceFunc(
     (void _) => _createAndSendOfferReportingErrors(),
     cancelFunc: (f) => _cancelDebounce = f,
     wait: connectOptions.timeouts.debounce,
   );
 
+  /// A debounced offer request (a sender changed).
+  void negotiate(void _) {
+    _offerRequests++;
+    _negotiateDebounced(null);
+  }
+
   /// The debouncer and the offer deferred until the answer arrives have no caller
   /// that handles errors: hand a failure to [onNegotiationError]. Without a
   /// handler it propagates exactly as before. Direct [createAndSendOffer]
   /// callers still get the error.
-  Future<void> _createAndSendOfferReportingErrors() async {
+  Future<void> _createAndSendOfferReportingErrors({bool replay = false}) async {
     try {
-      await createAndSendOffer();
+      await _offerOnChain(null, replay: replay);
     } catch (error) {
       final handler = onNegotiationError;
       if (handler == null) rethrow;
@@ -313,22 +400,38 @@ class Transport extends Disposable {
       return;
     }
 
-    try {
-      await pc.setRemoteDescription(sd);
-    } catch (e) {
-      logger.warning('[$objectId] setRemoteDescription() failed with error: $e');
-    }
+    // GRAVIX (0.4.19, MUSIC-SDP): on the offer chain, so an offer being
+    // created when the answer lands is applied first (and a negotiate() that
+    // read have-local-offer has set [renegotiate] before it is read below).
+    await _serialised('remote', () async {
+      try {
+        await pc.setRemoteDescription(sd);
+        _remoteSet = true;
+        if (sd.type == 'answer') _offerPending = false;
+        GravixPubLog.step(
+          'remoteSet',
+          pc: gravixLogLabel,
+          detail: '${sd.type} ok replay=$renegotiate mlines=${GravixPubLog.mlines(sd.sdp)}',
+        );
+      } catch (e) {
+        GravixPubLog.step('remoteSet', pc: gravixLogLabel, detail: '${sd.type} FAIL reason=${GravixPubLog.reason(e)}');
+        logger.warning('[$objectId] setRemoteDescription() failed with error: $e');
+      }
 
-    for (final candidate in _pendingCandidates) {
-      await pc.addCandidate(candidate);
-    }
+      for (final candidate in _pendingCandidates) {
+        await pc.addCandidate(candidate);
+      }
 
-    _pendingCandidates.clear();
-    restartingIce = false;
+      _pendingCandidates.clear();
+      restartingIce = false;
+    });
 
     if (renegotiate) {
-      renegotiate = false;
-      await _createAndSendOfferReportingErrors();
+      // GRAVIX (0.4.19, MUSIC-SDP): [renegotiate] is read again when the replay's
+      // turn on the chain comes: an offer that got there first already carried
+      // the change (and cleared it), so the replay is skipped, not sent empty
+      GravixPubLog.step('offerReplay', pc: gravixLogLabel, detail: 'a sender change waited for this answer');
+      await _createAndSendOfferReportingErrors(replay: true);
     }
   }
 
@@ -339,18 +442,47 @@ class Transport extends Disposable {
   /// a closed connection has nothing to negotiate, so the failure is dropped
   /// instead of surfacing as an unhandled NegotiationError (or a reconnect
   /// request after the leave). A live transport's failure propagates as before.
-  Future<void> createAndSendOffer([RTCOfferOptions? options]) async {
+  Future<void> createAndSendOffer([RTCOfferOptions? options]) {
+    _offerRequests++;
+    return _offerOnChain(options);
+  }
+
+  // A non-restart offer request while an offer is out: covered by that offer
+  // (nothing to do) or marked for the replay after its answer.
+  void _deferWhilePending(String where) {
+    if (!_lastOfferWasRestart && _offerRequests <= _coveredRequests) {
+      GravixPubLog.step('offerCovered', pc: gravixLogLabel, detail: '$where: the pending offer carries it');
+      return;
+    }
+    GravixPubLog.step('offerDefer', pc: gravixLogLabel, detail: '$where: replayed after the answer');
+    renegotiate = true;
+  }
+
+  Future<void> _offerOnChain(RTCOfferOptions? options, {bool replay = false}) async {
+    // GRAVIX (0.4.19, HOST-CAMERA): an offer is out: the change goes in the
+    // replay after its answer, with no chain step and no native call in front
+    // of that answer. ICE restarts (and a held-offer check) keep the chain path.
+    if (_offerPending && !replay && !(options?.iceRestart ?? false) && !isDisposed) {
+      _deferWhilePending('offer pending');
+      return;
+    }
     try {
-      await _createAndSendOffer(options);
+      // GRAVIX (0.4.19, MUSIC-SDP): one offer at a time (see [_offerChain])
+      await _serialised('offer', () => _createAndSendOffer(options, replay));
     } catch (error) {
       if (!isDisposed) rethrow;
       logger.fine('[$objectId] offer dropped: the transport was disposed while it was in flight ($error)');
     }
   }
 
-  Future<void> _createAndSendOffer([RTCOfferOptions? options]) async {
+  Future<void> _createAndSendOffer([RTCOfferOptions? options, bool replay = false]) async {
     if (isDisposed) {
       logger.warning('[$objectId] createAndSendOffer() already disposed');
+      return;
+    }
+
+    if (replay && !renegotiate) {
+      GravixPubLog.step('offerReplaySkip', pc: gravixLogLabel, detail: 'an offer since the answer carried the change');
       return;
     }
 
@@ -365,6 +497,7 @@ class Transport extends Disposable {
         '[$objectId] offer held: the signal socket cannot carry it (a reconnect is dialling); '
         'it goes out after the next answer',
       );
+      GravixPubLog.step('offerHold', pc: gravixLogLabel, detail: 'signal socket not connected: after the next answer');
       renegotiate = true;
       return;
     }
@@ -374,17 +507,28 @@ class Transport extends Disposable {
       restartingIce = true;
     }
 
-    if (await pc.getSignalingState() == rtc.RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+    // GRAVIX (0.4.19, HOST-VIDEO-COLD): a non-restart offer reads the Dart-side
+    // pending mark, not the native signaling state: that round trip under
+    // main-thread load was most of the 0.5 s between an answer and its replay
+    // offer on a cold host join. An ICE restart still reads the native state.
+    if (!iceRestart) {
+      if (_offerPending) {
+        _deferWhilePending('have-local-offer');
+        return;
+      }
+    } else if (await pc.getSignalingState() == rtc.RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
       // we're waiting for the peer to accept our offer, so we'll just wait
       // the only exception to this is when ICE restart is needed
       final currentSD = await getRemoteDescription();
-      if (iceRestart && currentSD != null) {
+      if (currentSD != null) {
         // TODO: handle when ICE restart is needed but we don't have a remote description
         // the best thing to do is to recreate the peerconnection
         if (!(gravixRollbackStaleOffer && await _gravixRollbackLocalOffer())) {
           await pc.setRemoteDescription(currentSD);
         }
+        _offerPending = false; // stable again: the restart offer is next
       } else {
+        GravixPubLog.step('offerDefer', pc: gravixLogLabel, detail: 'have-local-offer: replayed after the answer');
         renegotiate = true;
         return;
       }
@@ -396,11 +540,42 @@ class Transport extends Disposable {
 
     // actually negotiate
     logger.fine('starting to negotiate');
+    // GRAVIX (0.4.19, MUSIC-SDP): this offer carries every sender change made
+    // so far, so a replay asked for earlier is satisfied by it (a change made
+    // after the snapshot finds the offer pending and asks again). An ICE
+    // restart keeps the BUG-3 behaviour: a held offer is replayed after it.
+    if (!iceRestart) renegotiate = false;
+    final covers = _offerRequests;
     final offer = await pc.createOffer(options?.toMap() ?? <String, dynamic>{});
+    GravixPubLog.step(
+      'offerCreate',
+      pc: gravixLogLabel,
+      detail: 'restart=$iceRestart mlines=${GravixPubLog.mlines(offer.sdp)}',
+    );
+    final senders = gravixSenderSet(offer.sdp);
+    if (replay && !iceRestart && !_lastOfferWasRestart) {
+      if (senders == _lastOfferSenders) {
+        // GRAVIX (0.4.19, HOST-CAMERA): the answered offer already carried this
+        // sender set (the change was in it): nothing to negotiate
+        GravixPubLog.step(
+          'offerReplaySkip',
+          pc: gravixLogLabel,
+          detail: 'sender set unchanged since the last offer${_diffDetail(_lastOfferSdp, offer.sdp, ' other lines')}',
+        );
+        return;
+      }
+      GravixPubLog.step(
+        'offerReplayDiff',
+        pc: gravixLogLabel,
+        detail: _diffDetail(_lastOfferSdp, offer.sdp, '').trim(),
+      );
+    }
 
     final sdpParsed = sdp_transform.parse(offer.sdp ?? '');
     if (gravixConnectionLevelStartBitrate) {
       await _setOfferWithConnectionStartBitrate(offer, sdpParsed);
+      _noteLocalOffer(senders, iceRestart, covers, offer.sdp);
+      _gravixLogOfferSent(offer);
       onOffer?.call(offer);
       return;
     }
@@ -443,10 +618,102 @@ class Transport extends Disposable {
     try {
       await setMungedSDP(sd: offer, munged: sdp_transform.write(sdpParsed, null));
     } catch (e) {
-      throw NegotiationError(e.toString());
+      throw NegotiationError(GravixPubLog.safeError(e));
     }
+    _noteLocalOffer(senders, iceRestart, covers, offer.sdp);
+    _gravixLogOfferSent(offer);
     onOffer?.call(offer);
   }
+
+  void _noteLocalOffer(String senders, bool iceRestart, int covers, String? rawSdp) {
+    _offerPending = true;
+    _lastOfferSenders = senders;
+    _lastOfferSdp = rawSdp;
+    _lastOfferWasRestart = iceRestart;
+    _coveredRequests = covers;
+  }
+
+  /// The attribute NAMES (never values: ice-pwd, fingerprint) of the lines that
+  /// differ between two offers: ` attrs=a=ice-ufrag,a=mid,m=` (for a field log
+  /// of why a replay was or was not skipped). Empty when none.
+  static String _diffDetail(String? a, String? b, String label) {
+    Set<String> lines(String? sdp) =>
+        (sdp ?? '').split('\n').map((l) => l.trimRight()).where((l) => l.isNotEmpty).toSet();
+    final la = lines(a), lb = lines(b);
+    final names = <String>{for (final l in la.difference(lb).union(lb.difference(la))) _attrName(l)}.toList()..sort();
+    return names.isEmpty ? '' : '$label attrs=${names.join(',')}';
+  }
+
+  static String _attrName(String line) {
+    if (line.startsWith('a=')) {
+      final end = line.indexOf(RegExp('[: ]'));
+      return end < 0 ? line : line.substring(0, end);
+    }
+    return line.length >= 2 ? line.substring(0, 2) : line;
+  }
+
+  /// GRAVIX (0.4.19, HOST-CAMERA / HOST-VIDEO-COLD): the senders an offer
+  /// negotiates, per m-section: its kind and whether it is rejected (port 0
+  /// without `a=bundle-only`), `a=mid`, the direction, `a=msid`, `a=ssrc` /
+  /// `a=ssrc-group` and `a=rid` / `a=simulcast`. Everything else is left out:
+  /// transport lines (ICE credentials, candidates, `c=`, `a=rtcp`, DTLS, ports,
+  /// BUNDLE) and the codec and header-extension lists. The first offer of a
+  /// fresh connection (one transport per m-section) and a re-offer after
+  /// BUNDLE was accepted (one) differed in some line the device log could not
+  /// name (SDP bodies are never logged; `offerReplayDiff` names it now), with
+  /// the same senders. Codecs: this SDK sets codec preferences only on a new
+  /// transceiver (a new mid), and a re-offer may list the codecs differently
+  /// after the answer.
+  @visibleForTesting
+  static String gravixSenderSet(String? sdp) {
+    final out = <String>[];
+    var bundleOnly = false;
+    String? mline;
+    final section = <String>[];
+    void flush() {
+      final m = mline;
+      if (m == null) return;
+      final p = m.split(' ');
+      final rejected = p.length > 1 && p[1] == '0' && !bundleOnly;
+      out
+        ..add('m=${p.first.substring(2)}${rejected ? ' rejected' : ''}')
+        ..addAll(section);
+      section.clear();
+      bundleOnly = false;
+    }
+
+    for (final raw in (sdp ?? '').split('\n')) {
+      final line = raw.trimRight();
+      if (line.startsWith('m=')) {
+        flush();
+        mline = line;
+        continue;
+      }
+      if (mline == null) continue;
+      if (line == 'a=bundle-only') {
+        bundleOnly = true;
+      } else if (line.startsWith('a=mid:') ||
+          line.startsWith('a=msid:') ||
+          line.startsWith('a=ssrc:') ||
+          line.startsWith('a=ssrc-group:') ||
+          line.startsWith('a=rid:') ||
+          line.startsWith('a=simulcast:') ||
+          line == 'a=sendrecv' ||
+          line == 'a=sendonly' ||
+          line == 'a=recvonly' ||
+          line == 'a=inactive') {
+        section.add(line);
+      }
+    }
+    flush();
+    return out.join('\n');
+  }
+
+  void _gravixLogOfferSent(rtc.RTCSessionDescription offer) => GravixPubLog.step(
+    'offerSent',
+    pc: gravixLogLabel,
+    detail: onOffer == null ? 'no signal handler' : 'mlines=${GravixPubLog.mlines(offer.sdp)}',
+  );
 
   /// GRAVIX (0.4.15, BUG-3): drops the pending local offer (an SDP rollback,
   /// Unified Plan) so the restart offer starts from the last applied pair. The
@@ -460,6 +727,12 @@ class Transport extends Disposable {
       // from the map's string, and the type alone is what a rollback reads.
       await pc.setLocalDescription(rtc.RTCSessionDescription('', 'rollback'));
       final stable = await pc.getSignalingState() == rtc.RTCSignalingState.RTCSignalingStateStable;
+      if (stable) _offerPending = false;
+      GravixPubLog.step(
+        'offerRollback',
+        pc: gravixLogLabel,
+        detail: 'ICE restart: unanswered offer dropped stable=$stable',
+      );
       logger.fine('[$objectId] ICE restart: rolled back an unanswered local offer (stable: $stable)');
       return stable;
     } catch (error) {
@@ -508,7 +781,7 @@ class Transport extends Disposable {
     try {
       await setMungedSDP(sd: offer, munged: mungedSdp);
     } catch (e) {
-      throw NegotiationError(e.toString());
+      throw NegotiationError(GravixPubLog.safeError(e));
     }
     // setMungedSDP falls back to the unmunged SDP on rejection: consume the one-shot hint
     // only once the SDP carrying it was accepted
@@ -526,9 +799,12 @@ class Transport extends Disposable {
       return;
     }
 
-    final desc = await getRemoteDescription();
-
-    if (desc != null && !restartingIce) {
+    // GRAVIX (0.4.19, HOST-VIDEO-COLD): the Dart-side mark, not a native
+    // getRemoteDescription per candidate: that round trip could also return
+    // "none" while the answer was being applied and land after the answer step
+    // flushed the pending list, leaving the candidate unused until the next
+    // answer. The answer step sets the mark before it flushes.
+    if (_remoteSet && !restartingIce) {
       await pc.addCandidate(candidate);
       return;
     }
@@ -603,15 +879,21 @@ class Transport extends Disposable {
       sd.sdp = munged;
       try {
         logger.fine('setting munged ${remote == true ? 'remote' : 'local'}');
-        logger.finer('description munged: $munged ');
+        // GRAVIX (0.4.19): never an SDP body in a log (ice-pwd, fingerprint)
+        logger.finer('description munged: ${GravixPubLog.describe(sd.type, munged)}');
         if (remote == true) {
           await pc.setRemoteDescription(sd);
         } else {
           await pc.setLocalDescription(sd);
         }
+        _gravixLogSet(remote, sd, 'ok munged=${munged != originalSdp}');
         return;
       } catch (e) {
-        logger.warning('not able to set ${sd.type}, falling back to unmodified sdp error: $e, sdp: $munged ');
+        _gravixLogSet(remote, sd, 'FAIL munged=true reason=${GravixPubLog.reason(e)} (retrying unmunged)');
+        logger.warning(
+          'not able to set ${sd.type}, falling back to unmodified sdp error: ${GravixPubLog.safeError(e)}, '
+          'sdp: ${GravixPubLog.describe(sd.type, munged)}',
+        );
         sd.sdp = originalSdp;
       }
     }
@@ -622,10 +904,20 @@ class Transport extends Disposable {
       } else {
         await pc.setLocalDescription(sd);
       }
+      _gravixLogSet(remote, sd, 'ok munged=false');
     } catch (e) {
+      _gravixLogSet(remote, sd, 'FAIL munged=false reason=${GravixPubLog.reason(e)}');
       // this error cannot always be caught.ght
-      logger.warning('unable to set ${sd.type}, error: $e, sdp: ${sd.sdp}');
+      logger.warning(
+        'unable to set ${sd.type}, error: ${GravixPubLog.safeError(e)}, sdp: ${GravixPubLog.describe(sd.type, sd.sdp)}',
+      );
       rethrow;
     }
   }
+
+  void _gravixLogSet(bool? remote, rtc.RTCSessionDescription sd, String result) => GravixPubLog.step(
+    remote == true ? 'setRemote' : 'setLocal',
+    pc: gravixLogLabel,
+    detail: '${sd.type} $result mlines=${GravixPubLog.mlines(sd.sdp)}',
+  );
 }

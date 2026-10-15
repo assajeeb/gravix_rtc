@@ -211,7 +211,8 @@ void main() {
     expect(sb['outcome'], 'used');
     expect(sb['path'], 'standby');
     expect(sb['reused'], isTrue);
-    expect(sb['boundMs'], 500, reason: '3 x 6 ms, at the 0.5 s floor');
+    // (0.4.19: the floor in the signal isolate is 0.4 s, kGravixStandbyIsolateUpgradeFloor)
+    expect(sb['boundMs'], 400, reason: '3 x 6 ms, at the 0.4 s signal-isolate floor');
     expect(sb['signalIsolate'], isTrue);
     expect(GravixSignalStandby.state(server.url, 'tok').state, 'none', reason: 'taken');
   });

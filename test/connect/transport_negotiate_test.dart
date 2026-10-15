@@ -38,6 +38,20 @@ class _RejectAfterAnswerPeerConnection extends FakePeerConnection {
   _RejectAfterAnswerPeerConnection({this.rejectLocal = false}) : super(0);
   bool rejectLocal;
 
+  /// One m-line per sender: a sender change the replay must carry (0.4.19: a
+  /// replay whose senders did not change is skipped).
+  int senderCount = 1;
+
+  @override
+  Future<rtc.RTCSessionDescription> createOffer([Map<String, dynamic>? constraints]) async {
+    offers.add(Map.of(constraints ?? const {}));
+    final b = StringBuffer('v=0\r\ns=-\r\nt=0 0\r\n');
+    for (var i = 0; i < senderCount; i++) {
+      b.write('m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:$i\r\na=sendonly\r\n');
+    }
+    return rtc.RTCSessionDescription(b.toString(), 'offer');
+  }
+
   @override
   Future<void> setLocalDescription(rtc.RTCSessionDescription description) async {
     if (rejectLocal) {
@@ -100,7 +114,10 @@ void main() {
       transport.onNegotiationError = reported.complete;
 
       // An offer is already waiting for its answer, so the next one is deferred.
-      await pc.setLocalDescription(await pc.createOffer());
+      // (0.4.19: made by the Transport, whose Dart-side pending mark replaced the
+      // native signaling-state read; then a sender change while it is out)
+      await transport.createAndSendOffer();
+      pc.senderCount = 2;
       await transport.createAndSendOffer();
       expect(transport.renegotiate, isTrue);
 
@@ -117,7 +134,10 @@ void main() {
       addTearDown(transport.dispose);
       transport.onOffer = (_) {};
 
-      await pc.setLocalDescription(await pc.createOffer());
+      // (0.4.19: made by the Transport, whose Dart-side pending mark replaced the
+      // native signaling-state read; then a sender change while it is out)
+      await transport.createAndSendOffer();
+      pc.senderCount = 2;
       await transport.createAndSendOffer();
       expect(transport.renegotiate, isTrue);
 

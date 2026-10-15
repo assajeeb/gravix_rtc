@@ -111,6 +111,25 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   @internal
   bool get gravixLeaving => _gravixLeaving;
 
+  /// GRAVIX (0.4.19, fast join): connect() was called on this Room at least
+  /// once / a fast-join handle was abandoned before it was (see
+  /// [gravixAbandonConnect]).
+  bool _gravixConnectStarted = false;
+  bool _gravixConnectAbandoned = false;
+
+  /// GRAVIX (0.4.19, fast join): the join this Room was created for was
+  /// abandoned before the app's connect hook called [connect]: the next
+  /// [connect] returns at once without connecting (once). Only on a Room whose
+  /// [connect] was never called (a connect already started is ended by
+  /// [disconnect]); true when the Room was marked. [connect] clears
+  /// [gravixLeaving], so the leave alone did not stop a later connect.
+  @internal
+  bool gravixAbandonConnect() {
+    if (_gravixConnectStarted) return false;
+    _gravixConnectAbandoned = true;
+    return true;
+  }
+
   @internal
   void gravixMarkLeaving() {
     _gravixLeaving = true;
@@ -550,6 +569,13 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // GRAVIX (2026-10-13, fast publish for video): see [GravixJoinCamera]
     GravixJoinCamera? joinCamera,
   }) async {
+    // GRAVIX (0.4.19, fast join): its join was abandoned before this call
+    if (_gravixConnectAbandoned) {
+      _gravixConnectAbandoned = false;
+      logger.info('connect() skipped: the join of this Room was abandoned before the connect started');
+      return;
+    }
+    _gravixConnectStarted = true;
     // GRAVIX (2026-10-12): first, before any state changes or I/O - in
     // particular before isCloudUrl below, which would fetch the retired
     // server's (missing) region list. See RetiredServerException.

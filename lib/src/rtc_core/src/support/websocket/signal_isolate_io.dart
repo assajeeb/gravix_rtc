@@ -559,6 +559,8 @@ Future<void> _signalIsolateMain(List<Object?> args) async {
   final out = args[0] as SendPort;
   final setup = args[1] as void Function()?;
   final levelValue = args[2] as int;
+  // the upgrade bound of a standby taken here (standby_types.dart)
+  gravixStandbyInSignalIsolate = true;
   try {
     setup?.call();
   } catch (_) {}

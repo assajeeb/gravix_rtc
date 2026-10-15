@@ -620,6 +620,32 @@ Future<Room> connectedFakeRoom(
   String url = 'wss://blr1.example',
   String serverRegion = '',
 }) async {
+  final room = fakeRoom(
+    server,
+    pcs,
+    subscriberPrimary: subscriberPrimary,
+    roomOptions: roomOptions,
+    peerConnection: peerConnection,
+    serverRegion: serverRegion,
+  );
+  await room.connect(
+    url,
+    'tok',
+    connectOptions: ConnectOptions(timeouts: fastTimeouts(peerConnection: peerConnection), joinRetries: 0),
+  );
+  return room;
+}
+
+/// A Room over a fake engine (fake signal server and peer connections), not
+/// connected yet: the peer connections of its join connect as soon as they exist.
+Room fakeRoom(
+  FakeSignalServer server,
+  FakePcFactory pcs, {
+  bool subscriberPrimary = false,
+  RoomOptions? roomOptions,
+  Duration peerConnection = const Duration(seconds: 10),
+  String serverRegion = '',
+}) {
   final sc = SignalClient(server.connect);
   final options = roomOptions ?? RoomOptions(reconnectPolicy: FastPolicy());
   final engine = Engine(
@@ -631,11 +657,6 @@ Future<Room> connectedFakeRoom(
   final room = Room(engine: engine, roomOptions: options);
   server.joinResponse ??= (_) => fakeJoinResponse(subscriberPrimary: subscriberPrimary, serverRegion: serverRegion);
   autoConnectPcs(pcs);
-  await room.connect(
-    url,
-    'tok',
-    connectOptions: ConnectOptions(timeouts: fastTimeouts(peerConnection: peerConnection), joinRetries: 0),
-  );
   return room;
 }
 

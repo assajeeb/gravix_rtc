@@ -92,6 +92,55 @@ class GravixTokenRequest {
   String toString() => 'GravixTokenRequest(room: $room, identity: $identity, canPublish: $canPublish)';
 }
 
+/// When a cached join token may be presented again (0.4.19, fast join).
+///
+/// A token prefetched for a room card can sit in the cache for minutes while the
+/// card stays on screen. Reusing it until a minute before its expiry means a
+/// join near the end of that window presents a token the SFU may see expire
+/// during a slow join or right after a resume. The fast-join rule (measured in
+/// the field on 15-minute tokens, the rule the apps used by hand) reuses a token
+/// only while it is younger than half its lifetime and than [maxAge], and never
+/// with less than [minRemaining] left. The token is then refreshed in the
+/// background of the next prefetch, not on the tap.
+@immutable
+class GravixTokenReuse {
+  const GravixTokenReuse({this.minRemaining = const Duration(seconds: 60), this.maxAge, this.maxLifetimeFraction});
+
+  /// Age < min(1/2 lifetime, 5 min), at least 90 s left.
+  static const GravixTokenReuse fastJoin = GravixTokenReuse(
+    minRemaining: Duration(seconds: 90),
+    maxAge: Duration(minutes: 5),
+    maxLifetimeFraction: 0.5,
+  );
+
+  /// Never reused with less than this left before the token's expiry.
+  final Duration minRemaining;
+
+  /// Never reused once this old (null: no cap). Also the only rule for a token
+  /// whose expiry is unknown.
+  final Duration? maxAge;
+
+  /// Never reused once older than this share of its lifetime (fetch to expiry);
+  /// null: no such cap.
+  final double? maxLifetimeFraction;
+
+  /// Whether a token fetched at [fetchedAt] (expiring at [expiresAt], when
+  /// known) may be presented at [now].
+  bool allows({required DateTime fetchedAt, DateTime? expiresAt, required DateTime now}) {
+    final age = now.difference(fetchedAt);
+    final cap = maxAge;
+    if (cap != null && age >= cap) return false;
+    if (expiresAt == null) return true;
+    if (expiresAt.difference(now) < minRemaining) return false;
+    final f = maxLifetimeFraction;
+    if (f != null) {
+      final lifetime = expiresAt.difference(fetchedAt);
+      if (age >= lifetime * f) return false;
+    }
+    return true;
+  }
+}
+
 /// Why a token could not be produced.
 enum GravixTokenErrorReason {
   /// No answer within the provider's `timeout`. Before 2026-09-19 neither SDK
@@ -311,6 +360,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     required this.unknownExpiryTtl,
     required this.maxEntries,
     required bool refetchable,
+    this.reuse,
     DateTime Function()? now,
   }) : _refetchable = refetchable,
        _now = now ?? DateTime.now;
@@ -360,6 +410,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     Duration minRemainingValidity = const Duration(seconds: 60),
     Duration unknownExpiryTtl = const Duration(minutes: 5),
     int maxEntries = 16,
+    GravixTokenReuse? reuse,
     @visibleForTesting DateTime Function()? now,
   }) {
     final clock = now ?? DateTime.now;
@@ -395,6 +446,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
       unknownExpiryTtl: unknownExpiryTtl,
       maxEntries: maxEntries,
       refetchable: true,
+      reuse: reuse,
       now: now,
     );
   }
@@ -413,6 +465,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     Duration unknownExpiryTtl = const Duration(minutes: 5),
     int maxEntries = 16,
     http.Client? client,
+    GravixTokenReuse? reuse,
     @visibleForTesting DateTime Function()? now,
   }) {
     // 2026-10-12: the retired gateway host is refused here, at construction
@@ -471,6 +524,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
       unknownExpiryTtl: unknownExpiryTtl,
       maxEntries: maxEntries,
       refetchable: true,
+      reuse: reuse,
       now: now,
     );
   }
@@ -488,6 +542,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     Duration minRemainingValidity = const Duration(seconds: 60),
     Duration unknownExpiryTtl = const Duration(minutes: 5),
     int maxEntries = 16,
+    GravixTokenReuse? reuse,
     @visibleForTesting DateTime Function()? now,
   }) {
     if (source is! TokenSourceConfigurable && source is! TokenSourceFixed) {
@@ -510,6 +565,7 @@ class GravixTokenProvider implements TokenSourceConfigurable {
       minRemainingValidity: minRemainingValidity,
       unknownExpiryTtl: unknownExpiryTtl,
       maxEntries: maxEntries,
+      reuse: reuse,
       now: now,
     );
   }
@@ -523,6 +579,11 @@ class GravixTokenProvider implements TokenSourceConfigurable {
 
   /// A cached token is reused only while it has at least this much life left.
   final Duration minRemainingValidity;
+
+  /// The reuse rule for a cached token (0.4.19). Null: the rule before it, a
+  /// token is reused while it has [minRemainingValidity] left. A fast-join app
+  /// passes [GravixTokenReuse.fastJoin] (see there).
+  final GravixTokenReuse? reuse;
 
   /// Lifetime assumed for a token that is not a readable JWT and came with no
   /// `expires_in`. Short on purpose: guessing long serves a dead token.
@@ -598,7 +659,14 @@ class GravixTokenProvider implements TokenSourceConfigurable {
     final key = request.cacheKey;
     final held = _cache[key];
     if (held == null) return null;
-    if (!held.isUsableAt(_now(), minRemaining: minRemainingValidity)) return null;
+    final now = _now();
+    final rule = reuse;
+    if (rule == null) {
+      if (!held.isUsableAt(now, minRemaining: minRemainingValidity)) return null;
+    } else if (!held.isUsableAt(now, minRemaining: Duration.zero) ||
+        !rule.allows(fetchedAt: held.fetchedAt, expiresAt: held.expiresAt, now: now)) {
+      return null;
+    }
     _cache.remove(key);
     _cache[key] = held; // most recently used
     return held._servedFromCache();

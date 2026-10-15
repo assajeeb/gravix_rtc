@@ -50,6 +50,12 @@ plays (mic volume and ducking are Android-only) and is not yet verified on a dev
 - **Video-effect hook** — `GravixRoomService(videoEffect: …)` plugs a beauty /
   blur / filter package into the local camera track. The SDK ships no effect;
   see [Video effects](#video-effects).
+- **Fast join** (0.4.19) — `GravixJoin`: `warm()` a room on screen (token +
+  the server's pre-connect), `prepare()` at the tap (the connect starts now),
+  `attach()` from the room screen (the same connect), `switchTo()` from room to
+  room (never two sessions), with the "app left before the room opened" and
+  "screen never shown" cases handled. For apps that drive `Room` directly. See
+  [Fast join](#fast-join) and `doc/FAST_JOIN.md`.
 - **Prewarm** — `prewarm()` fetches the token, picks the region and warms DNS/TLS
   and the audio session while the room list is on screen.
 - **Audio** — opt-in v2 routing (`GravixAudioRouting.v2`), audio-first mode for
@@ -108,6 +114,27 @@ the `url` from the same `{token, url}` response.
 
 Optional, once at app start: `gravixStartRegionMeasurement(regionsUrl: …)`
 measures the regions so joins go straight to the fastest one.
+
+### Fast join
+
+For an app that drives the core `Room` (0.4.19, opt-in):
+
+```dart
+final join = GravixJoin(
+  tokenProvider: GravixTokenProvider.callback(myTokenCall, reuse: GravixTokenReuse.fastJoin),
+);
+final request = GravixTokenRequest(room: roomId, identity: uid);
+
+join.warm(request, role: GravixStandbyRole.visible, rank: i); // a room on screen
+join.prepare(request, createRoom: () => Room(roomOptions: myOptions)); // the tap
+final room = await join.attach(request); // the room screen: the same connect
+join.switchTo(nextRequest); // from room to room
+await join.leave(); // the real exit
+```
+
+A join is abandoned (its room left) when the app goes to the background before
+the room screen took it, or before that screen was ever shown, and after 20 s
+without a screen. Details and the per-piece APIs: `doc/FAST_JOIN.md`.
 
 ## Video effects
 

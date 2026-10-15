@@ -35,6 +35,7 @@ import '../core/gravix_join_camera.dart';
 import '../core/gravix_join_mic.dart';
 import '../core/room.dart';
 import '../core/signal_client.dart';
+import '../core/gravix_pub_log.dart';
 import '../core/transport.dart';
 import '../data_stream/stream_writer.dart';
 import '../events.dart';
@@ -821,6 +822,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       final sender = track.transceiver?.sender;
       var didRemoveSender = false;
       if (sender != null) {
+        // GRAVIX (0.4.19): the m-line stays (inactive); its mid is not reused
+        GravixPubLog.step(
+          'senderRemove',
+          pc: room.engine.publisher?.gravixLogLabel,
+          detail: 'kind=${track.kind.name} source=${track.source.name} mid=${GravixPubLog.midOf(track.transceiver)}',
+        );
         try {
           await room.engine.publisher?.pc.removeTrack(sender);
         } catch (e) {
