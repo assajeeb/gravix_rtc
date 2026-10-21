@@ -216,6 +216,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   bool _attemptingReconnect = false;
 
+  /// GRAVIX (2026-10-21): the url the next full restart dials, once ([gravixRestartTo]).
+  String? _gravixRestartUrl;
+
   RegionUrlProvider? _regionUrlProvider;
 
   /// GRAVIX: where a FULL reconnect goes (`regionReprobeOnRestart`). Consulted
@@ -445,6 +448,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     //reset state
     _isClosed = false;
+    if (!_inRestart) _gravixRestartUrl = null; // a fresh connect: no move pending
 
     // GRAVIX(0.4.13): a fresh join waits longer for its peer connection than a
     // resume or a full reconnect does (Timeouts.mediaConnect; see there).
@@ -874,6 +878,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   // resets internal state to a re-usable state
   Future<void> cleanUp() async {
     logger.fine('[$objectId] cleanUp()');
+    _gravixRestartUrl = null;
     _gravixIceWatchOff = true;
     _gravixIceWatch.stop();
     _gravixStopPublisherWatch();
@@ -2532,11 +2537,36 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     if (recovery != null && !recovery.isCompleted) recovery.complete();
   }
 
+  /// GRAVIX (2026-10-21, per-region media): moves the session to [url] through
+  /// the reconnect machinery (JS `gravixRestartTo`, Android
+  /// `gravixRestartConnection`): a full reconnect whose first dial is [url]. A
+  /// failed dial is the reconnect's to handle (region failover, retry, back-off),
+  /// never a dead session. False when the engine is closed, has no session, or a
+  /// reconnect is already under way (it owns the session).
+  @internal
+  bool gravixRestartTo(String url) {
+    if (_isClosed || this.url == null || token == null || gravixReconnectInProgress || isPendingReconnect) {
+      return false;
+    }
+    _gravixRestartUrl = url;
+    fullReconnectOnNext = true;
+    unawaited(handleReconnect(ClientDisconnectReason.mediaRefusal, immediate: true));
+    return true;
+  }
+
   @internal
   Future<void> restartConnection({String? regionUrl}) async {
     // GRAVIX (0.4.15): this call is the same-url retry of a failed full reconnect
     final gravixSameUrlRetry = _gravixSameUrlRetryNext;
     _gravixSameUrlRetryNext = false;
+    // GRAVIX (2026-10-21): a move asked for by gravixRestartTo, once; a ladder
+    // step (a url handed in) drops it
+    final gravixMoveTo = _gravixRestartUrl;
+    _gravixRestartUrl = null;
+    if (regionUrl == null && gravixMoveTo != null) {
+      logger.info('full reconnect: media move to $gravixMoveTo');
+      regionUrl = gravixMoveTo;
+    }
     if (_isClosed) {
       return;
     }
@@ -3045,6 +3075,11 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       events.emit(EngineDisconnectedEvent(reason: reason));
     }
   }
+
+  /// GRAVIX (2026-10-21): the region list the session fails over with (null on a
+  /// non-cloud url); Room.gravixFailoverForMediaRefusal uses it when the Room
+  /// has none of its own.
+  RegionUrlProvider? get gravixRegionUrlProvider => _regionUrlProvider;
 
   void setRegionUrlProvider(RegionUrlProvider provider) {
     _regionUrlProvider = provider;

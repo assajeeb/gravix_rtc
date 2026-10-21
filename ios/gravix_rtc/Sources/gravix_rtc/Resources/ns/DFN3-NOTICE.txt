@@ -1,0 +1,10 @@
+Gravix noise suppression - DeepFilterNet3 components
+
+DeepFilterNet (code and pretrained weights, standard and low-latency DeepFilterNet3)
+  Copyright (c) 2021 Hendrik Schroeter. Dual-licensed MIT OR Apache-2.0 (DeepFilterNet-LICENSE-*).
+  https://github.com/Rikorose/DeepFilterNet
+torchDF streaming approach (fork grazder/DeepFilterNet, MIT / Apache-2.0), adapted.
+  LL weights were converted from the official DeepFilterNet3_ll ONNX release.
+ONNX Runtime 1.31.0 (minimal build), Copyright (c) Microsoft Corporation, MIT (onnxruntime-LICENSE),
+  with third-party components listed in onnxruntime-ThirdPartyNotices.txt.
+Web: onnxruntime-web JS API (MIT) loads web/ort-wasm-simd.{mjs,wasm}; emscripten runtime (MIT).

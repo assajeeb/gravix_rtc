@@ -43,7 +43,7 @@ export 'src/managers/android_screen_capture.dart';
 export 'src/managers/broadcast_manager.dart';
 export 'src/managers/gravix_foreground_service.dart';
 export 'src/managers/event.dart';
-export 'src/options.dart';
+export 'src/options.dart' hide gravixOpusPublishShape;
 export 'src/agent/agent.dart';
 export 'src/agent/session.dart';
 export 'src/agent/session_options.dart';

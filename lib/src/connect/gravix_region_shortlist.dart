@@ -30,6 +30,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'gravix_region_cache.dart';
+import 'gravix_region_media.dart';
 import 'gravix_region_report.dart';
 
 /// Without a shortlist, a list this short is measured whole.
@@ -89,6 +90,7 @@ class GravixRegionDirectory {
               url: r['url'] as String,
               probeUrl: r['probe_url'] is String ? r['probe_url'] as String : null,
               estRttMs: _nonNegative(r['est_rtt_ms']),
+              media: gravixParseRegionMedia(r['media']),
             ),
     ];
     final sl = b['shortlist'];
@@ -116,6 +118,7 @@ class GravixRegionDirectory {
           'url': r.url,
           if (r.probeUrl != null) 'probe_url': r.probeUrl,
           if (r.estRttMs != null) 'est_rtt_ms': r.estRttMs,
+          if (r.media != null) 'media': r.media,
         },
     ],
     if (shortlist != null) 'shortlist': shortlist,
@@ -296,10 +299,18 @@ bool gravixShouldStopMeasuring(List<GravixMeasureProgress> states) {
 
 /// When nothing was measured: `shortlist[0]`, else the lowest `est_rtt_ms`, else
 /// null (the join keeps the token's region).
-({GravixRegionUrl entry, GravixRegionCandidateSource source})? gravixFallbackRegion(GravixRegionDirectory dir) {
-  final sl = _shortlistEntries(dir);
+///
+/// With [media] (a join's, 2026-10-21): the first shortlist region that allows
+/// it, else the lowest `est_rtt_ms` that allows it, else null -- the caller's
+/// own last resort decides (a join never fails for want of a region).
+({GravixRegionUrl entry, GravixRegionCandidateSource source})? gravixFallbackRegion(
+  GravixRegionDirectory dir, {
+  GravixRoomMedia? media,
+}) {
+  bool ok(GravixRegionUrl e) => media == null || gravixRegionAllowsMedia(e, media);
+  final sl = _shortlistEntries(dir).where(ok);
   if (sl.isNotEmpty) return (entry: sl.first, source: GravixRegionCandidateSource.shortlist);
-  final est = _byEst(_byRegion(dir.regions).values.toList());
+  final est = _byEst(_byRegion(dir.regions).values.toList()).where(ok);
   if (est.isNotEmpty) return (entry: est.first, source: GravixRegionCandidateSource.est);
   return null;
 }

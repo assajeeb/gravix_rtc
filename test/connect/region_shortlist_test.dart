@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gravix_rtc/src/connect/gravix_analytics.dart';
 import 'package:gravix_rtc/src/connect/gravix_init_measure.dart';
+import 'package:gravix_rtc/src/connect/gravix_region_media.dart';
 import 'package:gravix_rtc/src/connect/gravix_region_report.dart';
 import 'package:gravix_rtc/src/connect/gravix_region_selection.dart';
 import 'package:gravix_rtc/src/connect/gravix_region_shortlist.dart';
@@ -133,6 +134,117 @@ void main() {
         expect(gravixShouldStopMeasuring(states), c['expect']);
       });
     }
+
+    // 2026-10-21 per-region media: measure (media-blind), then the join's pick
+    // with its media. Candidates carry no `media` (as a token's region_urls):
+    // what a region allows comes from the measured /v1/regions answer.
+    for (final c in [for (final c in _fixture['media'] as List) Map<String, dynamic>.from(c as Map)]) {
+      test('media: ${c['name']}', () async {
+        final lines = <String>[];
+        GravixRegionLog.sink = lines.add;
+        addTearDown(() => GravixRegionLog.sink = null);
+        final response = Map<String, Object?>.from(c['response'] as Map);
+        final overlay = Map<String, dynamic>.from(c['regionMedia'] as Map);
+        final listed = _list(response['regions'] as String);
+        response['regions'] = [
+          for (final r in listed) {...r, if (overlay[r['region']] != null) 'media': overlay[r['region']]},
+        ];
+        final rtt = <String, List<int?>?>{
+          for (final e in (c['rtt'] as Map).entries)
+            e.key as String: e.value == null ? null : [for (final v in e.value as List) v as int?],
+        };
+        final store = GravixMemoryRegionListStore();
+        final cache = c['cache'] as Map?;
+        if (cache != null) {
+          final anchors = (cache['mediaAnchors'] as Map?) ?? const {};
+          store.write(
+            _stateKey('unknown'),
+            json.encode({
+              'known': const <String>[],
+              'cursor': 0,
+              'measuredAtMs': 0,
+              'ttlMs': 1,
+              'mediaAnchors': {
+                for (final e in anchors.entries)
+                  e.key: {
+                    'region': e.value,
+                    'url': listed.firstWhere((r) => r['region'] == e.value)['url'],
+                    'rttMs': 0,
+                    'atMs': DateTime.now().millisecondsSinceEpoch,
+                  },
+              },
+              if (cache['mediaChallengers'] != null) 'mediaChallengers': cache['mediaChallengers'],
+            }),
+          );
+        }
+        final result = await gravixMeasureRegions(
+          regionsUrl: _regionsUrl,
+          fetchDirectory: _serve(response),
+          sampler: _table(rtt).sampler,
+          store: store,
+          budget: const Duration(seconds: 10),
+          networkType: _unknown,
+        );
+        final ex = Map<String, dynamic>.from(c['expect'] as Map);
+        expect(result.best?.region, ex['best'], reason: 'the measurement is media-blind');
+        final media = GravixRoomMedia.values.byName(c['media'] as String);
+        if (ex.containsKey('bestForMedia')) expect(result.bestFor(media)?.region, ex['bestForMedia']);
+        if (ex.containsKey('mediaSelectReason')) expect(result.mediaSelectReason[media]?.name, ex['mediaSelectReason']);
+        if (ex.containsKey('mediaChallenger')) expect(result.mediaChallenger[media]?.toJson(), ex['mediaChallenger']);
+        final names = c['candidates'] == null
+            ? [for (final r in listed) r['region'] as String]
+            : List<String>.from(c['candidates'] as List);
+        final candidates = [
+          for (final r in listed)
+            if (names.contains(r['region'])) GravixRegionUrl(region: r['region'] as String, url: r['url'] as String),
+        ];
+        final p = gravixPickRegionFor(
+          c['tokenUrl'] as String,
+          candidates,
+          homeRegion: c['homeRegion'] as String?,
+          media: media,
+        );
+        expect(p?.entry.region, ex['pick']);
+        expect(p?.reason.name, ex['reason']);
+        expect(p?.skipped ?? const <String>[], ex['skipped']);
+        expect(p?.mediaIgnored ?? false, ex['mediaIgnored'] ?? false);
+        expect(lines.where((l) => l.startsWith('[GravixRegion] pick media=${media.name}')), hasLength(1));
+      });
+    }
+
+    test(
+      'media: every measurement case picks the same region for an audio and a video join (no media listed)',
+      () async {
+        for (final c in [for (final c in _fixture['cases'] as List) Map<String, dynamic>.from(c as Map)]) {
+          gravixClearRegionMeasurement();
+          final response = Map<String, Object?>.from(c['response'] as Map);
+          final listed = _list(response['regions'] as String);
+          response['regions'] = listed;
+          final rtt = <String, List<int?>?>{
+            for (final e in (c['rtt'] as Map).entries)
+              e.key as String: e.value == null ? null : [for (final v in e.value as List) v as int?],
+          };
+          await gravixMeasureRegions(
+            regionsUrl: _regionsUrl,
+            fetchDirectory: _serve(response),
+            sampler: _table(rtt).sampler,
+            store: GravixMemoryRegionListStore(),
+            budget: const Duration(seconds: 10),
+            networkType: _unknown,
+          );
+          final candidates = [
+            for (final r in listed) GravixRegionUrl(region: r['region'] as String, url: r['url'] as String),
+          ];
+          final token = listed.first['url'] as String;
+          final none = gravixPickRegionFor(token, candidates);
+          for (final media in GravixRoomMedia.values) {
+            final p = gravixPickRegionFor(token, candidates, media: media);
+            expect(p?.entry.region, none?.entry.region, reason: '${c['name']} (${media.name})');
+            expect(p?.reason, none?.reason, reason: '${c['name']} (${media.name})');
+          }
+        }
+      },
+    );
 
     test('network ids are hashed the same way in both SDKs (FNV-1a 32)', () {
       expect(gravixHashNetworkId('Home-WiFi 5G ✓'), '2a4558bb');

@@ -47,6 +47,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rtc_core/src/support/http_client.dart';
 import 'gravix_analytics.dart' show gravixNetworkTypeFrom;
 import 'gravix_region_cache.dart';
+import 'gravix_region_failover.dart' show gravixNormalizeRegionUrl;
+import 'gravix_region_media.dart';
 import 'gravix_region_probe_client.dart';
 import 'gravix_region_report.dart';
 import 'gravix_region_selection.dart';
@@ -133,8 +135,27 @@ class GravixRegionMeasurementResult {
     this.ttl = kGravixRegionMeasurementTtl,
     this.selectReason,
     this.challenger,
+    this.bestByMedia = const {},
+    this.mediaSelectReason = const {},
+    this.mediaChallenger = const {},
   });
   final DateTime measuredAt;
+
+  /// Per-region media (2026-10-21): for a medium some measured region does not
+  /// take, the region joins of that medium use -- the same hysteresis as [best]
+  /// (an anchor per medium, a rival must win twice by the keep margin), over the
+  /// regions that take it. Absent: [best] serves (it takes the medium, or no
+  /// region was filtered). See [GravixRegionMeasurementResult.bestFor].
+  final Map<GravixRoomMedia, GravixRegionMeasurement> bestByMedia;
+
+  /// How [bestByMedia] was chosen, per medium.
+  final Map<GravixRoomMedia, GravixRegionSelectReason> mediaSelectReason;
+
+  /// A rival not yet confirmed, per medium.
+  final Map<GravixRoomMedia, GravixRegionChallenger> mediaChallenger;
+
+  /// The region a [media] join should prefer: [bestByMedia], else [best].
+  GravixRegionMeasurement? bestFor(GravixRoomMedia? media) => (media == null ? null : bestByMedia[media]) ?? best;
 
   /// How the hysteresis chose [best] (gravix_region_selection.dart). Null when
   /// nothing was measured `ok`, or for an answer seeded from the cache.
@@ -285,8 +306,22 @@ class _NetworkState {
     this.anchor,
     this.anchorAt,
     this.challenger,
+    this.mediaAnchors = const {},
+    this.mediaChallengers = const {},
   });
   final List<String> known;
+
+  /// Per-medium anchors (2026-10-21): wire `mediaAnchors: {video: {region, url,
+  /// rttMs, atMs}}`, and `mediaChallengers: {video: {region, wins}}` -- the same
+  /// keys in every SDK (the shared fixture seeds them).
+  final Map<GravixRoomMedia, ({_RegionRtt rtt, DateTime at})> mediaAnchors;
+  final Map<GravixRoomMedia, GravixRegionChallenger> mediaChallengers;
+
+  _RegionRtt? liveMediaAnchor(GravixRoomMedia m, DateTime now) {
+    final a = mediaAnchors[m];
+    return a != null && now.difference(a.at) <= kGravixRegionAnchorLife ? a.rtt : null;
+  }
+
   final int cursor;
   final DateTime measuredAt;
   final Duration ttl;
@@ -321,6 +356,13 @@ class _NetworkState {
     if (regions.isNotEmpty) 'regions': [for (final r in regions) _rttJson(r)],
     if (anchor != null && anchorAt != null) 'anchor': {..._rttJson(anchor!), 'atMs': anchorAt!.millisecondsSinceEpoch},
     if (challenger != null) 'challenger': challenger!.toJson(),
+    if (mediaAnchors.isNotEmpty)
+      'mediaAnchors': {
+        for (final e in mediaAnchors.entries)
+          e.key.name: {..._rttJson(e.value.rtt), 'atMs': e.value.at.millisecondsSinceEpoch},
+      },
+    if (mediaChallengers.isNotEmpty)
+      'mediaChallengers': {for (final e in mediaChallengers.entries) e.key.name: e.value.toJson()},
   });
 
   static _NetworkState? decode(String raw) {
@@ -349,6 +391,23 @@ class _NetworkState {
             ? DateTime.fromMillisecondsSinceEpoch(a['atMs'] as int)
             : null,
         challenger: GravixRegionChallenger.fromJson(m['challenger']),
+        mediaAnchors: {
+          if (m['mediaAnchors'] is Map)
+            for (final e in (m['mediaAnchors'] as Map).entries)
+              if (GravixRoomMedia.values.asNameMap()[e.key] != null &&
+                  _rttFrom(e.value) != null &&
+                  (e.value as Map)['atMs'] is int)
+                GravixRoomMedia.values.asNameMap()[e.key]!: (
+                  rtt: _rttFrom(e.value)!,
+                  at: DateTime.fromMillisecondsSinceEpoch((e.value as Map)['atMs'] as int),
+                ),
+        },
+        mediaChallengers: {
+          if (m['mediaChallengers'] is Map)
+            for (final e in (m['mediaChallengers'] as Map).entries)
+              if (GravixRoomMedia.values.asNameMap()[e.key] != null && GravixRegionChallenger.fromJson(e.value) != null)
+                GravixRoomMedia.values.asNameMap()[e.key]!: GravixRegionChallenger.fromJson(e.value)!,
+        },
       );
     } catch (_) {
       return null;
@@ -362,6 +421,7 @@ final _memoryStates = <String, _NetworkState>{};
 void gravixClearRegionMeasurement() {
   _held = null;
   _memoryStates.clear();
+  gravixClearRegionMedia();
 }
 
 /// The current answer, when fresh.
@@ -454,6 +514,7 @@ GravixRegionMeasurementResult? _resultFromState(_NetworkState s, String networkK
     measuredAt: s.measuredAt,
     regions: [m, ...others],
     best: m,
+    bestByMedia: {for (final e in s.mediaAnchors.entries) e.key: toM(e.value.rtt)},
     bestSource: GravixRegionBestSource.cache,
     networkKey: networkKey,
     ttl: s.ttl,
@@ -548,6 +609,15 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
       error: msg.length > 200 ? msg.substring(0, 200) : msg,
     );
   }
+
+  // What each region allows (`media`), for the join's media filter: a lookup
+  // there, never a fetch (gravix_region_media.dart).
+  gravixNoteRegionDirectory(dir.regions, shortlist: dir.shortlist);
+  final mediaLimited = [
+    for (final r in dir.regions)
+      if (r.media != null) '${r.region}(${r.media!.join('+')})',
+  ];
+  if (mediaLimited.isNotEmpty) GravixRegionLog.step('directory', 'media-limited ${mediaLimited.join(' ')}');
 
   final netType = (await netTypeF) ?? 'unknown';
   final rawKey = await netKeyF;
@@ -755,6 +825,55 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     }
   }
 
+  // Per-region media (2026-10-21): for each medium some measured region does
+  // not take, the same hysteresis over the regions that do, with its own anchor,
+  // so joins of that medium do not flip between two close regions either.
+  final bestByMedia = <GravixRoomMedia, GravixRegionMeasurement>{};
+  final mediaReason = <GravixRoomMedia, GravixRegionSelectReason>{};
+  final mediaChallenger = <GravixRoomMedia, GravixRegionChallenger>{};
+  final mediaAnchorsNext = <GravixRoomMedia, ({_RegionRtt rtt, DateTime at})>{...?state?.mediaAnchors};
+  final mediaChallengersNext = <GravixRoomMedia, GravixRegionChallenger>{...?state?.mediaChallengers};
+  for (final media in GravixRoomMedia.values) {
+    final takes = [
+      for (final m in measured)
+        if (gravixRegionAllowsMedia(m.entry, media)) m,
+    ];
+    if (takes.length == measured.length || takes.isEmpty) continue;
+    final mAnchor = state?.liveMediaAnchor(media, nowAtStart);
+    final sel = gravixSelectRegion(
+      [for (final m in takes) GravixRegionSample(region: m.region, status: m.state.name, rttMs: m.rttMs)],
+      anchor: mAnchor?.region,
+      challenger: state?.mediaChallengers[media],
+      anchorKnown: mAnchor != null,
+    );
+    if (sel == null) continue; // no evidence: the anchor and its votes stay
+    final m = takes.where((t) => t.region == sel.region).first;
+    final chosen = m.ok
+        ? m
+        : GravixRegionMeasurement(
+            entry: m.entry,
+            rttMs: mAnchor!.rttMs,
+            samplesMs: m.samplesMs,
+            status: GravixRegionMeasurementStatus.ok,
+            source: GravixRegionCandidateSource.cache,
+          );
+    bestByMedia[media] = chosen;
+    mediaReason[media] = sel.reason;
+    if (sel.challenger != null) {
+      mediaChallenger[media] = sel.challenger!;
+      mediaChallengersNext[media] = sel.challenger!;
+    } else {
+      mediaChallengersNext.remove(media);
+    }
+    mediaAnchorsNext[media] = (rtt: (region: chosen.region, url: chosen.url, rttMs: chosen.rttMs!), at: DateTime.now());
+    GravixRegionLog.step(
+      'select',
+      'media=${media.name} -> ${chosen.region} rtt=${chosen.rttMs} reason=${sel.reason.name}'
+          '${mAnchor == null ? '' : ' anchor=${mAnchor.region}'}'
+          '${sel.challenger == null ? '' : ' challenger=${sel.challenger!.region}x${sel.challenger!.wins}'}',
+    );
+  }
+
   final result = GravixRegionMeasurementResult(
     measuredAt: DateTime.now(),
     regions: List.unmodifiable(measured),
@@ -769,6 +888,9 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     ttl: ttl,
     selectReason: selection?.reason,
     challenger: selection?.challenger,
+    bestByMedia: bestByMedia,
+    mediaSelectReason: mediaReason,
+    mediaChallenger: mediaChallenger,
   );
 
   final measuredBest = best != null && best.ok ? best : null;
@@ -799,6 +921,8 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
         : liveAnchor,
     anchorAt: measuredBest != null ? DateTime.now() : (liveAnchor != null ? state?.anchorAt : null),
     challenger: selection != null ? selection.challenger : state?.challenger,
+    mediaAnchors: mediaAnchorsNext,
+    mediaChallengers: mediaChallengersNext,
   );
   _memoryStates[sKey] = newState;
   try {
@@ -856,8 +980,39 @@ Map<String, Object?>? gravixRegionsMeasuredReport([GravixRegionMeasurementResult
 ///
 /// - `measured`: the measured best region (or the fastest the room offers);
 /// - `pinned`: the pinned url, kept because the pick was not clearly faster;
-/// - `home`: the room's home region, within the home margin of the fastest.
-enum GravixRegionPickReason { measured, pinned, home }
+/// - `home`: the room's home region, within the home margin of the fastest;
+/// - `fallback` (2026-10-21): no measured region the room offers allows the
+///   join's media and the pinned url's region does not either: the first
+///   shortlist region allowing it (else the lowest `est_rtt_ms`, else the first
+///   offered one that does).
+enum GravixRegionPickReason { measured, pinned, home, fallback }
+
+/// A [gravixPickRegionFor] answer: the region, why, and what the media filter did.
+@immutable
+class GravixRegionPick {
+  const GravixRegionPick({
+    required this.entry,
+    required this.reason,
+    this.media,
+    this.skipped = const [],
+    this.mediaIgnored = false,
+  });
+
+  final GravixRegionUrl entry;
+  final GravixRegionPickReason reason;
+
+  /// The join's media (null: no filter).
+  final GravixRoomMedia? media;
+
+  /// Measured regions the room offers that were passed over because they do not
+  /// allow [media], fastest first.
+  final List<String> skipped;
+
+  /// No offered region allows [media]: the pick ignored it, so the join still has
+  /// a region (the server refuses what it does not take; see
+  /// gravix_region_failover.dart).
+  final bool mediaIgnored;
+}
 
 /// The join path's choice: the measured best region if [candidates] offers it,
 /// else the fastest measured region it does offer. A lookup, never a probe.
@@ -882,12 +1037,17 @@ enum GravixRegionPickReason { measured, pinned, home }
 /// 2.9-3.4 % loss measured on the relay leg). Further away, the viewer's own pick stands (the room
 /// is relayed to it) and the pinned rule is skipped, so a pinned home url cannot
 /// keep it either. Home not measured: as if none were given. Hosts pass none.
+///
+/// [media] (2026-10-21, gravix_region_media.dart): only regions allowing the
+/// join's media are offered -- measured, pinned and home alike. See
+/// [gravixPickRegionFor].
 GravixRegionUrl? gravixPickMeasuredRegion(
   String pinnedUrl,
   List<GravixRegionUrl> candidates, {
   DateTime? now,
   String? homeRegion,
-}) => gravixPickRegion(pinnedUrl, candidates, now: now, homeRegion: homeRegion)?.entry;
+  GravixRoomMedia? media,
+}) => gravixPickRegionFor(pinnedUrl, candidates, now: now, homeRegion: homeRegion, media: media)?.entry;
 
 /// [gravixPickMeasuredRegion], with why it chose that region.
 ({GravixRegionUrl entry, GravixRegionPickReason reason})? gravixPickRegion(
@@ -895,12 +1055,126 @@ GravixRegionUrl? gravixPickMeasuredRegion(
   List<GravixRegionUrl> candidates, {
   DateTime? now,
   String? homeRegion,
+  GravixRoomMedia? media,
 }) {
+  final p = gravixPickRegionFor(pinnedUrl, candidates, now: now, homeRegion: homeRegion, media: media);
+  return p == null ? null : (entry: p.entry, reason: p.reason);
+}
+
+String _normUrl(String u) => u.replaceAll(RegExp(r'/+$'), '');
+
+/// [gravixPickRegion] with the media filter's details, and one
+/// `[GravixRegion] pick` line when [media] is given (the decision and its cause).
+///
+/// With [media]:
+///  1. the candidates that allow it are the offer (entry `media`, else the last
+///     `/v1/regions` answer, else allowed; a region that refused it lately is
+///     not) -- none does: every candidate, [GravixRegionPick.mediaIgnored];
+///  2. the measured pick, the pinned rule and the home rule run on that offer;
+///  3. nothing measured on it: the pinned url stays (null, as before) when its
+///     region allows [media] or is unknown; else the first shortlist region
+///     allowing it, the lowest `est_rtt_ms` allowing it, or the first offered
+///     one (`fallback`).
+GravixRegionPick? gravixPickRegionFor(
+  String pinnedUrl,
+  List<GravixRegionUrl> candidates, {
+  DateTime? now,
+  String? homeRegion,
+  GravixRoomMedia? media,
+}) {
+  if (candidates.isEmpty) return null;
   final m = gravixRegionMeasurement(now: now);
+  final allowed = media == null
+      ? candidates
+      : [
+          for (final c in candidates)
+            if (gravixRegionAllowsMedia(c, media, now: now)) c,
+        ];
+  final ignored = media != null && allowed.isEmpty;
+  final offer = ignored ? candidates : allowed;
+  final skipped = <String>[];
+  final skipWhy = <String>[];
+  if (m != null && media != null && !ignored) {
+    final best = m.bestFor(media);
+    final order = [?best, ...m.regions.where((r) => r.region != best?.region)];
+    for (final r in order) {
+      if (!r.ok || skipped.contains(r.region)) continue;
+      final c =
+          candidates.where((c) => c.url == r.url).firstOrNull ??
+          candidates.where((c) => c.region == r.region).firstOrNull;
+      if (c != null && !offer.contains(c)) {
+        skipped.add(r.region);
+        skipWhy.add('${r.region}(${gravixMediaSkipWhy(c, media, now: now)})');
+      }
+    }
+  }
+
+  GravixRegionPick? pick = _pickMeasured(
+    pinnedUrl,
+    offer,
+    m,
+    homeRegion: homeRegion,
+    media: media,
+    skipped: skipped,
+    ignored: ignored,
+  );
+  if (pick == null && media != null && !ignored) {
+    // Nothing measured on the offer. The pinned url stays unless its region is
+    // known not to take [media].
+    final n = gravixNormalizeRegionUrl(pinnedUrl);
+    final pinnedEntry =
+        candidates.where((c) => gravixNormalizeRegionUrl(c.url) == n).firstOrNull ??
+        gravixLastRegionDirectory().where((c) => gravixNormalizeRegionUrl(c.url) == n).firstOrNull;
+    if (pinnedEntry != null && !gravixRegionAllowsMedia(pinnedEntry, media, now: now)) {
+      final fb = gravixFallbackRegion(
+        GravixRegionDirectory(regions: gravixLastRegionDirectory(), shortlist: gravixLastRegionShortlist()),
+        media: media,
+      );
+      final offered = fb == null ? null : offer.where((c) => c.region == fb.entry.region).firstOrNull;
+      pick = GravixRegionPick(
+        entry: offered ?? offer.first,
+        reason: GravixRegionPickReason.fallback,
+        media: media,
+        skipped: skipped,
+      );
+      GravixRegionLog.step(
+        'pick',
+        'media=${media.name} nothing-measured pinned=${pinnedEntry.region}(${gravixMediaSkipWhy(pinnedEntry, media, now: now)})'
+            ' -> ${pick.entry.region} reason=fallback cause=${offered != null ? fb!.source.name : 'first-offered'}',
+      );
+      return pick;
+    }
+  }
+  if (media != null) {
+    final rtt = pick == null
+        ? null
+        : m?.regions.where((r) => r.region == pick!.entry.region && r.ok).firstOrNull?.rttMs;
+    GravixRegionLog.step(
+      'pick',
+      'media=${media.name}${skipWhy.isEmpty ? '' : ' skip=${skipWhy.join(',')}'}'
+          '${ignored ? ' mediaIgnored(no region allows ${media.name})' : ''}'
+          ' -> ${pick == null ? 'token-url cause=${m == null ? 'no-measurement' : 'nothing-measured'}' : '${pick.entry.region} rtt=${rtt ?? '?'} reason=${pick.reason.name}'}',
+    );
+  }
+  return pick;
+}
+
+GravixRegionPick? _pickMeasured(
+  String pinnedUrl,
+  List<GravixRegionUrl> candidates,
+  GravixRegionMeasurementResult? m, {
+  String? homeRegion,
+  GravixRoomMedia? media,
+  List<String> skipped = const [],
+  bool ignored = false,
+}) {
   if (m == null || m.best == null || candidates.isEmpty) return null;
+  final first = m.bestFor(media)!;
+  GravixRegionPick answer(GravixRegionUrl e, GravixRegionPickReason reason) =>
+      GravixRegionPick(entry: e, reason: reason, media: media, skipped: skipped, mediaIgnored: ignored);
   GravixRegionUrl? offeredFor(GravixRegionMeasurement r) =>
       candidates.where((c) => c.url == r.url).firstOrNull ?? candidates.where((c) => c.region == r.region).firstOrNull;
-  final order = [m.best!, ...m.regions.where((r) => r.region != m.best!.region)];
+  final order = [first, ...m.regions.where((r) => r.region != first.region)];
   GravixRegionMeasurement? pickedM;
   GravixRegionUrl? picked;
   for (final r in order) {
@@ -923,25 +1197,24 @@ GravixRegionUrl? gravixPickMeasuredRegion(
         if (r.ok && offeredFor(r) != null && r.rttMs! < fastest.rttMs!) fastest = r;
       }
       if (gravixHomeRegionWithinMargin(homeMs: homeM.rttMs!, fastestMs: fastest.rttMs!)) {
-        return (entry: homeOffered, reason: GravixRegionPickReason.home);
+        return answer(homeOffered, GravixRegionPickReason.home);
       }
-      return (entry: picked, reason: GravixRegionPickReason.measured);
+      return answer(picked, GravixRegionPickReason.measured);
     }
   }
 
-  String norm(String u) => u.replaceAll(RegExp(r'/+$'), '');
-  if (norm(picked.url) == norm(pinnedUrl)) return (entry: picked, reason: GravixRegionPickReason.measured);
-  final pinnedM = m.regions.where((r) => r.ok && norm(r.url) == norm(pinnedUrl)).firstOrNull;
-  final pinned = candidates.where((c) => norm(c.url) == norm(pinnedUrl)).firstOrNull;
-  if (pinnedM == null || pinned == null) return (entry: picked, reason: GravixRegionPickReason.measured);
+  if (_normUrl(picked.url) == _normUrl(pinnedUrl)) return answer(picked, GravixRegionPickReason.measured);
+  final pinnedM = m.regions.where((r) => r.ok && _normUrl(r.url) == _normUrl(pinnedUrl)).firstOrNull;
+  final pinned = candidates.where((c) => _normUrl(c.url) == _normUrl(pinnedUrl)).firstOrNull;
+  if (pinnedM == null || pinned == null) return answer(picked, GravixRegionPickReason.measured);
   final gain = pinnedM.rttMs! - pickedM.rttMs!;
   final needed = [
     GravixRegionDecisionCache.switchMinGain.inMilliseconds.toDouble(),
     pinnedM.rttMs! * GravixRegionDecisionCache.switchMinGainRatio,
   ].reduce((a, b) => a > b ? a : b);
   return gain > needed
-      ? (entry: picked, reason: GravixRegionPickReason.measured)
-      : (entry: pinned, reason: GravixRegionPickReason.pinned);
+      ? answer(picked, GravixRegionPickReason.measured)
+      : answer(pinned, GravixRegionPickReason.pinned);
 }
 
 /// The measured regions as join candidates, for a connect whose token came with

@@ -41,6 +41,7 @@ library;
 
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:gravix_rtc/src/rtc_core/src/core/transport.dart' show Transport;
@@ -228,12 +229,52 @@ Future<_Setup> _publishedMic() async {
 
 Future<void> _ms(int ms) => Future<void>.delayed(Duration(milliseconds: ms));
 
+/// The running test's virtual clock (see [_vtest]).
+FakeAsync? _clock;
+
+/// Runs [body] on a virtual clock: every delay here (the fake native round
+/// trips, the 20 ms negotiate debounce, the waits between steps) is a timer that
+/// fires in order at its virtual time, so a loaded machine cannot reorder them
+/// (2026-10-21: real-time waits flaked 3/10 under CPU load). Time advances 1 ms
+/// at a time until [body] completes (or 60 virtual s pass: a hang fails).
+void _vtest(String description, Future<void> Function() body) {
+  test(description, () {
+    fakeAsync((async) {
+      _clock = async;
+      var done = false;
+      Object? error;
+      StackTrace? stack;
+      body().then(
+        (_) => done = true,
+        onError: (Object e, StackTrace s) {
+          error = e;
+          stack = s;
+          done = true;
+        },
+      );
+      while (!done && async.elapsed < const Duration(seconds: 60)) {
+        async.elapse(const Duration(milliseconds: 1));
+      }
+      _clock = null;
+      if (error != null) Error.throwWithStackTrace(error!, stack!);
+      if (!done) fail('did not finish in 60 virtual seconds');
+    });
+  });
+}
+
+/// A Stopwatch on the virtual clock.
+class _VirtualStopwatch {
+  _VirtualStopwatch() : _start = _clock!.elapsed;
+  final Duration _start;
+  int get elapsedMilliseconds => (_clock!.elapsed - _start).inMilliseconds;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(installRecoveryChannelMocks);
 
   group('MUSIC-SDP: overlapping offers on a music track change', () {
-    test('a debounced negotiate firing while the previous offer is still being created waits for it', () async {
+    _vtest('a debounced negotiate firing while the previous offer is still being created waits for it', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -266,7 +307,7 @@ void main() {
       expect(s.errors, isEmpty);
     });
 
-    test('the answer\'s renegotiate replay and a debounced negotiate do not both create an offer', () async {
+    _vtest('the answer\'s renegotiate replay and a debounced negotiate do not both create an offer', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -308,7 +349,7 @@ void main() {
       expect(s.errors, isEmpty);
     });
 
-    test('an offer made after the answer satisfies the deferred replay: no empty extra offer', () async {
+    _vtest('an offer made after the answer satisfies the deferred replay: no empty extra offer', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -334,7 +375,7 @@ void main() {
       expect(s.pc.localOfferRefusals, 0);
     });
 
-    test('a burst of 16 republishes (mute toggles + track changes) never refuses an offer', () async {
+    _vtest('a burst of 16 republishes (mute toggles + track changes) never refuses an offer', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -359,7 +400,7 @@ void main() {
       expect(s.pc.mids.every((m) => m != null), isTrue, reason: '${s.pc.mids}');
     });
 
-    test('an ICE restart asked for while an offer is being created waits for it, then restarts', () async {
+    _vtest('an ICE restart asked for while an offer is being created waits for it, then restarts', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
       s.transport.gravixRollbackStaleOffer = true;
@@ -377,7 +418,7 @@ void main() {
       expect(s.pc.signalingState, rtc.RTCSignalingState.RTCSignalingStateStable);
     });
 
-    test('a step ahead that never finishes holds the next one only for gravixOfferChainWait', () async {
+    _vtest('a step ahead that never finishes holds the next one only for gravixOfferChainWait', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
       s.transport.gravixOfferChainWait = const Duration(milliseconds: 50);
@@ -387,9 +428,8 @@ void main() {
       unawaited(s.transport.createAndSendOffer());
       await _ms(5);
       s.pc.createDelay = const Duration(milliseconds: 5);
-      final sw = Stopwatch()..start();
+      final sw = _VirtualStopwatch();
       await s.transport.createAndSendOffer(const RTCOfferOptions(iceRestart: true));
-      sw.stop();
 
       expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(45));
       expect(s.pc.iceRestartOffers, 1);
@@ -405,7 +445,7 @@ void main() {
   // load: the answer was held 24-423 ms in 4 of 10 runs (mic and camera live
   // slipped by the same), and an identical replay offer followed.
   group('HOST-CAMERA: the first answer is never held behind a deferred sender change', () {
-    test(
+    _vtest(
       'a sender change while the offer is pending defers with no native call; the answer is applied at once',
       () async {
         final s = await _publishedMic();
@@ -424,7 +464,7 @@ void main() {
         expect(s.pc.createOfferCalls, createsBefore);
         expect(s.transport.renegotiate, isTrue);
 
-        final sw = Stopwatch()..start();
+        final sw = _VirtualStopwatch();
         final answered = s.transport.setRemoteDescription(s.pc.answerTo(s.sent.last));
         // the answer step runs before anything the deferred change could do
         await _ms(5);
@@ -444,7 +484,7 @@ void main() {
       },
     );
 
-    test('an ICE restart while the offer is pending still takes the chain', () async {
+    _vtest('an ICE restart while the offer is pending still takes the chain', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
       s.transport.gravixRollbackStaleOffer = true;
@@ -456,7 +496,7 @@ void main() {
       expect(s.pc.localOfferRefusals, 0, reason: s.pc.log.join('\n'));
     });
 
-    test('a replay whose sender set did not change since the last offer is skipped', () async {
+    _vtest('a replay whose sender set did not change since the last offer is skipped', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -507,7 +547,7 @@ void main() {
       );
     });
 
-    test('a replay is sent when a sender changed since the last offer', () async {
+    _vtest('a replay is sent when a sender changed since the last offer', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
 
@@ -525,7 +565,7 @@ void main() {
       expect(s.pc.localOfferRefusals, 0);
     });
 
-    test('a burst of 16 republishes with a slow native state read: 0 refusals, every sender negotiated', () async {
+    _vtest('a burst of 16 republishes with a slow native state read: 0 refusals, every sender negotiated', () async {
       final s = await _publishedMic();
       addTearDown(s.transport.dispose);
       s.pc.signalingStateDelay = const Duration(milliseconds: 15);
@@ -573,7 +613,7 @@ void main() {
       return s;
     }
 
-    test('the first offer already carried the camera: its late negotiate causes no replay offer', () async {
+    _vtest('the first offer already carried the camera: its late negotiate causes no replay offer', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.addSender(); // the join's microphone
@@ -588,7 +628,7 @@ void main() {
       expect(s.pc.mids.every((m) => m != null), isTrue);
     });
 
-    test('a negotiate asked for before the pending offer was created: no replay and no createOffer at all', () async {
+    _vtest('a negotiate asked for before the pending offer was created: no replay and no createOffer at all', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.addSender();
@@ -601,7 +641,7 @@ void main() {
       expect(s.sent, hasLength(1));
     });
 
-    test('non-restart offers read no native signaling state', () async {
+    _vtest('non-restart offers read no native signaling state', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.addSender();
@@ -616,7 +656,7 @@ void main() {
       expect(s.sent, hasLength(2));
     });
 
-    test('a real change made after the offer was created goes out right after the answer', () async {
+    _vtest('a real change made after the offer was created goes out right after the answer', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.signalingStateDelay = const Duration(milliseconds: 200); // a loaded main thread
@@ -625,7 +665,7 @@ void main() {
       s.pc.addSender(); // the camera, after the first offer
       s.transport.negotiate(null);
       await _ms(30);
-      final sw = Stopwatch()..start();
+      final sw = _VirtualStopwatch();
       await s.answerLast();
       expect(await _eventually(() => s.sent.length == 2), isTrue, reason: s.pc.log.join('\n'));
       expect(sw.elapsedMilliseconds, lessThan(150), reason: 'one createOffer (30 ms), no native state read');
@@ -654,7 +694,7 @@ void main() {
       );
     });
 
-    test('a remote candidate that arrives while the answer is being applied is not stuck', () async {
+    _vtest('a remote candidate that arrives while the answer is being applied is not stuck', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.addSender();
@@ -669,7 +709,7 @@ void main() {
       expect(s.pc.addedCandidates, contains(cand), reason: 'added to the native side, not left pending');
     });
 
-    test('a remote candidate after the answer is added with no native description read', () async {
+    _vtest('a remote candidate after the answer is added with no native description read', () async {
       final s = await fresh();
       addTearDown(s.transport.dispose);
       s.pc.addSender();
@@ -684,8 +724,8 @@ void main() {
 }
 
 Future<bool> _eventually(bool Function() cond, {Duration timeout = const Duration(seconds: 2)}) async {
-  final end = DateTime.now().add(timeout);
-  while (DateTime.now().isBefore(end)) {
+  final end = _clock!.elapsed + timeout;
+  while (_clock!.elapsed < end) {
     if (cond()) return true;
     await Future<void>.delayed(const Duration(milliseconds: 2));
   }

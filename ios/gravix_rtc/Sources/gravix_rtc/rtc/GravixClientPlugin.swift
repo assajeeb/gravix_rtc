@@ -113,6 +113,10 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
         applyPendingEngineAvailabilityIfNeeded()
 
         #if os(iOS)
+        // On-device noise suppression: installed into the APM capture
+        // post-processing slot now (before any capture), pass-through until
+        // Dart sends nsConfigure.
+        GxNoiseProcessor.shared.install(channel: channel)
         instance.startObservingRouteChanges()
         BroadcastManager.shared.isBroadcastingPublisher
             .sink { isBroadcasting in
@@ -808,6 +812,11 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        #if os(iOS)
+        if call.method.hasPrefix("ns"), GxNoiseProcessor.shared.handle(call, result: result) {
+            return
+        }
+        #endif
         // Every Dart caller sends a map; a nil payload is treated as empty so a
         // no-argument call reaches its handler instead of "not implemented".
         let args = (call.arguments as? [String: Any?]) ?? [:]
@@ -1288,6 +1297,7 @@ class GxAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
     func audioDeviceModule(_: RTCAudioDeviceModule, engine: AVAudioEngine, configureInputFromSource _: AVAudioNode?, toDestination _: AVAudioNode, format: AVAudioFormat, context: [AnyHashable: Any]) -> Int {
         #if os(iOS)
         GravixMusicMixer.shared.engineConfigureInput(engine, format: format, context: context)
+        GxNoiseProcessor.shared.engineConfigureInput(engine, format: format)
         #endif
         return 0
     }

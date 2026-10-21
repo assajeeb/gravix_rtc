@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.0 — 2026-10-22
+
+Noise suppression is on by default, Opus DTX is on by default in `GravixRoomService`, and a join
+routes by what each region takes (audio-only regions). Native code changed (a new C noise core on
+Android and iOS); the Dart API is additive.
+
+### Added: noise suppression, on by default
+- `GravixNoiseSuppressionOptions` (mode `auto`): RNNoise everywhere; DeepFilterNet3 ("studio") on
+  devices that pass the static check, the policy and a first-run benchmark (fast iPhones), with a
+  mid-call fallback to RNNoise when it runs too slow. Other modes: `off`, `standard`, `studio`.
+- On by default through every entry point: `RoomOptions.noiseSuppression` and the
+  `noiseSuppression` parameter of `GravixRoomService`. To opt out pass
+  `GravixNoiseSuppressionOptions.off` (alias of `legacy`: WebRTC's own noise suppression as before).
+- A `Room` created with the default options never overrides an earlier
+  `GravixNoiseSuppression.configure` call: an app that turned it off keeps it off.
+- Quiet microphones: a pre-gain in front of the suppressor and a pause gate that keeps the gain and
+  AGC from lifting the noise floor over DTX; a quiet voice is still judged as talk (the DFN3 quiet-mic
+  fix).
+- `[GravixNS]` log lines show the engine, the reason and the route.
+
+### Added: Opus DTX on by default
+- `GravixRoomService(dtx: true)` is the default: no audio, almost nothing sent. `dtx: false` opts out.
+- The publisher's answer is pinned to our microphone's Opus format (`usedtx=1`, mono), so DTX holds
+  for every app.
+- `AudioPublishOptions.stereo` publishes stereo explicitly (`stereo=1`, no DTX). Stereo is no longer
+  guessed from the bitrate (a 64 kbps mono microphone was misread).
+
+### Added: region-aware join routing (audio-only regions)
+- A region's `media` entry in `GET /v1/regions` (`["audio"]` = audio only) is remembered; a join that
+  uses video goes to the best measured region that takes video, an audio-only join may use any.
+- If a server refuses a medium (`media_not_allowed`), the session makes one move through the engine's
+  reconnect path and republishes the refused camera. Hysteresis is per medium.
+  `GravixRecoveryOptions.mediaRefusalFailover` (default on) switches the move off.
+
+### Fixed / Changed
+- The call foreground service is held through a whole rejoin incident, so the microphone keeps working
+  in the background; it also starts before the noise suppression setup.
+- `GravixRoomService.connectWithTokenProvider` takes `red` and `redLossThresholdPct` like `connect()`.
+- iOS: an app that needs a microphone in the background must declare `UIBackgroundModes` `audio` in
+  its Info.plist (the example app does).
+
+
 ## 0.4.19 — 2026-10-15
 
 Fast joining in the package: what every app wrote by hand around `Room.connect` (the token

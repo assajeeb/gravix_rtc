@@ -28,9 +28,23 @@ let package = Package(
         .package(name: "flutter_webrtc", path: "../flutter_webrtc")
     ],
     targets: [
+        // On-device noise suppression core (RNNoise + speexdsp resampler + gx_ns,
+        // plain C). The sources live once in native/gxns; Sources/gxns holds
+        // forwarders that #include them by relative path, so SwiftPM never
+        // references a path outside this package. Swift imports it as `gxns`
+        // (include/module.modulemap).
+        .target(
+            name: "gxns",
+            path: "Sources/gxns",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("shim"),
+            ]
+        ),
         .target(
             name: "gravix_rtc",
             dependencies: [
+                "gxns",
                 .product(name: "FlutterFramework", package: "FlutterFramework"),
                 .product(name: "flutter-webrtc", package: "flutter_webrtc"),
                 .product(name: "WebRTC", package: "flutter_webrtc")
@@ -41,6 +55,9 @@ let package = Package(
                 // privacy impact, and then uncomment these lines. For more information, see
                 // https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
                 .process("PrivacyInfo.xcprivacy"),
+                // Noise suppression studio model (DeepFilterNet3 standard,
+                // precompiled Core ML) + its licences, copied verbatim.
+                .copy("Resources/ns"),
             ]
         )
     ]

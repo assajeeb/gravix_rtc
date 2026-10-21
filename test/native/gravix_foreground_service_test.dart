@@ -5,9 +5,13 @@
 // background. Disabled by default = no channel traffic at all; enabled = start
 // at connect (mediaPlayback), microphone on the mic publish, stop when the last
 // room lets go.
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gravix_rtc/src/join/gravix_rejoin_policy.dart';
+import 'package:gravix_rtc/src/noise/noise.dart';
 import 'package:gravix_rtc/src/rtc_core/src/core/engine.dart';
 import 'package:gravix_rtc/src/rtc_core/src/core/room.dart';
 import 'package:gravix_rtc/src/rtc_core/src/core/signal_client.dart';
@@ -15,6 +19,7 @@ import 'package:gravix_rtc/src/rtc_core/src/managers/gravix_foreground_service.d
 import 'package:gravix_rtc/src/rtc_core/src/options.dart';
 import 'package:gravix_rtc/src/rtc_core/src/support/native.dart';
 import 'package:gravix_rtc/src/rtc_core/src/support/platform.dart';
+import 'package:gravix_rtc/src/rtc_core/src/types/other.dart' show DisconnectReason;
 
 void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
@@ -199,6 +204,74 @@ void main() {
       expect(GravixForegroundService.isRunning, isTrue);
     });
 
+    // 2026-10-21 (background mic complaints): a viewer's rejoin backoff (1-8 s)
+    // outlasted the 3 s stop grace; the rejoin then had to start the
+    // microphone-type service from the background (Android 14+ refuses: mic
+    // and playback dead until the app was reopened).
+    test('a pending rejoin holds the service through its whole backoff; a give-up releases it', () async {
+      GravixForegroundService.stopGrace = const Duration(milliseconds: 100);
+      final old = Object();
+      final next = Object();
+      var joins = 0;
+      final policy = GravixRejoinPolicy(
+        rejoin: () async {
+          joins++;
+          if (joins == 1) return false; // the first attempt fails: the backoff goes on
+          await GravixForegroundService.roomConnecting(next, null);
+          return true;
+        },
+        liveOn: () => true,
+        backoff: const [Duration(milliseconds: 250), Duration(milliseconds: 250)],
+      );
+      await GravixForegroundService.roomConnecting(old, null);
+      lifecycle(AppLifecycleState.paused); // the viewer is in the background
+      GravixForegroundService.roomReleased(old);
+      expect(policy.sessionEnded(DisconnectReason.signalClose), isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 700)); // two attempts, far past the grace
+      await GravixForegroundService.idle();
+      expect(joins, 2);
+      expect(methods().where((m) => m == 'stopCallService'), isEmpty, reason: 'no stop during the incident');
+      expect(methods().where((m) => m == 'startCallService'), hasLength(1), reason: 'no restart from the background');
+      expect(GravixForegroundService.isRunning, isTrue);
+      expect(GravixForegroundService.roomHolds, 1, reason: 'the new room holds it, the incident let go');
+      // the new session ends, every rejoin fails: the give-up releases it
+      final gaveUp = GravixRejoinPolicy(
+        rejoin: () async => false,
+        liveOn: () => true,
+        backoff: const [Duration(milliseconds: 150)],
+      );
+      GravixForegroundService.roomReleased(next);
+      expect(gaveUp.sessionEnded(DisconnectReason.signalClose), isTrue);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(GravixForegroundService.roomHolds, 1, reason: 'held while the rejoin is pending');
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      await GravixForegroundService.idle();
+      expect(GravixForegroundService.roomHolds, 0);
+      expect(methods().last, 'stopCallService');
+      policy.dispose();
+      gaveUp.dispose();
+      lifecycle(AppLifecycleState.resumed);
+    });
+
+    test('a disposed rejoin (the screen closed) releases its hold', () async {
+      GravixForegroundService.stopGrace = const Duration(milliseconds: 100);
+      final room = Object();
+      await GravixForegroundService.roomConnecting(room, null);
+      final policy = GravixRejoinPolicy(
+        rejoin: () async => true,
+        liveOn: () => true,
+        backoff: const [Duration(seconds: 5)],
+      );
+      GravixForegroundService.roomReleased(room);
+      expect(policy.sessionEnded(DisconnectReason.signalClose), isTrue);
+      expect(GravixForegroundService.roomHolds, 1);
+      policy.dispose();
+      expect(GravixForegroundService.roomHolds, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await GravixForegroundService.idle();
+      expect(methods().last, 'stopCallService');
+    });
+
     test('mic upgrade from the background is deferred and replayed on resume', () async {
       final room = Object();
       await GravixForegroundService.roomConnecting(room, null);
@@ -262,6 +335,36 @@ void main() {
       await expectLater(room.connect('wss://sfu.example', 'tok'), throwsA(anything));
       await GravixForegroundService.idle();
       expect(methods(), ['startCallService', 'stopCallService']);
+      await room.dispose();
+    });
+
+    test('Room.connect starts the service before it waits for the noise suppression setup', () async {
+      final nsGate = Completer<void>();
+      final seen = <String>[];
+      messenger.setMockMethodCallHandler(Native.channel, (call) async {
+        seen.add(call.method);
+        calls.add(call);
+        switch (call.method) {
+          case 'startCallService':
+            return {'types': 0, 'typeNames': typesFor(call.arguments as Map<Object?, Object?>?), 'error': null};
+          case 'nsDeviceFacts':
+          case 'nsConfigure':
+            await nsGate.future; // a slow native NS setup
+            return null;
+          default:
+            return null;
+        }
+      });
+      // a fresh (non-identical) options object: the controller configures again
+      final room = _failingRoom(
+        RoomOptions(noiseSuppression: GravixNoiseSuppressionOptions(mode: GravixNoiseSuppressionMode.standard)),
+      );
+      final connecting = room.connect('wss://sfu.example', 'tok');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(seen, contains('startCallService'), reason: 'started while the NS setup still waits: $seen');
+      expect(seen.any((m) => m.startsWith('ns')), isTrue, reason: 'the NS setup is under way and still waiting');
+      nsGate.complete();
+      await expectLater(connecting, throwsA(anything));
       await room.dispose();
     });
 

@@ -137,8 +137,19 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       // 0.4.15: focus changes feed the mic monitor (7c), route changes go to
       // Dart (7d), and the chatroom model points WebRTC's recorder (7b).
       manager.onFocusChange = { change -> micMonitor?.onFocusChange(change) }
-      manager.onRoutesChanged = { routes -> invokeOnChannel("onAudioRoutesChanged", routes) }
-      manager.onChatroomRoute = { engaged -> pointRecorderAtBluetooth(engaged) }
+      manager.onRoutesChanged = { routes ->
+        GxNoiseProcessor.onRoutes(routes)
+        invokeOnChannel("onAudioRoutesChanged", routes)
+      }
+      manager.onChatroomRoute = { engaged ->
+        pointRecorderAtBluetooth(engaged)
+        GxNoiseProcessor.onChatroom(engaged)
+      }
+    }
+    // noise suppression events (switch, routeReset, musicBypass, summary) to Dart
+    GxNoiseProcessor.eventSink = { m -> mainHandler.post { invokeOnChannel("onNoiseSuppression", m) } }
+    GxNoiseProcessor.stateReader = {
+      flutterWebRTCPlugin?.getPeerConnectionFactory()?.audioProcessingState?.let { audioProcessingStateToMap(it).toString() }
     }
     audioDeviceModuleExecutor?.shutdown()
     audioDeviceModuleExecutor = Executors.newSingleThreadExecutor()
@@ -339,6 +350,9 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
     // room music: the mixer hook goes in before the record thread starts
     com.gravitycompile.gravix_cloud.music.MusicMixerPlugin.installIfWanted(audioDeviceModule)
+    // noise suppression: on the APM capture post-processing slot, before the
+    // record thread starts (no-op unless nsConfigure created it)
+    GxNoiseProcessor.installOn(flutterWebRTCPlugin, "startLocalRecording")
     val executor = audioDeviceModuleExecutorOrError(result, "rejectedPlatformUnavailable") ?: return
     val options = audioProcessingOptions(call)
     // GRAVIX (2026-10-13): false = prepare the recorder only, the engine starts
@@ -719,6 +733,25 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
       "setMicrophoneMute" -> {
         handleSetMicrophoneMute(call, result)
+      }
+
+      "nsDeviceFacts" -> {
+        result.success(GxNoiseProcessor.deviceFacts(applicationContext))
+      }
+
+      "nsConfigure" -> {
+        @Suppress("UNCHECKED_CAST")
+        val args = (call.arguments as? Map<String, Any?>) ?: emptyMap()
+        result.success(GxNoiseProcessor.configure(applicationContext, flutterWebRTCPlugin, args))
+      }
+
+      "nsBenchmark" -> {
+        val budget = call.argument<Int>("budgetUs") ?: 3000
+        GxNoiseProcessor.benchmark(applicationContext, budget) { m -> mainHandler.post { result.success(m) } }
+      }
+
+      "nsStats" -> {
+        result.success(GxNoiseProcessor.stats())
       }
 
       "getAudioProcessingState" -> {

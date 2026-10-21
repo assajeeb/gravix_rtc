@@ -29,11 +29,12 @@ library;
 import 'package:flutter/foundation.dart';
 
 import '../rtc_core/src/exceptions.dart' show RetiredServerException;
+import 'gravix_region_media.dart' show gravixParseRegionMedia;
 
 /// One candidate region from the token response's `region_urls`.
 @immutable
 class GravixRegionUrl {
-  const GravixRegionUrl({required this.region, required this.url, this.probeUrl, this.estRttMs});
+  const GravixRegionUrl({required this.region, required this.url, this.probeUrl, this.estRttMs, this.media});
 
   /// Region slug, e.g. `sgp1`, `blr1`.
   final String region;
@@ -54,16 +55,23 @@ class GravixRegionUrl {
   /// measurement. Null when the gateway sent none.
   final double? estRttMs;
 
+  /// The media this region's servers take (`media` in `GET /v1/regions`,
+  /// 2026-10-21, e.g. `["audio"]` for an audio-only region). Null = every
+  /// medium (old servers, and regions with no restriction). See
+  /// gravix_region_media.dart.
+  final List<String>? media;
+
   @override
   bool operator ==(Object other) =>
       other is GravixRegionUrl &&
       other.region == region &&
       other.url == url &&
       other.probeUrl == probeUrl &&
-      other.estRttMs == estRttMs;
+      other.estRttMs == estRttMs &&
+      listEquals(other.media, media);
 
   @override
-  int get hashCode => Object.hash(region, url, probeUrl, estRttMs);
+  int get hashCode => Object.hash(region, url, probeUrl, estRttMs, media == null ? null : Object.hashAll(media!));
 
   @override
   String toString() => '$region=$url';
@@ -318,6 +326,7 @@ List<GravixRegionUrl> gravixRegionEntriesFrom(Map<String, dynamic>? tokenRespons
             region: region is String && region.isNotEmpty ? region : kGravixUnknownRegion,
             url: url,
             probeUrl: probeUrl is String && probeUrl.isNotEmpty ? probeUrl : null,
+            media: gravixParseRegionMedia(entry['media']),
           ),
         );
       }

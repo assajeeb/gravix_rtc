@@ -4,3 +4,9 @@ build/
 APP_NOTES_0413.md
 # Maintainers' report on the vendored core's upstream fork: internal, not shipped
 doc/UPSTREAM_FORK.md
+# gx_ns host tests, PCM fixtures and fixture tools: development only (the C sources ship)
+native/gxns/tests/
+native/gxns/tools/
+# iOS NS host check (dev only)
+tool/ns_ios_host/
+tool/ns_android/

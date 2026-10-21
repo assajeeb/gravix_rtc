@@ -134,6 +134,8 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         kernel.rampSamples = (rate * ch / 50).coerceAtLeast(1) // 20 ms
         kernel.reset(0f)
         kernel.envTarget = 1f
+        // noise suppression: the whole chain goes dry (crossfade) while music plays
+        com.gravitycompile.gravix_cloud.rtc.GxNoiseProcessor.onMusic(true)
         session = s
         decoder.start()
         startInterruptionWatch()
@@ -210,6 +212,7 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         stopInterruptionWatch()
         s.decoder.shutdown()
         s.monitor?.release()
+        com.gravitycompile.gravix_cloud.rtc.GxNoiseProcessor.onMusic(false)
         Log.i(TAG, "music stopped")
     }
 

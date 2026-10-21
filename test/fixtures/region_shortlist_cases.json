@@ -618,6 +618,54 @@
     "url": "wss://r06.example.test",
     "probe_url": "https://r06.example.test/v1/region-probe"
    }
+  ],
+  "gulf": [
+   {
+    "region": "doh1",
+    "url": "wss://doh1.example.test",
+    "probe_url": "https://doh1.example.test/v1/region-probe"
+   },
+   {
+    "region": "blr1",
+    "url": "wss://blr1.example.test",
+    "probe_url": "https://blr1.example.test/v1/region-probe"
+   },
+   {
+    "region": "sgp1",
+    "url": "wss://sgp1.example.test",
+    "probe_url": "https://sgp1.example.test/v1/region-probe"
+   },
+   {
+    "region": "fra1",
+    "url": "wss://fra1.example.test",
+    "probe_url": "https://fra1.example.test/v1/region-probe"
+   }
+  ],
+  "gulfEst": [
+   {
+    "region": "doh1",
+    "url": "wss://doh1.example.test",
+    "probe_url": "https://doh1.example.test/v1/region-probe",
+    "est_rtt_ms": 20
+   },
+   {
+    "region": "blr1",
+    "url": "wss://blr1.example.test",
+    "probe_url": "https://blr1.example.test/v1/region-probe",
+    "est_rtt_ms": 60
+   },
+   {
+    "region": "sgp1",
+    "url": "wss://sgp1.example.test",
+    "probe_url": "https://sgp1.example.test/v1/region-probe",
+    "est_rtt_ms": 90
+   },
+   {
+    "region": "fra1",
+    "url": "wss://fra1.example.test",
+    "probe_url": "https://fra1.example.test/v1/region-probe",
+    "est_rtt_ms": 150
+   }
   ]
  },
  "cases": [
@@ -1779,6 +1827,822 @@
     }
    ],
    "expect": true
+  }
+ ],
+ "_comment_media": "2026-10-21 per-region media: `media` cases. response.regions names a list; regionMedia adds `media` to those entries (the /v1/regions spelling; absent = all media). Run: measure (rtt as in `cases`), then pick for the join: pinned = tokenUrl, candidates = the named slugs (default every region) WITHOUT media (as a token's region_urls), homeRegion, media. expect.pick null = the token url, unchanged. skipped = measured regions passed over for media. mediaIgnored = no candidate allows the media, the pick ignores it. Hysteresis per medium: cache.mediaAnchors {medium: slug} / cache.mediaChallengers {medium: {region, wins}} seed the per-network state (wire keys mediaAnchors {medium: {region,url,rttMs,atMs}} and mediaChallengers); expect.bestForMedia = the measurement's region for that medium (bestByMedia, else best), mediaSelectReason / mediaChallenger = its selection (absent key = not checked; mediaSelectReason absent when the medium filtered nothing).",
+ "media": [
+  {
+   "name": "video join: the audio-only best (doh1) is skipped, the fastest region allowing video wins",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "audio join: the audio-only region is the pick",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "audio",
+   "expect": {
+    "best": "doh1",
+    "pick": "doh1",
+    "reason": "measured",
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "video join: the keep-pinned rule still applies among regions allowing video",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     70,
+     72
+    ]
+   },
+   "tokenUrl": "wss://sgp1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "sgp1",
+    "reason": "pinned",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "video join: a pinned audio-only region is never kept",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     50,
+     51
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "video join: an audio-only home region is not joined",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://blr1.example.test",
+   "homeRegion": "doh1",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "audio join: the audio-only home region is joined",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://blr1.example.test",
+   "homeRegion": "doh1",
+   "media": "audio",
+   "expect": {
+    "best": "doh1",
+    "pick": "doh1",
+    "reason": "home",
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "audio join: a video-only region is skipped",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "video"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "audio",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "nothing measured, video, token region audio-only: the first shortlist region allowing video",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": null,
+    "blr1": null,
+    "sgp1": null
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "fallback",
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "nothing measured, video, token region allows video: the token url (as before)",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": null,
+    "blr1": null,
+    "sgp1": null
+   },
+   "tokenUrl": "wss://sgp1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": null,
+    "reason": null,
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "nothing measured, audio, token region audio-only: the token url (as before)",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": null,
+    "blr1": null,
+    "sgp1": null
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "audio",
+   "expect": {
+    "best": "doh1",
+    "pick": null,
+    "reason": null,
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "nothing measured, no shortlist, video: the lowest est_rtt_ms allowing video",
+   "response": {
+    "regions": "gulfEst"
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": null,
+    "blr1": null,
+    "sgp1": null,
+    "fra1": null
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "blr1",
+    "reason": "fallback",
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "no region allows video: any region, so the join still has one (media ignored)",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ],
+    "blr1": [
+     "audio"
+    ],
+    "sgp1": [
+     "audio"
+    ],
+    "fra1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "doh1",
+    "reason": "measured",
+    "skipped": [],
+    "mediaIgnored": true
+   },
+   "cache": null
+  },
+  {
+   "name": "old server (no media anywhere): a video join picks as before",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {},
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "pick": "doh1",
+    "reason": "measured",
+    "skipped": []
+   },
+   "cache": null
+  },
+  {
+   "name": "the token's region list (no media) is a subset: only offered regions allowing video",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     90,
+     92
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "candidates": [
+    "doh1",
+    "sgp1"
+   ],
+   "expect": {
+    "best": "doh1",
+    "pick": "sgp1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
+  },
+  {
+   "name": "hysteresis per medium: the video anchor (sgp1) is kept within the keep margin of the fastest video region",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     70,
+     72
+    ]
+   },
+   "cache": {
+    "mediaAnchors": {
+     "video": "sgp1"
+    }
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "bestForMedia": "sgp1",
+    "mediaSelectReason": "kept",
+    "pick": "sgp1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   }
+  },
+  {
+   "name": "hysteresis per medium: a clearly faster video region wins once -> the video anchor stays (confirming)",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     120,
+     122
+    ]
+   },
+   "cache": {
+    "mediaAnchors": {
+     "video": "sgp1"
+    }
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "bestForMedia": "sgp1",
+    "mediaSelectReason": "confirming",
+    "mediaChallenger": {
+     "region": "blr1",
+     "wins": 1
+    },
+    "pick": "sgp1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   }
+  },
+  {
+   "name": "hysteresis per medium: the second consecutive win switches video joins",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     120,
+     122
+    ]
+   },
+   "cache": {
+    "mediaAnchors": {
+     "video": "sgp1"
+    },
+    "mediaChallengers": {
+     "video": {
+      "region": "blr1",
+      "wins": 1
+     }
+    }
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "bestForMedia": "blr1",
+    "mediaSelectReason": "switched",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   }
+  },
+  {
+   "name": "hysteresis per medium: an audio join is not held by the video anchor",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     70,
+     72
+    ]
+   },
+   "cache": {
+    "mediaAnchors": {
+     "video": "sgp1"
+    }
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "audio",
+   "expect": {
+    "best": "doh1",
+    "bestForMedia": "doh1",
+    "pick": "doh1",
+    "reason": "measured",
+    "skipped": []
+   }
+  },
+  {
+   "name": "hysteresis per medium: no video anchor yet -> the fastest video region",
+   "response": {
+    "regions": "gulf",
+    "shortlist": [
+     "doh1",
+     "blr1",
+     "sgp1"
+    ]
+   },
+   "regionMedia": {
+    "doh1": [
+     "audio"
+    ]
+   },
+   "rtt": {
+    "doh1": [
+     100,
+     20,
+     21
+    ],
+    "blr1": [
+     150,
+     60,
+     62
+    ],
+    "sgp1": [
+     180,
+     70,
+     72
+    ]
+   },
+   "tokenUrl": "wss://doh1.example.test",
+   "media": "video",
+   "expect": {
+    "best": "doh1",
+    "bestForMedia": "blr1",
+    "mediaSelectReason": "fastest",
+    "pick": "blr1",
+    "reason": "measured",
+    "skipped": [
+     "doh1"
+    ]
+   },
+   "cache": null
   }
  ]
 }

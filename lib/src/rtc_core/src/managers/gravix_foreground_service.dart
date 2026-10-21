@@ -280,7 +280,35 @@ class GravixForegroundService {
   static void roomReleased(Object room) {
     GravixMicMonitor.instance.detachRoom(room);
     GravixBackgroundGuard.instance.detachRoom(room);
-    if (_rooms.remove(room) == null) return;
+    _dropHold(room);
+  }
+
+  /// A rejoin incident (GravixRejoinPolicy: a viewer's session ended, a rejoin
+  /// is scheduled or running): keeps the service through the whole backoff
+  /// (1-8 s, longer than [stopGrace]). Without it the service stopped 3 s after
+  /// the old session, and the rejoin had to start the microphone-type service
+  /// again from the background, which Android 14+ refuses (mic and playback
+  /// dead until the app was reopened). Starts nothing: only keeps a running
+  /// service (or one in its stop grace) running. Released by
+  /// [incidentReleased] (the rejoin joined, gave up, was refused or disposed).
+  @internal
+  static void incidentHold(Object owner) {
+    if (!isSupported || _rooms.containsKey(owner)) return;
+    final opts = _activeOptions;
+    // nothing to keep: never started, or already stopped
+    if (opts == null || (!_running && _stopTimer == null)) return;
+    _stopTimer?.cancel();
+    _stopTimer = null;
+    _rooms[owner] = opts;
+  }
+
+  /// Ends an [incidentHold]; the service stops after [stopGrace] when nothing
+  /// else holds it.
+  @internal
+  static void incidentReleased(Object owner) => _dropHold(owner);
+
+  static void _dropHold(Object owner) {
+    if (_rooms.remove(owner) == null) return;
     if (_rooms.isNotEmpty || _manual) return;
     _stopTimer?.cancel();
     if (stopGrace == Duration.zero) {

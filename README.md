@@ -383,17 +383,22 @@ playout came back nearly uncancelled on both phones (Infinix +4 to +5 dB vs
 the voice, no processing +9 dB; Xiaomi -2 to -9 dB, no processing -1 dB),
 while the communication profile cancelled it (-58 dB). Not investigated yet.
 
+### Noise suppression
+
+On by default (2026-10-21): `RoomOptions.noiseSuppression` and
+`GravixRoomService(noiseSuppression:)` default to
+`GravixNoiseSuppressionOptions()` (mode `auto`: the device decides standard or
+studio, with thermal / battery / kill-switch fallbacks). To keep WebRTC's own
+noise suppression (the sound before 2026-10-21), pass
+`noiseSuppression: GravixNoiseSuppressionOptions.off`. At runtime:
+`GravixNoiseSuppression.instance.setMode(...)`.
+
 Not offered, and why (checked 2026-10-10 against flutter_webrtc 1.6.2 /
 libwebrtc 150.7871):
 
-- **Stronger noise suppression.** The constraints reach libwebrtc's audio
-  processing only as on/off; the noise suppressor level is fixed (high) by
-  the voice engine, and this build has no field trial for a suppression
-  level, AGC2 tuning or a machine-learned suppressor. The classic suppressor
-  models stationary noise and does not remove music or game sound. The one
-  hook is flutter_webrtc's capture post-processing
-  (`ExternalAudioProcessingFactory`), which would need a bundled speech
-  model (an "AI noise suppression" like other engines ship).
+- **Stronger noise suppression** is offered since 2026-10-21 by the SDK's own
+  on-device noise suppression (RNNoise, DeepFilterNet3 "studio"), not by
+  libwebrtc: see "Noise suppression" below.
 - **Other apps' audio as the echo reference (`AudioPlaybackCapture`, API
   29+).** Needs a MediaProjection consent dialog ("start recording or
   casting?") every session and a mediaProjection foreground service; it
@@ -678,15 +683,16 @@ E2EE always turns RED off. Same options and policy as the JS SDK (`red`,
 
 ### Microphone DTX
 
-`connect(dtx: true)` (also `connectWithTokenProvider` / `reconnectWithToken`) turns
-on Opus DTX for the published microphone: during digital silence the encoder sends
-a comfort-noise frame every ~400 ms instead of 50 frames a second. Default `false`
-(continuous transmission). Measured on an Android phone (64 kbps cap): a silent room drops
-from ~110 kbps (RED) / ~55 kbps (plain Opus) to 2-10 kbps, a muted mic from ~7 to
+Opus DTX is ON by default for the published microphone (2026-10-21): during
+silence the encoder sends a comfort-noise frame every ~400 ms instead of 50 frames a
+second. Measured on an Android phone (64 kbps cap): a silent room drops from
+~110 kbps (RED) / ~55 kbps (plain Opus) to 2-10 kbps, a muted mic from ~7 to
 ~0.2 kbps, speech is unchanged; audible room noise counts as activity for Opus, so
-the saving there is small. RED roughly doubles the audio rate (see above). Use it for speech rooms; leave it off
-where music matters (singing hosts, the music mixer): Opus can treat quiet music as
-silence.
+the saving there is small (the SDK's noise suppression keeps pauses quiet). RED roughly
+doubles the audio rate (see above). The music mixer turns DTX off while music plays
+(Opus can treat quiet music as silence). Opt out with `connect(dtx: false)` (also
+`connectWithTokenProvider` / `reconnectWithToken`); the choice is kept across RED
+republishes.
 
 ### Music mixer
 

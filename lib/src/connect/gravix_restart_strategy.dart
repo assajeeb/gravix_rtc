@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../rtc_core/src/core/engine.dart' show GravixRestartRegionStrategy;
 import 'gravix_region_cache.dart';
+import 'gravix_region_media.dart' show GravixRoomMedia, gravixRegionAllowsMedia;
 import 'gravix_region_prober.dart';
 import 'gravix_region_report.dart';
 
@@ -25,6 +26,7 @@ class GravixProbeRestartStrategy implements GravixRestartRegionStrategy {
     required this.entries,
     required GravixRegionProber prober,
     GravixRegionDecisionCache? cache,
+    this.media,
   }) : _prober = prober,
        _cache = cache;
 
@@ -36,6 +38,20 @@ class GravixProbeRestartStrategy implements GravixRestartRegionStrategy {
   /// race would be.
   final GravixRegionDecisionCache? _cache;
 
+  /// GRAVIX (2026-10-21, per-region media): the session's media now (it can rise
+  /// to video after a refusal). Only the regions taking it race; none does: all.
+  final GravixRoomMedia? Function()? media;
+
+  List<GravixRegionUrl> _candidates() {
+    final m = media?.call();
+    if (m == null) return entries;
+    final ok = [
+      for (final e in entries)
+        if (e.region == kGravixUnknownRegion || gravixRegionAllowsMedia(e, m)) e,
+    ];
+    return ok.isEmpty ? entries : ok;
+  }
+
   List<String> _ladder = const [];
 
   @override
@@ -43,11 +59,16 @@ class GravixProbeRestartStrategy implements GravixRestartRegionStrategy {
     _ladder = const [];
     // Fresh, never from the cache: whatever it holds was decided before
     // whatever just broke the session.
-    final outcome = await _prober.raceEntries(entries, pinnedUrl: pinnedUrl);
-    _cache?.record(pinnedUrl, outcome, candidates: entries);
+    final candidates = _candidates();
+    final outcome = await _prober.raceEntries(candidates, pinnedUrl: pinnedUrl);
+    _cache?.record(pinnedUrl, outcome, candidates: candidates);
     final winner = outcome.winner;
     _ladder = List.of(
-      gravixRegionFallbackLadder(outcome: outcome, candidates: [for (final e in entries) e.url], pinnedUrl: pinnedUrl),
+      gravixRegionFallbackLadder(
+        outcome: outcome,
+        candidates: [for (final e in candidates) e.url],
+        pinnedUrl: pinnedUrl,
+      ),
     );
     debugPrint('🌍 full reconnect re-probed: ${winner ?? 'no responder, keeping the current url'}');
     // No responder: keep the engine's current url rather than guess.

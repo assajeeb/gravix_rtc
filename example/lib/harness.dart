@@ -23,6 +23,7 @@ import 'package:flutter/services.dart';
 import 'package:gravix_rtc/gravix_rtc.dart';
 
 import 'echo_variants.dart';
+import 'ns_panel.dart';
 
 const _channel = MethodChannel('gravix.example/harness');
 
@@ -92,6 +93,12 @@ class HarnessConfig {
     // <slot:publishMicOnJoin>
     'publishMicOnJoin': String.fromEnvironment('publishMicOnJoin'),
     // </slot:publishMicOnJoin>
+    // noise suppression: off|standard|studio|auto (absent = legacy), a timed
+    // script (ns_panel.dart runNsScript), a music file for its music steps
+    'ns': String.fromEnvironment('ns'),
+    'nsScript': String.fromEnvironment('nsScript'),
+    'nsMusic': String.fromEnvironment('nsMusic'),
+    'nsPackUrl': String.fromEnvironment('nsPackUrl'),
     // <slot:singlePc>
     // </slot:singlePc>
   };
@@ -153,6 +160,7 @@ class HarnessScreen extends StatefulWidget {
 class _HarnessScreenState extends State<HarnessScreen> {
   // Lazy: the prober's stagger comes from the run's configuration.
   late final _room = GravixRoomService(
+    noiseSuppression: nsOptionsFromExtra(widget.config.str('ns'), packUrl: widget.config.str('nsPackUrl')),
     regionProber: GravixRegionProber(
       stagger: Duration(milliseconds: widget.config.integer('staggerMs', 0)),
     ),
@@ -483,6 +491,8 @@ class _HarnessScreenState extends State<HarnessScreen> {
       if (report != null && report.complete) {
         // echoDiag (2026-10-10 ECHO): AEC statistics every 2 s while holding.
         final diag = _c.flag('echoDiag') ? (EchoDiagnostics(() => _room.room)..start()) : null;
+        final script = _c.str('nsScript');
+        if (script.isNotEmpty) unawaited(runNsScript(script, _room, musicPath: _c.str('nsMusic')));
         await Future<void>.delayed(
           Duration(milliseconds: _c.integer('holdMs', 500)),
         );
@@ -529,6 +539,7 @@ class _HarnessScreenState extends State<HarnessScreen> {
                 padding: const EdgeInsets.all(12),
                 children: [
                   Text(_status, style: theme.textTheme.titleMedium),
+                  const NoiseSuppressionPanel(),
                   ExpansionTile(
                     title: const Text('Configuration'),
                     subtitle: const Text(

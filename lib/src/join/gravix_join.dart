@@ -29,6 +29,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../backend/gravix_token_provider.dart';
+import '../connect/gravix_region_media.dart' show gravixJoinMedia;
 import '../connect/gravix_standby.dart';
 import '../rtc_core/src/core/gravix_join_camera.dart';
 import '../rtc_core/src/core/gravix_join_mic.dart';
@@ -212,8 +213,11 @@ class GravixJoin {
     }
   }
 
-  GravixJoinUrlChoice _choose(GravixJoinCredentials c) {
-    var choice = gravixJoinUrl(c);
+  /// [request]'s media ([GravixTokenRequest.media], default video), promoted to
+  /// video by a join camera or the token's video grant (gravixJoinMedia).
+  GravixJoinUrlChoice _choose(GravixJoinCredentials c, GravixTokenRequest request, {bool camera = false}) {
+    final media = gravixJoinMedia(declared: request.media, enableVideo: camera, token: c.token);
+    var choice = gravixJoinUrl(c, media: media);
     final sb = _standbyUrlByToken[c.token];
     if (sb != null) {
       choice = choice.withStandby(
@@ -256,7 +260,7 @@ class GravixJoin {
     try {
       final c = await tokenProvider.getCredentials(request);
       _clearRefused(request);
-      final choice = _choose(c);
+      final choice = _choose(c, request);
       final id = roomId ?? request.room;
       switch (role) {
         case GravixStandbyRole.touched:
@@ -482,7 +486,7 @@ class GravixJoin {
           rethrow;
         }
         handle.mark(GravixJoinEventKind.tokenReady, c.fromCache ? 'cached' : 'fetched');
-        final choice = _choose(c);
+        final choice = _choose(c, request, camera: joinCamera != null);
         handle.mark(
           GravixJoinEventKind.urlChosen,
           '${choice.region ?? '-'} ${choice.source.name}',

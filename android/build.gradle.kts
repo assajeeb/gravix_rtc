@@ -26,6 +26,12 @@ plugins {
     id("com.android.library")
 }
 
+// Studio noise suppression (DeepFilterNet3 on a private ONNX Runtime, arm64-v8a
+// only, ~5.8 MB). An app drops it with `gravixNsStudio=false` in its
+// gradle.properties: RNNoise stays (libgxns, ~125-160 KB per ABI).
+val gravixNsStudio: Boolean = (findProperty("gravixNsStudio") ?: rootProject.findProperty("gravixNsStudio"))
+    ?.toString()?.toBoolean() ?: true
+
 android {
     namespace = "com.gravitycompile.gravix_cloud"
 
@@ -39,6 +45,9 @@ android {
     sourceSets {
         getByName("main") {
             java.srcDirs("src/main/kotlin")
+            // arm64-v8a only: libgxort.so (ORT), libgxns_dfn3_std.so (the model),
+            // libgxns_dfn3_bench.so / _ref.so (benchmark clip + reference output)
+            if (gravixNsStudio) jniLibs.srcDirs("src/studio/jniLibs")
         }
         getByName("test") {
             java.srcDirs("src/test/kotlin")
@@ -47,6 +56,23 @@ android {
 
     defaultConfig {
         minSdk = 24
+        // libgxns.so (on-device noise suppression, RNNoise). Other ABIs (x86)
+        // get no library: GxNsNative falls back to "off" with a reason.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=none", "-DGXNS_STUDIO=" + (if (gravixNsStudio) "ON" else "OFF"))
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     testOptions {

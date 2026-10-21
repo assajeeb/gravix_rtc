@@ -38,6 +38,7 @@ import 'engine_mic_mute.dart';
 import 'local.dart';
 import 'mic_uplink_pause.dart';
 import 'music_voice_mute.dart';
+import '../../../../noise/gravix_noise_controller.dart' show GravixNoiseSuppression;
 
 class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMixin {
   // Options used for this track
@@ -343,10 +344,15 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
   /// Creates a new audio track from the default audio input device.
   static Future<LocalAudioTrack> create([track_options.AudioCaptureOptions? options]) async {
-    options ??= const track_options.AudioCaptureOptions();
+    final base = options ?? const track_options.AudioCaptureOptions();
+    // GRAVIX (noise suppression, 2026-10-21): while our NS runs, WebRTC's
+    // software NS / AGC (and the Android platform NS) are decided here, before
+    // the capture starts (unchanged when Gravix NS is off or not configured).
+    options = GravixNoiseSuppression.instance.adjustCapture(base);
     final stream = await LocalTrack.createStream(options);
 
     final track = LocalAudioTrack(TrackSource.microphone, stream, stream.getAudioTracks().first, options);
+    GravixNoiseSuppression.instance.trackCreated(track, base);
 
     try {
       if (options.processor != null) {

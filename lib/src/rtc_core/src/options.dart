@@ -14,7 +14,9 @@
 // limitations under the License.
 
 import 'package:flutter/services.dart' show AssetBundle, rootBundle;
+import 'package:meta/meta.dart' show internal;
 
+import '../../noise/gravix_noise_options.dart';
 import 'constants.dart';
 import 'core/reconnect_policy.dart';
 import 'e2ee/options.dart';
@@ -352,6 +354,14 @@ class RoomOptions {
   /// [GravixRecoveryOptions].
   final GravixRecoveryOptions recovery;
 
+  /// GRAVIX (2026-10-21): on-device noise suppression for the microphone
+  /// (RNNoise / DeepFilterNet3). Applied by [Room.connect] before the
+  /// microphone is created. ON by default: `GravixNoiseSuppressionOptions()`
+  /// (mode auto). Turn it off with [GravixNoiseSuppressionOptions.off]
+  /// (WebRTC's own NS, the pre-2026-10-21 sound). An explicit `null` leaves
+  /// the noise suppression as it is (off when never configured).
+  final GravixNoiseSuppressionOptions? noiseSuppression;
+
   const RoomOptions({
     this.defaultCameraCaptureOptions = const CameraCaptureOptions(),
     this.defaultScreenShareCaptureOptions = const ScreenShareCaptureOptions(),
@@ -370,6 +380,7 @@ class RoomOptions {
     this.networkOptions = const NetworkOptions(),
     this.foregroundService,
     this.recovery = const GravixRecoveryOptions(),
+    this.noiseSuppression = const GravixNoiseSuppressionOptions(),
   });
 
   RoomOptions copyWith({
@@ -389,6 +400,7 @@ class RoomOptions {
     ReconnectPolicy? reconnectPolicy,
     GravixForegroundServiceOptions? foregroundService,
     GravixRecoveryOptions? recovery,
+    GravixNoiseSuppressionOptions? noiseSuppression,
   }) {
     return RoomOptions(
       defaultCameraCaptureOptions: defaultCameraCaptureOptions ?? this.defaultCameraCaptureOptions,
@@ -408,6 +420,7 @@ class RoomOptions {
       reconnectPolicy: reconnectPolicy ?? this.reconnectPolicy,
       foregroundService: foregroundService ?? this.foregroundService,
       recovery: recovery ?? this.recovery,
+      noiseSuppression: noiseSuppression ?? this.noiseSuppression,
     );
   }
 }
@@ -575,6 +588,11 @@ class AudioPublishOptions extends PublishOptions {
   /// Used to populate protobuf audioFeatures (TF_PRECONNECT_BUFFER).
   final bool preConnect;
 
+  /// GRAVIX: publish this audio as stereo (opus stereo=1, no DTX), e.g. music
+  /// captured in stereo. Default false: mono, with [dtx]. Explicit, because a
+  /// bitrate cannot tell a stereo preset from a 64 kbps mono microphone.
+  final bool stereo;
+
   const AudioPublishOptions({
     super.name,
     super.stream,
@@ -582,6 +600,7 @@ class AudioPublishOptions extends PublishOptions {
     this.dtx = true,
     this.red = true,
     this.preConnect = false,
+    this.stereo = false,
   });
 
   AudioPublishOptions copyWith({
@@ -591,6 +610,7 @@ class AudioPublishOptions extends PublishOptions {
     String? stream,
     bool? red,
     bool? preConnect,
+    bool? stereo,
   }) => AudioPublishOptions(
     encoding: encoding ?? this.encoding,
     dtx: dtx ?? this.dtx,
@@ -598,11 +618,22 @@ class AudioPublishOptions extends PublishOptions {
     stream: stream ?? this.stream,
     red: red ?? this.red,
     preConnect: preConnect ?? this.preConnect,
+    stereo: stereo ?? this.stereo,
   );
 
   @override
-  String toString() => '${runtimeType}(encoding: ${encoding}, dtx: ${dtx}, red: ${red}, preConnect: ${preConnect})';
+  String toString() =>
+      '${runtimeType}(encoding: ${encoding}, dtx: ${dtx}, red: ${red}, preConnect: ${preConnect}, stereo: ${stereo})';
 }
+
+/// GRAVIX (2026-10-21, DTX): what an audio publication sends, for the AddTrack
+/// request and the publisher's answer pin. [AudioPublishOptions.stereo] publishes
+/// stereo and without DTX (the JS SDK's rule for stereo); everything else is mono
+/// with the [AudioPublishOptions.dtx] option. Not by bitrate: the room service's
+/// 64 kbps mono microphone has the bitrate of [AudioEncoding.presetMusicStereo].
+@internal
+({bool stereo, bool dtx}) gravixOpusPublishShape(AudioPublishOptions options) =>
+    (stereo: options.stereo, dtx: options.stereo ? false : options.dtx);
 
 final backupCodecs = ['vp8', 'h264'];
 

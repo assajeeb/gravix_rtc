@@ -7,6 +7,7 @@ import 'package:gravix_rtc/gravix_rtc.dart';
 
 import 'echo_variants.dart';
 import 'harness.dart';
+import 'ns_panel.dart';
 
 Future<void> main() async {
   final appStartedAt = DateTime.now();
@@ -173,7 +174,9 @@ class _MeetingHome extends StatefulWidget {
 }
 
 class _MeetingHomeState extends State<_MeetingHome> {
-  final _room = GravixRoomService();
+  // Noise suppression on (auto: RNNoise, DeepFilterNet3 where the device
+  // benchmark passes); the call screen has the mode toggle.
+  final _room = GravixRoomService(noiseSuppression: const GravixNoiseSuppressionOptions());
 
   // Empty on purpose: the server url comes from the token response
   // ({token, url}). Only a pasted token needs one typed here.
@@ -635,6 +638,7 @@ class _CallView extends StatelessWidget {
               right: 8,
               child: _Diagnostics(room: room, fallback: fallback),
             ),
+            const Positioned(left: 8, right: 8, bottom: 96, child: NoiseSuppressionPanel()),
             Positioned(
               left: 0,
               right: 0,

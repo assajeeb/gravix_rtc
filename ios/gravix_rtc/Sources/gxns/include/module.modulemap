@@ -1,0 +1,5 @@
+module gxns {
+    header "gx_ns.h"
+    header "gxns_ios.h"
+    export *
+}

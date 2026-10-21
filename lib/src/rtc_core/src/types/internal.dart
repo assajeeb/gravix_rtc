@@ -29,4 +29,7 @@ enum ClientDisconnectReason {
   // GRAVIX (0.4.15): a subscribed video stopped (R1) / decoded nothing after a
   // resume (S4); see GravixVideoStallWatch
   mediaStalled,
+  // GRAVIX (2026-10-21): the node refused a medium (media_not_allowed); the
+  // session moves to a region taking it (Engine.gravixRestartTo)
+  mediaRefusal,
 }

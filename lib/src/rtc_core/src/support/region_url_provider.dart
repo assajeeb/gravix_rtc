@@ -3,6 +3,8 @@ import 'dart:convert' show json;
 import 'package:fixnum/fixnum.dart';
 
 import '../../../connect/gravix_region_failover.dart'; // GRAVIX (0.4.15)
+import '../../../connect/gravix_region_media.dart' show GravixRoomMedia, gravixRegionAllowsMedia; // GRAVIX (2026-10-21)
+import '../../../connect/gravix_region_report.dart' show GravixRegionUrl;
 import '../exceptions.dart';
 import '../logger.dart';
 import '../options.dart';
@@ -23,6 +25,10 @@ class RegionUrlProvider {
   int lastUpdateAt = 0;
 
   int settingsCacheTime = 5000; // 5 seconds
+
+  /// GRAVIX (2026-10-21, per-region media): the join's media; with
+  /// measuredOrder the regions that allow it go first (gravixOrderFailoverRegions).
+  GravixRoomMedia? media;
 
   RegionUrlProvider({required String url, required this.token, this.networkOptions = const NetworkOptions()})
     : serverUrl = Uri.parse(url);
@@ -105,9 +111,16 @@ class RegionUrlProvider {
       bool isCurrent(lk_models.RegionInfo r) => current != null && gravixNormalizeRegionUrl(r.url) == current;
       final others = regionsLeft.where((r) => !isCurrent(r)).toList();
       regionsLeft = [
-        ...gravixOrderFailoverRegions(others, regionOf: (r) => r.region, urlOf: (r) => r.url),
+        ...gravixOrderFailoverRegions(others, regionOf: (r) => r.region, urlOf: (r) => r.url, media: media),
         ...regionsLeft.where(isCurrent),
       ];
+    }
+    final m = media;
+    if (!measuredOrder && m != null && regionsLeft != null) {
+      // GRAVIX (2026-10-21): the server's order, regions not taking the media last
+      final left = regionsLeft.toList();
+      bool allows(lk_models.RegionInfo r) => gravixRegionAllowsMedia(GravixRegionUrl(region: r.region, url: r.url), m);
+      regionsLeft = [...left.where(allows), ...left.where((r) => !allows(r))];
     }
     if (regionsLeft?.isNotEmpty ?? false) {
       final nextRegion = regionsLeft!.first;

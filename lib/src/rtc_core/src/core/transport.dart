@@ -176,6 +176,94 @@ void applyVideoStartBitrate(Map<String, dynamic> media, int codecPayload, int st
   media['fmtp'] = fmtpList;
 }
 
+/// GRAVIX (2026-10-21, DTX): the answer's opus fmtp for one of our published
+/// audio sections: `usedtx=1` when [dtx] is on (removed when off), `stereo=1`
+/// only for a stereo publication. Other parameters are kept. Same rule as the
+/// JS SDK's mungeOpusAnswerFmtp.
+@internal
+String gravixMungeOpusAnswerFmtp(String config, {required bool dtx, required bool stereo}) {
+  bool keep(String attr, String name) => attr.split('=').first.trim() != name;
+  final attrs = config
+      .split(';')
+      .map((a) => a.trim())
+      .where((a) => a.isNotEmpty && keep(a, 'usedtx') && keep(a, 'stereo'))
+      .toList();
+  if (dtx) attrs.add('usedtx=1');
+  if (stereo) attrs.add('stereo=1');
+  return attrs.join(';');
+}
+
+/// What we publish on an audio section, for the answer pin.
+@internal
+class GravixOpusPin {
+  const GravixOpusPin({required this.dtx, this.stereo = false});
+  final bool dtx;
+  final bool stereo;
+}
+
+/// GRAVIX (2026-10-21, DTX): pins the opus fmtp of our published audio sections
+/// in the publisher's [answerSdp]. The SFU sometimes answers the mic section by
+/// mirroring the offer (`stereo=1`, no `usedtx`): DTX off, a silent mic sent
+/// ~37 kbps. [midCid] maps our offer's audio mids to the track cid in their
+/// msid; [pins] is per cid. Null when nothing changes, or when the pin would give
+/// one bundled payload type two different fmtp lines (libwebrtc rejects that):
+/// the answer is then applied as it came.
+@internal
+String? gravixPinOpusAnswer(String answerSdp, Map<String, String> midCid, Map<String, GravixOpusPin> pins) {
+  if (pins.isEmpty || midCid.isEmpty) return null;
+  final parsed = sdp_transform.parse(answerSdp);
+  final media = (parsed['media'] as List?) ?? const [];
+  var changed = false;
+  for (final m in media) {
+    if (m['type'] != 'audio') continue;
+    final cid = midCid['${m['mid']}'];
+    final pin = cid == null ? null : pins[cid];
+    if (pin == null) continue;
+    int? opus;
+    for (final rtp in (m['rtp'] as List? ?? const [])) {
+      if ((rtp['codec'] as String?)?.toLowerCase() == 'opus') {
+        opus = rtp['payload'] as int?;
+        break;
+      }
+    }
+    if (opus == null) continue;
+    final fmtps = (m['fmtp'] as List?) ?? <dynamic>[];
+    var found = false;
+    for (final f in fmtps) {
+      if (f['payload'] == opus) {
+        final next = gravixMungeOpusAnswerFmtp('${f['config'] ?? ''}', dtx: pin.dtx, stereo: pin.stereo);
+        if (next != f['config']) {
+          f['config'] = next;
+          changed = true;
+        }
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      final config = gravixMungeOpusAnswerFmtp('', dtx: pin.dtx, stereo: pin.stereo);
+      if (config.isNotEmpty) {
+        fmtps.add(<String, dynamic>{'payload': opus, 'config': config});
+        m['fmtp'] = fmtps;
+        changed = true;
+      }
+    }
+  }
+  if (!changed) return null;
+  // one payload type, one fmtp across the bundle
+  final byPayload = <int, String>{};
+  for (final m in media) {
+    for (final f in (m['fmtp'] as List? ?? const [])) {
+      final pt = f['payload'] as int?;
+      if (pt == null) continue;
+      final prev = byPayload[pt];
+      if (prev != null && prev != '${f['config']}') return null;
+      byPayload[pt] = '${f['config']}';
+    }
+  }
+  return sdp_transform.write(parsed, null);
+}
+
 typedef TransportOnOffer = void Function(rtc.RTCSessionDescription offer);
 typedef TransportOnNegotiationError = void Function(Object error);
 typedef PeerConnectionCreate =
@@ -186,6 +274,34 @@ class Transport extends Disposable {
   final rtc.RTCPeerConnection pc;
   final List<rtc.RTCIceCandidate> _pendingCandidates = [];
   final List<TrackBitrateInfo> _bitrateTrackers = [];
+
+  /// GRAVIX (2026-10-21, DTX): what each published audio track (by cid) wants
+  /// in the answer, and our last offer's audio mid -> cid (see
+  /// [gravixPinOpusAnswer]).
+  final Map<String, GravixOpusPin> _opusPins = {};
+  Map<String, String> _audioMidCid = const {};
+
+  /// An audio publication's answer pin: `usedtx=1` unless [dtx] is off, `stereo`
+  /// only when [stereo]. Kept per cid (a republish replaces it).
+  void gravixSetOpusPin(String cid, {required bool dtx, bool stereo = false}) {
+    _opusPins[cid] = GravixOpusPin(dtx: dtx, stereo: stereo);
+  }
+
+  void _noteAudioMids(Map<String, dynamic> sdpParsed) {
+    final map = <String, String>{};
+    for (final m in (sdpParsed['media'] as List? ?? const [])) {
+      if (m['type'] != 'audio') continue;
+      final msid = m['msid'];
+      if (msid is! String) continue;
+      for (final cid in _opusPins.keys) {
+        if (msid.contains(cid)) {
+          map['${m['mid']}'] = cid;
+          break;
+        }
+      }
+    }
+    _audioMidCid = map;
+  }
 
   /// GRAVIX (0.4.15): GravixRecoveryOptions.startBitrateBySetupTime, set by the
   /// engine. False: the 0.4.14 per-track hint.
@@ -405,7 +521,23 @@ class Transport extends Disposable {
     // read have-local-offer has set [renegotiate] before it is read below).
     await _serialised('remote', () async {
       try {
-        await pc.setRemoteDescription(sd);
+        // GRAVIX (2026-10-21, DTX): our audio sections' opus fmtp pinned
+        final pinned = sd.type == 'answer' ? gravixPinOpusAnswer(sd.sdp ?? '', _audioMidCid, _opusPins) : null;
+        if (pinned != null) {
+          try {
+            await pc.setRemoteDescription(rtc.RTCSessionDescription(pinned, 'answer'));
+            GravixPubLog.step('answerPin', pc: gravixLogLabel, detail: 'opus usedtx/stereo pinned');
+          } catch (e) {
+            GravixPubLog.step(
+              'answerPin',
+              pc: gravixLogLabel,
+              detail: 'refused (${GravixPubLog.reason(e)}), as answered',
+            );
+            await pc.setRemoteDescription(sd);
+          }
+        } else {
+          await pc.setRemoteDescription(sd);
+        }
         _remoteSet = true;
         if (sd.type == 'answer') _offerPending = false;
         GravixPubLog.step(
@@ -572,6 +704,7 @@ class Transport extends Disposable {
     }
 
     final sdpParsed = sdp_transform.parse(offer.sdp ?? '');
+    _noteAudioMids(sdpParsed);
     if (gravixConnectionLevelStartBitrate) {
       await _setOfferWithConnectionStartBitrate(offer, sdpParsed);
       _noteLocalOffer(senders, iceRestart, covers, offer.sdp);

@@ -1,0 +1,1638 @@
+{
+ "_comment": "Shared by the Flutter (test/fixtures) and JS (test/fixtures) SDK tests: noise-suppression engine resolver, policy parser, [GravixNS] log lines, benchmark cache key, defaults. Edit BOTH copies together (must stay byte-identical). The C core's test (native/gxns/tests/test_agc.c) also reads defaults.agcOrder. 2026-10-21 (studio benchmarks too: studio_too_slow; studio atten limit + rolling-p95 fallback + LL opt-in defaults, also pinned by native/gxns/tests/test_external.c). 2026-10-21 owner: NS is ON (mode auto) by default in every SDK entry point (enabledByDefault); apps opt out with mode off.",
+ "defaults": {
+  "enabledByDefault": true,
+  "mode": "auto",
+  "agcOrder": "ownAfterNs",
+  "disableWebRtcNs": true,
+  "hardwareNs": "off",
+  "headsetNs": "keepOurs",
+  "musicBypass": true,
+  "studioDownload": "unmeteredIdle",
+  "studioSource": "auto",
+  "benchmarkP95Us": 3000,
+  "watchdogFrameMs": 8,
+  "watchdogConsecutive": 3,
+  "thermalFallback": true,
+  "batterySaverFallback": true,
+  "studioAttenLimitDb": 40,
+  "studioP95BudgetUs": 3000,
+  "studioP95WindowMs": 2000,
+  "studioLowLatency": false
+ },
+ "policies": {
+  "kill_all": {
+   "version": 1,
+   "killSwitch": {
+    "all": true
+   }
+  },
+  "kill_studio": {
+   "version": 1,
+   "killSwitch": {
+    "studio": true
+   }
+  },
+  "fleet": {
+   "version": 1,
+   "killSwitch": {
+    "all": false,
+    "studio": false
+   },
+   "studio": {
+    "allow": [
+     {
+      "platform": "android",
+      "soc": "SM7*"
+     }
+    ],
+    "deny": [
+     {
+      "platform": "android",
+      "manufacturer": "infinix"
+     },
+     {
+      "platform": "web",
+      "uaRegex": "Firefox/\\d+"
+     }
+    ]
+   },
+   "standard": {
+    "deny": [
+     {
+      "platform": "android",
+      "model": "BADPHONE*"
+     },
+     {
+      "platform": "ios",
+      "osMax": "14.9"
+     }
+    ]
+   },
+   "thresholds": {
+    "benchmarkP95Us": 2500
+   }
+  }
+ },
+ "resolve": [
+  {
+   "name": "off is off",
+   "mode": "off",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "off",
+    "reason": "mode_off",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "standard = rnnoise",
+   "mode": "standard",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "mode_standard",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "studio without the DFN pack -> rnnoise studio_unavailable (owner 2026-10-21)",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "studio_unavailable",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "studio with the pack, no benchmark yet: rnnoise while it runs (owner 2026-10-21: studio still benchmarks)",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "studio, fast cached benchmark -> dfn3 mode_studio",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "mode_studio",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "studio, slow benchmark -> rnnoise studio_too_slow",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 4200,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "studio_too_slow",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "studio, stale benchmark key -> re-run",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.19|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "studio, bad benchmark output -> rnnoise benchmark_bad_output",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": false
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_bad_output",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "studio skips the static check (2 GB RAM, fast benchmark) -> dfn3",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "mode_studio",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, capable phone, no pack yet",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "studio_unavailable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, pack present, never benchmarked",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, fast benchmark -> dfn3",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "auto_capable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, benchmark from an older SDK/model/OS is stale",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.19|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, benchmark p95 at the 3 ms limit is slow",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 3000
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_slow",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, benchmark output failed the RMS check",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 900,
+    "outputOk": false
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_bad_output",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, app benchmarkP95 option 2 ms",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 2100
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "benchmarkP95Us": 2000,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_slow",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, 32-bit ABI (Infinix low-end)",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "X6525",
+    "manufacturer": "INFINIX",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "armeabi-v7a",
+    "ramMb": 2048,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_abi",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "auto, 3 GB RAM",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 3072,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_low_ram",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "auto, isLowRamDevice",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": true,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_low_ram_device",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "auto, slow big core",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 1800
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_slow_cpu",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "auto, media performance class 33 passes the static check by itself",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 3072,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 33,
+    "cpuMaxFreqMhz": 1800
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "auto_capable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "auto, unknown RAM/CPU: the benchmark decides",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "abi": "arm64-v8a"
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "kill switch: all off (android)",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "kill_all",
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "off",
+    "reason": "kill_switch",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "kill switch: all off (web -> browser NS)",
+   "mode": "standard",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 (Macintosh) Chrome/129.0",
+    "hardwareConcurrency": 8,
+    "deviceMemoryGb": 8,
+    "wasmSimd": true,
+    "audioWorklet": true
+   },
+   "policy": "kill_all",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "browser",
+    "reason": "kill_switch",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "kill switch even beats mode standard",
+   "mode": "standard",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "kill_all",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "off",
+    "reason": "kill_switch",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "studio kill switch keeps standard",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "kill_studio",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "kill_switch_studio",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "mode off wins over everything",
+   "mode": "off",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "kill_all",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "off",
+    "reason": "mode_off",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "fleet: Infinix studio deny",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "INFINIX",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "fleet",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "policy_deny_studio",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "fleet: SM7* allow-listed skips the static check",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM7435",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 3072,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 1800
+   },
+   "policy": "fleet",
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 2000
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "auto_capable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "fleet: policy threshold 2.5 ms",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM7435",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "fleet",
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 2700
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_slow",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "fleet: policy threshold beats the app option",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "fleet",
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 2300
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "benchmarkP95Us": 2000,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "auto_capable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "fleet: BADPHONE* gets no Gravix NS",
+   "mode": "standard",
+   "facts": {
+    "platform": "android",
+    "model": "badphone-x2",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200
+   },
+   "policy": "fleet",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "off",
+    "reason": "policy_deny_standard",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "fleet: iOS <= 14.9 standard deny",
+   "mode": "auto",
+   "facts": {
+    "platform": "ios",
+    "model": "iPhone14,2",
+    "osVersion": "14.2"
+   },
+   "policy": "fleet",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "off",
+    "reason": "policy_deny_standard",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "fleet: iOS 15.0 is outside osMax",
+   "mode": "standard",
+   "facts": {
+    "platform": "ios",
+    "model": "iPhone14,2",
+    "osVersion": "15.0"
+   },
+   "policy": "fleet",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "mode_standard",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "fleet: Firefox studio deny",
+   "mode": "studio",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 Firefox/131.0",
+    "hardwareConcurrency": 8,
+    "deviceMemoryGb": 8,
+    "wasmSimd": true,
+    "audioWorklet": true
+   },
+   "policy": "fleet",
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "policy_deny_studio",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "iPhone A15 auto, fast benchmark",
+   "mode": "auto",
+   "facts": {
+    "platform": "ios",
+    "model": "iPhone14,2",
+    "osVersion": "17.4"
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "auto_capable",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "iPhone X (A11) auto",
+   "mode": "auto",
+   "facts": {
+    "platform": "ios",
+    "model": "iPhone10,3",
+    "osVersion": "17.4"
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_old_chip",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "iOS simulator: chip unknown, benchmark decides",
+   "mode": "auto",
+   "facts": {
+    "platform": "ios",
+    "model": "arm64",
+    "osVersion": "17.4"
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "web without AudioWorklet -> browser NS",
+   "mode": "auto",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 (Macintosh) Chrome/129.0",
+    "hardwareConcurrency": 8,
+    "deviceMemoryGb": 8,
+    "wasmSimd": true,
+    "audioWorklet": false
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "browser",
+    "reason": "no_audio_worklet",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "web without WASM SIMD",
+   "mode": "auto",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 (Macintosh) Chrome/129.0",
+    "hardwareConcurrency": 8,
+    "deviceMemoryGb": 8,
+    "wasmSimd": false,
+    "audioWorklet": true
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_no_simd",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "web 2 cores",
+   "mode": "auto",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 (Macintosh) Chrome/129.0",
+    "hardwareConcurrency": 2,
+    "deviceMemoryGb": 8,
+    "wasmSimd": true,
+    "audioWorklet": true
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_few_cores",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "web 2 GB deviceMemory",
+   "mode": "auto",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 (Macintosh) Chrome/129.0",
+    "hardwareConcurrency": 8,
+    "deviceMemoryGb": 2,
+    "wasmSimd": true,
+    "audioWorklet": true
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_low_memory",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "web Safari (no deviceMemory): benchmark decides",
+   "mode": "auto",
+   "facts": {
+    "platform": "web",
+    "userAgent": "Mozilla/5.0 Safari/605.1.15",
+    "hardwareConcurrency": 8,
+    "wasmSimd": true,
+    "audioWorklet": true
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "benchmark_pending",
+    "needsBenchmark": true,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "Bluetooth SCO route: auto stays on rnnoise",
+   "mode": "auto",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200,
+    "narrowbandRoute": true
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "narrowband_route",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "Bluetooth SCO route: explicit studio still allowed (BT matrix)",
+   "mode": "studio",
+   "facts": {
+    "platform": "android",
+    "model": "23127PN0CG",
+    "manufacturer": "Xiaomi",
+    "soc": "SM8550",
+    "osVersion": "14",
+    "abi": "arm64-v8a",
+    "ramMb": 8192,
+    "isLowRamDevice": false,
+    "mediaPerformanceClass": 0,
+    "cpuMaxFreqMhz": 3200,
+    "narrowbandRoute": true
+   },
+   "policy": null,
+   "benchmark": {
+    "key": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+    "p95Us": 1800,
+    "outputOk": true
+   },
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": true,
+   "expect": {
+    "engine": "dfn3",
+    "reason": "mode_studio",
+    "needsBenchmark": false,
+    "studioEligible": true
+   }
+  },
+  {
+   "name": "desktop/other platform: auto",
+   "mode": "auto",
+   "facts": {
+    "platform": "other"
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "static_platform",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  },
+  {
+   "name": "desktop/other platform: standard",
+   "mode": "standard",
+   "facts": {
+    "platform": "other"
+   },
+   "policy": null,
+   "benchmark": null,
+   "benchmarkKey": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1",
+   "studioAvailable": false,
+   "expect": {
+    "engine": "rnnoise",
+    "reason": "mode_standard",
+    "needsBenchmark": false,
+    "studioEligible": false
+   }
+  }
+ ],
+ "parse": [
+  {
+   "name": "fleet policy",
+   "source": {
+    "version": 1,
+    "killSwitch": {
+     "all": false,
+     "studio": false
+    },
+    "studio": {
+     "allow": [
+      {
+       "platform": "android",
+       "soc": "SM7*"
+      }
+     ],
+     "deny": [
+      {
+       "platform": "android",
+       "manufacturer": "infinix"
+      },
+      {
+       "platform": "web",
+       "uaRegex": "Firefox/\\d+"
+      }
+     ]
+    },
+    "standard": {
+     "deny": [
+      {
+       "platform": "android",
+       "model": "BADPHONE*"
+      },
+      {
+       "platform": "ios",
+       "osMax": "14.9"
+      }
+     ]
+    },
+    "thresholds": {
+     "benchmarkP95Us": 2500
+    }
+   },
+   "expect": {
+    "ok": true,
+    "killAll": false,
+    "killStudio": false,
+    "studioAllow": 1,
+    "studioDeny": 2,
+    "standardDeny": 2,
+    "skipped": 0,
+    "benchmarkP95Us": 2500
+   }
+  },
+  {
+   "name": "empty object = defaults",
+   "source": {},
+   "expect": {
+    "ok": true,
+    "killAll": false,
+    "killStudio": false,
+    "studioAllow": 0,
+    "studioDeny": 0,
+    "standardDeny": 0,
+    "skipped": 0,
+    "benchmarkP95Us": null
+   }
+  },
+  {
+   "name": "kill switch as a JSON string",
+   "source": "{\"version\":1,\"killSwitch\":{\"all\":true}}",
+   "expect": {
+    "ok": true,
+    "killAll": true,
+    "killStudio": false,
+    "studioAllow": 0,
+    "studioDeny": 0,
+    "standardDeny": 0,
+    "skipped": 0,
+    "benchmarkP95Us": null
+   }
+  },
+  {
+   "name": "truthy strings are not true",
+   "source": {
+    "killSwitch": {
+     "all": "yes",
+     "studio": 1
+    }
+   },
+   "expect": {
+    "ok": true,
+    "killAll": false,
+    "killStudio": false,
+    "studioAllow": 0,
+    "studioDeny": 0,
+    "standardDeny": 0,
+    "skipped": 0,
+    "benchmarkP95Us": null
+   }
+  },
+  {
+   "name": "malformed rules are skipped",
+   "source": {
+    "studio": {
+     "deny": [
+      {
+       "model": "x"
+      },
+      {
+       "platform": "web",
+       "uaRegex": "("
+      },
+      {
+       "platform": "ios",
+       "osMin": "abc"
+      },
+      {
+       "platform": "android"
+      },
+      "nope"
+     ]
+    }
+   },
+   "expect": {
+    "ok": true,
+    "killAll": false,
+    "killStudio": false,
+    "studioAllow": 0,
+    "studioDeny": 1,
+    "standardDeny": 0,
+    "skipped": 4,
+    "benchmarkP95Us": null
+   }
+  },
+  {
+   "name": "bad threshold types are ignored",
+   "source": {
+    "thresholds": {
+     "benchmarkP95Us": "fast",
+     "minRamMb": 4096.0
+    }
+   },
+   "expect": {
+    "ok": true,
+    "killAll": false,
+    "killStudio": false,
+    "studioAllow": 0,
+    "studioDeny": 0,
+    "standardDeny": 0,
+    "skipped": 0,
+    "benchmarkP95Us": null
+   }
+  },
+  {
+   "name": "broken JSON",
+   "source": "{\"version\":",
+   "expect": {
+    "ok": false,
+    "error": "bad_json"
+   }
+  },
+  {
+   "name": "array root",
+   "source": [
+    1,
+    2
+   ],
+   "expect": {
+    "ok": false,
+    "error": "not_an_object"
+   }
+  },
+  {
+   "name": "newer schema",
+   "source": {
+    "version": 2
+   },
+   "expect": {
+    "ok": false,
+    "error": "unsupported_version: 2"
+   }
+  }
+ ],
+ "log": [
+  {
+   "step": "install",
+   "engine": "rnnoise",
+   "route": "speaker",
+   "rate": 48000,
+   "expect": "[GravixNS] install eng=rnnoise route=speaker rate=48000"
+  },
+  {
+   "step": "init",
+   "engine": "off",
+   "route": "bt-sco",
+   "rate": null,
+   "elapsedMs": 12,
+   "detail": "apm=16000 bands=1",
+   "expect": "[GravixNS] init eng=off route=bt-sco rate=? +12ms apm=16000 bands=1"
+  },
+  {
+   "step": "switch",
+   "engine": "rnnoise",
+   "route": "wired",
+   "rate": 48000,
+   "elapsedMs": 0,
+   "switch": {
+    "from": "dfn3",
+    "to": "rnnoise",
+    "reason": "watchdog"
+   },
+   "expect": "[GravixNS] switch eng=rnnoise route=wired rate=48000 +0ms from=dfn3 to=rnnoise reason=watchdog"
+  },
+  {
+   "step": "summary",
+   "engine": "dfn3",
+   "route": "bt-a2dp",
+   "rate": 48000,
+   "summary": {
+    "p50Us": 812,
+    "p95Us": 1430,
+    "p99Us": 2210,
+    "maxUs": 5120,
+    "overBudget": 0,
+    "cpuPercent": 2.04
+   },
+   "expect": "[GravixNS] summary eng=dfn3 route=bt-a2dp rate=48000 p50=812 p95=1430 p99=2210 max=5120 over=0 cpu=2.0"
+  },
+  {
+   "step": "summary",
+   "engine": "browser",
+   "route": "usb",
+   "rate": 44100,
+   "summary": {
+    "p50Us": 1,
+    "p95Us": 2,
+    "p99Us": 3,
+    "maxUs": 4,
+    "overBudget": 5
+   },
+   "expect": "[GravixNS] summary eng=browser route=usb rate=44100 p50=1 p95=2 p99=3 max=4 over=5"
+  },
+  {
+   "step": "routeReset",
+   "engine": "rnnoise",
+   "route": "bt-le",
+   "rate": 0,
+   "expect": "[GravixNS] routeReset eng=rnnoise route=bt-le rate=?"
+  },
+  {
+   "step": "policy",
+   "engine": "rnnoise",
+   "route": "nonsense",
+   "rate": 48000,
+   "detail": "src=cache",
+   "expect": "[GravixNS] policy eng=rnnoise route=unknown rate=48000 src=cache"
+  }
+ ],
+ "benchmarkKey": [
+  {
+   "input": {
+    "sdkVersion": "0.4.20",
+    "modelSha256": "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+    "runtimeVersion": "ort-1.20.1",
+    "osBuild": "Xiaomi/fuxi/fuxi:14/UKQ1"
+   },
+   "expect": "ns-bench/v1|sdk=0.4.20|model=0123456789abcdef|rt=ort-1.20.1|os=Xiaomi/fuxi/fuxi:14/UKQ1"
+  },
+  {
+   "input": {
+    "sdkVersion": "0.6.10",
+    "modelSha256": "abc",
+    "runtimeVersion": "wasm-simd",
+    "osBuild": "Chrome 129|macOS 50%"
+   },
+   "expect": "ns-bench/v1|sdk=0.6.10|model=abc|rt=wasm-simd|os=Chrome 129%7CmacOS 50%25"
+  }
+ ],
+ "iosChip": [
+  [
+   "iPhone11,2",
+   12
+  ],
+  [
+   "iPhone10,3",
+   11
+  ],
+  [
+   "iPhone14,2",
+   15
+  ],
+  [
+   "iPhone17,1",
+   18
+  ],
+  [
+   "iPad8,1",
+   12
+  ],
+  [
+   "iPad11,1",
+   12
+  ],
+  [
+   "iPad13,4",
+   14
+  ],
+  [
+   "iPad7,5",
+   10
+  ],
+  [
+   "arm64",
+   null
+  ],
+  [
+   "x86_64",
+   null
+  ],
+  [
+   "Mac14,2",
+   null
+  ]
+ ]
+}

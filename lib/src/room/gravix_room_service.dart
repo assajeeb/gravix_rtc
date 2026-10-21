@@ -22,12 +22,15 @@ import '../connect/gravix_join_timeline_log.dart';
 import '../connect/gravix_prewarm.dart';
 import '../connect/gravix_init_measure.dart';
 import '../connect/gravix_region_cache.dart';
+import '../connect/gravix_region_media.dart';
 import '../connect/gravix_restart_strategy.dart';
 import '../connect/gravix_region_prober.dart';
 import '../connect/gravix_region_report.dart';
 import '../connect/gravix_standby.dart';
 import '../music/gravix_music_controller.dart';
 import '../music/gravix_room_music.dart';
+import '../noise/gravix_noise_controller.dart' show GravixNoiseSuppression;
+import '../noise/gravix_noise_options.dart' show GravixNoiseSuppressionOptions;
 import '../rtc_core/gravix_client.dart';
 import '../rtc_core/src/support/http_client.dart' show sdkHttpHead;
 import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
@@ -100,6 +103,7 @@ class GravixRoomService implements GravixAudioHost {
     this.reconnectPolicy,
     this.connectOptions,
     this.recovery = const GravixRecoveryOptions(),
+    this.noiseSuppression = const GravixNoiseSuppressionOptions(),
     GravixRegionProber? regionProber,
     GravixRegionDecisionCache? regionDecisionCache,
     @visibleForTesting Future<void> Function(Room room, String url, String token)? connectRoom,
@@ -331,6 +335,14 @@ class GravixRoomService implements GravixAudioHost {
   /// = the 0.4.14 behaviour.
   final GravixRecoveryOptions recovery;
 
+  /// GRAVIX (2026-10-21): on-device noise suppression of the microphone
+  /// ([RoomOptions.noiseSuppression]); configured before the mic track is
+  /// created. ON by default (mode auto); off: [GravixNoiseSuppressionOptions.off]
+  /// (WebRTC's own NS). An explicit `null` leaves the noise suppression as it is
+  /// (off when never configured). Runtime changes:
+  /// `GravixNoiseSuppression.instance.setMode`.
+  final GravixNoiseSuppressionOptions? noiseSuppression;
+
   /// The core's connect options for every join of this service: timeouts and
   /// the join retry (`ConnectOptions.joinRetries`, default 2 retries;
   /// `ConnectOptions(joinRetries: 0)` = the 0.4.12 single attempt). Null = the
@@ -433,6 +445,9 @@ class GravixRoomService implements GravixAudioHost {
   DateTime? _probeStartedAt;
   DateTime? _connectedAt;
   List<GravixRegionUrl> _regionEntries = const [];
+
+  /// connect's `media` (reconnectWithToken keeps it).
+  GravixRoomMedia? _declaredMedia;
   Timer? _firstAudioTimeout;
   bool _firstAudioEmitted = false;
 
@@ -628,6 +643,13 @@ class GravixRoomService implements GravixAudioHost {
     // is within max(25 ms, 30 %) of the fastest region, so the join skips the
     // relay hop to the host's region. Hosts pass none. See gravixPickMeasuredRegion.
     String? homeRegion,
+    // [media] what the room uses (2026-10-21, per-region media): audio = a voice
+    //   room nobody publishes or watches video in, so the join may land on an
+    //   audio-only region (e.g. doh1); null / video (the default, the safe one)
+    //   keeps it on regions that allow video. Promoted to video by [enableVideo]
+    //   or a token that may publish the camera; a mic-only token does not demote
+    //   it (the user may still watch video). See gravix_region_media.dart.
+    GravixRoomMedia? media,
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
@@ -697,13 +719,14 @@ class GravixRoomService implements GravixAudioHost {
     //   microphone permission is already granted. Takes precedence over
     //   [earlyMicTrack]. Off = exactly the old order.
     bool publishMicOnJoin = false,
-    // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
-    //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
-    //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
-    //   RED), silence included. Speech rooms only: Opus' voice detector can treat
-    //   quiet background music as silence (singing hosts, the music mixer), so
-    //   leave it off where music matters. Kept across RED auto republishes.
-    bool dtx = false,
+    // [dtx] Opus DTX for the microphone (on by default since 2026-10-21, owner:
+    //   no audio -> send almost nothing): during silence the encoder sends a
+    //   comfort-noise frame every ~400 ms instead of 50 frames/s. Field: a seated
+    //   speaker sent ~118-128 kbps continuously (64 kbps Opus x RED), silence
+    //   included. The room music mixer turns DTX off while music plays
+    //   (disableDtxWhileMusic); pass false to keep transmitting always. Kept
+    //   across RED auto republishes.
+    bool dtx = true,
     // [foregroundService] the Android call foreground service for THIS connect
     //   (2026-10-06): keeps the mic, the room playback and room music alive in
     //   the background. Null = GravixForegroundService.defaults (disabled unless
@@ -764,6 +787,7 @@ class GravixRoomService implements GravixAudioHost {
           regionUrls: regionUrls,
           regionEntries: regionEntries,
           homeRegion: homeRegion,
+          media: media,
           regionProbe: regionProbe,
           regionDecisionCache: regionDecisionCache,
           regionReprobeOnRestart: regionReprobeOnRestart,
@@ -847,6 +871,7 @@ class GravixRoomService implements GravixAudioHost {
     // is within max(25 ms, 30 %) of the fastest region, so the join skips the
     // relay hop to the host's region. Hosts pass none. See gravixPickMeasuredRegion.
     String? homeRegion,
+    GravixRoomMedia? media,
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
@@ -916,13 +941,14 @@ class GravixRoomService implements GravixAudioHost {
     //   microphone permission is already granted. Takes precedence over
     //   [earlyMicTrack]. Off = exactly the old order.
     bool publishMicOnJoin = false,
-    // [dtx] Opus DTX for the microphone (2026-10-05, opt-in): during silence the
-    //   encoder sends a comfort-noise frame every ~400 ms instead of 50 frames/s.
-    //   Field: a seated speaker sent ~118-128 kbps continuously (64 kbps Opus x
-    //   RED), silence included. Speech rooms only: Opus' voice detector can treat
-    //   quiet background music as silence (singing hosts, the music mixer), so
-    //   leave it off where music matters. Kept across RED auto republishes.
-    bool dtx = false,
+    // [dtx] Opus DTX for the microphone (on by default since 2026-10-21, owner:
+    //   no audio -> send almost nothing): during silence the encoder sends a
+    //   comfort-noise frame every ~400 ms instead of 50 frames/s. Field: a seated
+    //   speaker sent ~118-128 kbps continuously (64 kbps Opus x RED), silence
+    //   included. The room music mixer turns DTX off while music plays
+    //   (disableDtxWhileMusic); pass false to keep transmitting always. Kept
+    //   across RED auto republishes.
+    bool dtx = true,
     GravixForegroundServiceOptions? foregroundService,
   }) async {
     _dtx = dtx;
@@ -957,6 +983,33 @@ class GravixRoomService implements GravixAudioHost {
         // dialled (Room.connect would refuse it anyway, failing the ladder rung).
         if (RetiredServerException.retiredHostOf(e.url) == null) e,
     ];
+    // 2026-10-21 (per-region media): the join's media, and only the regions
+    // that take it as candidates -- the race, the remembered decision and the
+    // fallback ladder alike. None does: every region (the join must have one).
+    _declaredMedia = media;
+    final joinMedia = gravixJoinMedia(declared: media, enableVideo: enableVideo, token: token);
+    final allowedEntries = [
+      for (final e in _regionEntries)
+        if (e.region == kGravixUnknownRegion || gravixRegionAllowsMedia(e, joinMedia)) e,
+    ];
+    if (allowedEntries.length != _regionEntries.length) {
+      final skipped = [
+        for (final e in _regionEntries)
+          if (!allowedEntries.contains(e)) '${e.region}(${gravixMediaSkipWhy(e, joinMedia)})',
+      ];
+      if (allowedEntries.isEmpty) {
+        GravixRegionLog.step(
+          'candidates',
+          'media=${joinMedia.name} mediaIgnored(no region allows ${joinMedia.name}) keep=all',
+        );
+      } else {
+        GravixRegionLog.step(
+          'candidates',
+          'media=${joinMedia.name} skip=${skipped.join(',')} keep=${allowedEntries.map((e) => e.region).join(',')}',
+        );
+        _regionEntries = allowedEntries;
+      }
+    }
     final effectiveRegionUrls = [for (final e in _regionEntries) e.url];
     _connectionId = _newConnectionId();
     _connectStartedAt = DateTime.now();
@@ -1036,8 +1089,17 @@ class GravixRoomService implements GravixAudioHost {
         } catch (_) {}
         timeline?.notePath('svc:earlyMicStart');
         await GravixEngineMicMute.release();
+        // noise suppression first: it decides WebRTC's NS/AGC of this capture.
+        // Like Room.connect: no option (or the same one) leaves the controller
+        // alone, so a runtime setMode survives the join (review #11).
+        final ns = noiseSuppression;
+        if (GravixNoiseSuppression.instance.joinShouldConfigure(ns)) {
+          await GravixNoiseSuppression.instance.configure(ns);
+        }
         final seam = _createMicTrackSeam;
-        final t = await (seam != null ? seam(_audioCaptureOptions) : LocalAudioTrack.create(_audioCaptureOptions));
+        final t = await (seam != null
+            ? seam(GravixNoiseSuppression.instance.adjustCapture(_audioCaptureOptions))
+            : LocalAudioTrack.create(_audioCaptureOptions));
         timeline?.notePath('svc:earlyMicReady');
         return t;
       });
@@ -1086,16 +1148,25 @@ class GravixRoomService implements GravixAudioHost {
       var connectLadder = const <String>[];
       GravixRegionRaceOutcome? raceOutcome;
       var fromCache = false;
-      final remembered = regionProbe && regionDecisionCache && effectiveRegionUrls.isNotEmpty
+      var remembered = regionProbe && regionDecisionCache && effectiveRegionUrls.isNotEmpty
           ? _regionCache.read(url, effectiveRegionUrls)
           : null;
+      // 2026-10-21: a remembered region that does not take this join's media is
+      // not kept (e.g. doh1, audio-only, remembered from a voice room).
+      if (remembered != null && !gravixUrlAllowsMedia(remembered.url, joinMedia, known: _regionEntries)) {
+        GravixRegionLog.step(
+          'cacheSkip',
+          'media=${joinMedia.name} remembered=${Uri.tryParse(remembered.url)?.host ?? '?'} cause=media-not-allowed',
+        );
+        remembered = null;
+      }
       // Start-up measurement first (parity with React 0.4.0/0.5.0, 2026-09-27):
       // when the app ran gravixStartRegionMeasurement and it is fresh, the join
       // goes to the fastest measured region -- a lookup, nothing sent. A token
       // minted by the app's own backend carries no region list: the measured
       // regions are the list then (only when [url] is one of them).
       final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url);
-      final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion);
+      final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion, media: joinMedia);
       if (measuredPick != null) {
         if (_regionEntries.isEmpty) _regionEntries = measuredList;
         _probeStartedAt = DateTime.now();
@@ -1212,6 +1283,7 @@ class GravixRoomService implements GravixAudioHost {
           reconnectPolicy: reconnectPolicy,
           foregroundService: foregroundService,
           recovery: recovery,
+          noiseSuppression: noiseSuppression,
           // (RoomOptions.fastPublish used to be set here. Nothing reads it - not
           // in this fork and not upstream; publisher negotiation is started early
           // by the SERVER's JoinResponse.fastPublish, in engine.dart. Setting it
@@ -1221,6 +1293,10 @@ class GravixRoomService implements GravixAudioHost {
 
       // GRAVIX (0.4.15): the region entries name Room.connectedRegion
       room.gravixRegionHints = [for (final e in _regionEntries) e];
+      // GRAVIX (2026-10-21): a failover tries regions taking this join's media first
+      room.gravixJoinMedia = joinMedia;
+      // a video refusal raises the session's media: a later rejoin keeps it
+      room.gravixOnJoinMediaRaised = (m) => _declaredMedia = m;
       // <candidate:fastAnswer>
       room.engine.gravixFastAnswer = fastAnswer;
       // </candidate:fastAnswer>
@@ -1356,6 +1432,8 @@ class GravixRoomService implements GravixAudioHost {
           entries: _regionEntries,
           prober: _regionProber,
           cache: regionDecisionCache ? _regionCache : null,
+          // the session's media now: video after a refusal (review #7)
+          media: () => room.gravixJoinMedia,
         );
       }
       _seedRemoteFacing();
@@ -1819,8 +1897,11 @@ class GravixRoomService implements GravixAudioHost {
     // <candidate:earlyCallAudio>
     bool earlyCallAudio = false,
     // </candidate:earlyCallAudio>
-    // see connect's `dtx`
-    bool dtx = false,
+    // see connect's `dtx` (on by default)
+    bool dtx = true,
+    // see connect's `red` / `redLossThresholdPct` (RED on by default)
+    GravixRedMode red = GravixRedMode.on,
+    double redLossThresholdPct = kGravixRedLossThresholdPct,
     // see connect's `foregroundService`
     GravixForegroundServiceOptions? foregroundService,
     // see connect's `publishMicOnJoin`
@@ -1866,6 +1947,8 @@ class GravixRoomService implements GravixAudioHost {
       earlyCallAudio: earlyCallAudio,
       // </candidate:earlyCallAudio>
       dtx: dtx,
+      red: red,
+      redLossThresholdPct: redLossThresholdPct,
       foregroundService: foregroundService,
       publishMicOnJoin: publishMicOnJoin,
     );
@@ -2066,6 +2149,8 @@ class GravixRoomService implements GravixAudioHost {
     List<String> regionUrls = const <String>[],
     List<GravixRegionUrl> regionEntries = const <GravixRegionUrl>[],
     String? homeRegion,
+    // null = the current call's (connect's `media`)
+    GravixRoomMedia? media,
     bool regionProbe = false,
     bool regionDecisionCache = true,
     bool regionReprobeOnRestart = false,
@@ -2087,6 +2172,7 @@ class GravixRoomService implements GravixAudioHost {
       regionUrls: regionUrls,
       regionEntries: regionEntries,
       homeRegion: homeRegion,
+      media: media ?? _declaredMedia,
       regionProbe: regionProbe,
       regionDecisionCache: regionDecisionCache,
       regionReprobeOnRestart: regionReprobeOnRestart,
@@ -2660,17 +2746,17 @@ class GravixRoomService implements GravixAudioHost {
   /// join's mic step takes it.
   Future<LocalAudioTrack>? _earlyMic;
 
-  /// The microphone's publish options. [dtx] off (the default) keeps
-  /// transmitting during silence (no clipped word onsets for singing hosts);
-  /// on, silence costs ~1-2 kbps instead of the full rate (connect's `dtx`).
+  /// The microphone's publish options. [dtx] on (the default) makes silence
+  /// cost ~1-2 kbps instead of the full rate; off keeps transmitting during
+  /// silence (connect's `dtx: false`).
   @visibleForTesting
-  static AudioPublishOptions audioPublishOptionsFor({required bool red, bool dtx = false}) =>
+  static AudioPublishOptions audioPublishOptionsFor({required bool red, bool dtx = true}) =>
       AudioPublishOptions(encoding: const AudioEncoding(maxBitrate: 64000), dtx: dtx, red: red);
 
   AudioPublishOptions _audioPublishOptions({required bool red}) => audioPublishOptionsFor(red: red, dtx: _dtx);
 
   /// DTX for this call's microphone (connect's `dtx`); kept by every republish.
-  bool _dtx = false;
+  bool _dtx = true;
 
   /// connect's `foregroundService` (null = GravixForegroundService.defaults),
   /// kept for reconnectWithToken.

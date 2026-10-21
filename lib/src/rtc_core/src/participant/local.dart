@@ -279,6 +279,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       // (A detached republish has no capture to start: the unmute restarts it.)
       if (!gravixDetached) await track.start();
 
+      // GRAVIX (2026-10-21, DTX): a stereo preset publishes stereo, without DTX
+      final opusShape = gravixOpusPublishShape(publishOptions);
+
       final req = lk_rtc.AddTrackRequest(
         cid: track.getCid(),
         name: publishOptions.name ?? AudioPublishOptions.defaultMicrophoneName,
@@ -286,14 +289,20 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         source: track.source.toPBType(),
         muted: track.wireMuted,
         stream: buildStreamId(publishOptions, track.source),
-        disableDtx: !publishOptions.dtx,
+        disableDtx: !opusShape.dtx,
         disableRed: gravixDisableRed(e2ee: room.e2eeManager != null, red: publishOptions.red),
         encryption: room.roomOptions.lkEncryptionType,
       );
 
-      // Populate audio features (e.g., TF_NO_DTX, TF_PRECONNECT_BUFFER)
+      // GRAVIX (2026-10-21, DTX): the answer for this section carries usedtx=1
+      // (unless dtx is off) and stereo=1 only for a stereo publication, whatever
+      // the SFU mirrored
+      room.engine.publisher?.gravixSetOpusPin(track.getCid(), dtx: opusShape.dtx, stereo: opusShape.stereo);
+
+      // Populate audio features (e.g., TF_STEREO, TF_NO_DTX, TF_PRECONNECT_BUFFER)
       req.audioFeatures.addAll([
-        if (!publishOptions.dtx) lk_models.AudioTrackFeature.TF_NO_DTX,
+        if (opusShape.stereo) lk_models.AudioTrackFeature.TF_STEREO,
+        if (!opusShape.dtx) lk_models.AudioTrackFeature.TF_NO_DTX,
         if (publishOptions.preConnect) lk_models.AudioTrackFeature.TF_PRECONNECT_BUFFER,
       ]);
 
@@ -1113,6 +1122,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
   /// A convenience method to publish a track for a specific [TrackSource].
   /// This is the recommended method to publish tracks.
+  /// GRAVIX (2026-10-21): the camera's last setCameraEnabled / setSourceEnabled
+  /// request (true = on), whether or not its publish succeeded.
+  bool gravixCameraWanted = false;
+
   Future<LocalTrackPublication?> setSourceEnabled(
     TrackSource source,
     bool enabled, {
@@ -1122,6 +1135,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     ScreenShareCaptureOptions? screenShareCaptureOptions,
   }) async {
     if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(source);
+    // GRAVIX (2026-10-21): what the app asked for last, so a region move after a
+    // media refusal can publish the camera again (Room.gravixFailoverForMediaRefusal)
+    if (source == TrackSource.camera) gravixCameraWanted = enabled;
     return _publishRunners.forSource(source).run(() async {
       if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
         throw TrackCreateException('Screen sharing is not supported on mobile devices');

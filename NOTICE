@@ -60,6 +60,50 @@ Native Android audio decoder/mixer/monitor pipeline, originally authored
 in-house under `com.rgn.live`, relocated and repackaged here. No third-party
 license obligations beyond the WebRTC SDK it hooks into.
 
+## Third-party components (BSD 3-Clause)
+
+Bundled C sources for on-device noise suppression (`native/gxns/third_party/`;
+provenance and exact commits in `native/gxns/third_party/VENDOR.md`). They keep
+their upstream copyright headers and remain under the BSD 3-Clause license.
+
+### xiph / rnnoise (`native/gxns/third_party/rnnoise/`)
+Recurrent neural network for audio noise reduction, with its built-in 0.1 model.
+- Project: https://github.com/xiph/rnnoise
+- Version: v0.1.1 (commit 6cbfd53eb348a8d394e0757b4025c6ded34eb2b6)
+- Copyright (c) 2007-2017, 2024 Jean-Marc Valin; (c) 2023 Amazon; (c) 2017 Mozilla;
+  (c) 2005-2017 Xiph.Org Foundation; (c) 2003-2004 Mark Borgerding
+- License: BSD-3-Clause — full text in `LICENSES/BSD-3-Clause-rnnoise.txt`
+- Notes: one local addition, `rnnoise_reset()` (marked `GRAVIX PATCH`).
+
+### xiph / speexdsp resampler (`native/gxns/third_party/speexdsp/`)
+Arbitrary-ratio sample-rate converter (`resample.c`), unmodified.
+- Project: https://github.com/xiph/speexdsp
+- Version: SpeexDSP-1.2.1 (commit 1b28a0f61bc31162979e1f26f3981fc3637095c8)
+- Copyright 2002-2008 Xiph.org Foundation; 2002-2008 Jean-Marc Valin; and the
+  other holders listed in the license file
+- License: BSD-3-Clause — full text in `LICENSES/BSD-3-Clause-speexdsp.txt`
+
+## Third-party components (MIT / Apache-2.0): studio noise suppression (Android)
+
+Shipped for the Android arm64-v8a "studio" engine (`android/src/studio/jniLibs/arm64-v8a/`,
+`android/src/main/cpp/third_party/onnxruntime/`); apps can leave it out with
+`gravixNsStudio=false`.
+
+### DeepFilterNet3 (standard model, `libgxns_dfn3_std.so` = dfn3_std_int8.ort)
+Pretrained DeepFilterNet3 weights, exported as a streaming model (int8 GRUs) in
+the torchDF approach (fork grazder/DeepFilterNet, MIT / Apache-2.0), adapted.
+The downloadable low-latency pack is converted from the official DeepFilterNet3_ll ONNX release.
+- Project: https://github.com/Rikorose/DeepFilterNet
+- Copyright (c) 2021 Hendrik Schroeter
+- License: MIT OR Apache-2.0 — `LICENSES/MIT-DeepFilterNet.txt`, `LICENSES/Apache-2.0-DeepFilterNet.txt`
+
+### Microsoft / ONNX Runtime 1.31.0 (minimal build shipped as `libgxort.so`, soname renamed by
+`tool/ns_android/rename_ort.py`; C API headers)
+- Project: https://github.com/microsoft/onnxruntime
+- Copyright (c) Microsoft Corporation
+- License: MIT — `LICENSES/MIT-onnxruntime.txt`; third-party components in
+  `LICENSES/onnxruntime-ThirdPartyNotices.txt`
+
 ## Compliance note
 In the shipped sources the upstream name appears only as attribution: in this
 file and in the copyright lines at the top of the derived files listed above

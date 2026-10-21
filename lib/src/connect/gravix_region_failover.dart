@@ -12,6 +12,7 @@
 // with the console's near-only cap; [gravixRegionOfUrl] names the region of a
 // url from what the SDK knows (a region list, the start-up measurement).
 import 'gravix_init_measure.dart';
+import 'gravix_region_media.dart';
 import 'gravix_region_report.dart';
 
 /// Normalised for comparison: scheme folded to ws/wss, host lower-cased,
@@ -72,7 +73,36 @@ int gravixNearOnlyCapMs(int bestMs) {
 /// "Best remaining" because the region that just failed (usually the best
 /// measured one) is not a candidate any more: the cap is taken against the best
 /// of the regions still on offer.
+///
+/// [media] (2026-10-21, per-region media): the candidates that do not take it
+/// (an audio-only region for a video join, or one that refused it lately) go
+/// after all the others, in the same order -- last resort, never dropped.
 List<T> gravixOrderFailoverRegions<T>(
+  List<T> candidates, {
+  required String Function(T) regionOf,
+  required String Function(T) urlOf,
+  DateTime? now,
+  GravixRoomMedia? media,
+}) {
+  if (media == null) return _orderByMeasurement(candidates, regionOf: regionOf, urlOf: urlOf, now: now);
+  bool allows(T c) => gravixRegionAllowsMedia(
+    GravixRegionUrl(region: regionOf(c), url: urlOf(c)),
+    media,
+    now: now,
+  );
+  final ordered = _orderByMeasurement(candidates, regionOf: regionOf, urlOf: urlOf, now: now);
+  final ok = ordered.where(allows).toList();
+  final last = ordered.where((c) => !allows(c)).toList();
+  if (last.isNotEmpty && ok.isNotEmpty) {
+    GravixRegionLog.step(
+      'failoverOrder',
+      'media=${media.name} last=${last.map(regionOf).join(',')} first=${ok.map(regionOf).join(',')}',
+    );
+  }
+  return [...ok, ...last];
+}
+
+List<T> _orderByMeasurement<T>(
   List<T> candidates, {
   required String Function(T) regionOf,
   required String Function(T) urlOf,

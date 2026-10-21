@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../connect/gravix_region_media.dart' show GravixRoomMedia;
 import '../connect/gravix_region_report.dart';
 import '../rtc_core/src/exceptions.dart' show RetiredServerException;
 import '../rtc_core/src/token_source/jwt.dart';
@@ -49,7 +50,13 @@ import '../rtc_core/src/token_source/token_source.dart';
 /// server on this path.
 @immutable
 class GravixTokenRequest {
-  const GravixTokenRequest({required this.room, required this.identity, this.name = '', this.canPublish = false});
+  const GravixTokenRequest({
+    required this.room,
+    required this.identity,
+    this.name = '',
+    this.canPublish = false,
+    this.media,
+  });
 
   /// Room name.
   final String room;
@@ -64,6 +71,16 @@ class GravixTokenRequest {
   /// it; a backend that trusts this field blindly has moved the problem, not
   /// solved it (see doc/MIGRATION_TOKEN_PROVIDER.md).
   final bool canPublish;
+
+  /// What the room uses (2026-10-21, per-region media): [GravixRoomMedia.audio]
+  /// for a voice room nobody publishes or watches video in, so the join may use
+  /// an audio-only region (e.g. doh1); null / [GravixRoomMedia.video] (the
+  /// default, the safe one) keeps the join on regions that allow video. Chooses
+  /// the region only: not sent to the token endpoint, not part of [cacheKey]
+  /// (the token does not depend on it). A token whose video grant may publish
+  /// the camera / a screen share makes the join `video` whatever this says; a
+  /// mic-only grant does not make it `audio` (the user may still watch video).
+  final GravixRoomMedia? media;
 
   /// The wire body of the endpoint variant. Same spelling as the gateway.
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -89,7 +106,9 @@ class GravixTokenRequest {
   int get hashCode => Object.hash(room, identity, name, canPublish);
 
   @override
-  String toString() => 'GravixTokenRequest(room: $room, identity: $identity, canPublish: $canPublish)';
+  String toString() =>
+      'GravixTokenRequest(room: $room, identity: $identity, canPublish: $canPublish'
+      '${media == null ? '' : ', media: ${media!.name}'})';
 }
 
 /// When a cached join token may be presented again (0.4.19, fast join).

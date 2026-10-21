@@ -443,6 +443,27 @@ void main() {
       },
     );
 
+    test('red reaches the room like connect() (default on, off and auto plain Opus at the start)', () async {
+      final provider = GravixTokenProvider.callback(
+        (r) async => gatewayResponse(jwt(exp: DateTime.now().add(const Duration(hours: 1)))),
+      );
+      Future<bool?> redFor(GravixRedMode? mode) async {
+        bool? red;
+        final service = GravixRoomService(
+          connectRoom: (room, url, token) async => red = room.roomOptions.defaultAudioPublishOptions.red,
+        );
+        final ok = mode == null
+            ? await service.connectWithTokenProvider(tokenProvider: provider, request: request)
+            : await service.connectWithTokenProvider(tokenProvider: provider, request: request, red: mode);
+        expect(ok, isTrue);
+        return red;
+      }
+
+      expect(await redFor(null), isTrue);
+      expect(await redFor(GravixRedMode.off), isFalse);
+      expect(await redFor(GravixRedMode.auto), isFalse);
+    });
+
     test('a token error returns false, like connect(), with the reason on lastTokenError', () async {
       final service = GravixRoomService(
         connectRoom: (room, url, token) async => fail('must not connect without a token'),

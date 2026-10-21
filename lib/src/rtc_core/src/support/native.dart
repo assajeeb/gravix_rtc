@@ -23,6 +23,7 @@ import '../audio/audio_manager.dart';
 import '../logger.dart';
 import '../managers/broadcast_manager.dart';
 import 'native_audio.dart';
+import '../../../noise/gravix_noise_native.dart' show GravixNoiseNative, gravixNsNormalizeIosEvent;
 
 // Method channel methods to call native code.
 class Native {
@@ -428,6 +429,29 @@ class Native {
     }
   }
 
+  static final StreamController<Map<String, Object?>> _noiseSuppression =
+      StreamController<Map<String, Object?>>.broadcast();
+
+  /// Noise-suppression processor events (switch, routeReset, musicBypass,
+  /// watchdog, summary). Read by GravixNoiseSuppression.
+  @internal
+  static Stream<Map<String, Object?>> get noiseSuppressionEvents => _noiseSuppression.stream;
+
+  /// A noise-suppression call on the gravix_client channel (`nsDeviceFacts`,
+  /// `nsConfigure`, `nsStats`). Null when the platform has no implementation.
+  @internal
+  static Future<Map<String, dynamic>?> nsCall(String method, [Map<String, dynamic>? args]) async {
+    try {
+      final r = await channel.invokeMethod<dynamic>(method, args ?? const <String, dynamic>{});
+      return r is Map ? r.map((k, v) => MapEntry(k.toString(), v)) : null;
+    } on MissingPluginException {
+      return null;
+    } on PlatformException catch (error) {
+      if (error.code == 'Unimplemented') return null;
+      rethrow;
+    }
+  }
+
   static final StreamController<Map<String, Object?>> _audioRoutes = StreamController<Map<String, Object?>>.broadcast();
 
   /// Audio route changes from both platforms (0.4.15): `routes` (available
@@ -652,6 +676,15 @@ class Native {
       case 'onOtherAppAudio':
         final args = call.arguments;
         if (args is Map) _otherAppAudio.add(args.cast<String, Object?>());
+        return null;
+      case 'onNoiseSuppression': // Android
+        final args = call.arguments;
+        if (args is Map) _noiseSuppression.add(args.cast<String, Object?>());
+        return null;
+      case 'onNsEvent': // iOS: same stream, normalized to the Android shape
+        GravixNoiseNative.handleEvent(call.arguments);
+        final args = call.arguments;
+        if (args is Map) _noiseSuppression.add(gravixNsNormalizeIosEvent(args.cast<String, Object?>()));
         return null;
       case 'onAudioRoutesChanged':
         final args = call.arguments;

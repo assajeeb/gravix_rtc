@@ -41,6 +41,7 @@ class GravixRecoveryOptions {
     this.resumeSatisfiesPeerFailure = true,
     this.resumePeerRestartWait = const Duration(seconds: 3),
     this.lastGoodRegionList = true,
+    this.mediaRefusalFailover = true,
     this.restartAbortsOnSignalLoss = true,
     this.uplinkFeedbackStallFor = const Duration(seconds: 5),
     this.deferNegotiateDuringResume = true,
@@ -96,6 +97,7 @@ class GravixRecoveryOptions {
     resumeSatisfiesPeerFailure: false,
     resumePeerRestartWait: Duration.zero,
     lastGoodRegionList: false,
+    mediaRefusalFailover: false,
     restartAbortsOnSignalLoss: false,
     uplinkFeedbackStallFor: Duration.zero,
     deferNegotiateDuringResume: false,
@@ -398,6 +400,15 @@ class GravixRecoveryOptions {
   /// the 0.4.14 behaviour (a failed fetch ends the attempt).
   final bool lastGoodRegionList;
 
+  /// GRAVIX (2026-10-21, per-region media): when the server refuses a medium on
+  /// this node (a request response or error carrying `media_not_allowed`, e.g.
+  /// video on an audio-only region), the session moves ONCE to the next region
+  /// that allows it (a full reconnect, the region noted as refusing that medium
+  /// for 10 min) instead of staying on a node that will keep refusing. A second
+  /// refusal in the same session is left to the app. Off: nothing moves; the
+  /// refusal reaches the app as before.
+  final bool mediaRefusalFailover;
+
   /// On a flapping network (Wi-Fi going off and on every few seconds) a full
   /// reconnect that lost its own signal socket kept waiting anyway -- 10 s for
   /// the primary connection, or for the publisher once ICE had brought the
@@ -552,6 +563,7 @@ class GravixRecoveryOptions {
     bool? resumeSatisfiesPeerFailure,
     Duration? resumePeerRestartWait,
     bool? lastGoodRegionList,
+    bool? mediaRefusalFailover,
     bool? restartAbortsOnSignalLoss,
     Duration? uplinkFeedbackStallFor,
     bool? deferNegotiateDuringResume,
@@ -605,6 +617,7 @@ class GravixRecoveryOptions {
     resumeSatisfiesPeerFailure: resumeSatisfiesPeerFailure ?? this.resumeSatisfiesPeerFailure,
     resumePeerRestartWait: resumePeerRestartWait ?? this.resumePeerRestartWait,
     lastGoodRegionList: lastGoodRegionList ?? this.lastGoodRegionList,
+    mediaRefusalFailover: mediaRefusalFailover ?? this.mediaRefusalFailover,
     restartAbortsOnSignalLoss: restartAbortsOnSignalLoss ?? this.restartAbortsOnSignalLoss,
     uplinkFeedbackStallFor: uplinkFeedbackStallFor ?? this.uplinkFeedbackStallFor,
     deferNegotiateDuringResume: deferNegotiateDuringResume ?? this.deferNegotiateDuringResume,

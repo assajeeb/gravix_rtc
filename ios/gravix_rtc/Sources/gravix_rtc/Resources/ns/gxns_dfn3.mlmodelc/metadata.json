@@ -1,0 +1,338 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "storagePrecision" : "Mixed (Float16, Float32, Int8)",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 480)",
+        "shortDescription" : "",
+        "shape" : "[480]",
+        "name" : "enhanced_audio_frame",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 32)",
+        "shortDescription" : "",
+        "shape" : "[32]",
+        "name" : "new_erb_norm_state",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 96 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 96, 1]",
+        "name" : "new_band_unit_norm_state",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 480)",
+        "shortDescription" : "",
+        "shape" : "[480]",
+        "name" : "new_synthesis_mem",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 3 × 32)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 3, 32]",
+        "name" : "new_rolling_erb_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 2 × 3 × 96)",
+        "shortDescription" : "",
+        "shape" : "[1, 2, 3, 96]",
+        "name" : "new_rolling_feat_spec_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 64 × 5 × 96)",
+        "shortDescription" : "",
+        "shape" : "[1, 64, 5, 96]",
+        "name" : "new_rolling_c0_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 5 × 481 × 2)",
+        "shortDescription" : "",
+        "shape" : "[5, 481, 2]",
+        "name" : "new_rolling_spec_buf_x",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 7 × 481 × 2)",
+        "shortDescription" : "",
+        "shape" : "[7, 481, 2]",
+        "name" : "new_rolling_spec_buf_y",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 256]",
+        "name" : "new_enc_hidden",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[2, 1, 256]",
+        "name" : "new_erb_dec_hidden",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[2, 1, 256]",
+        "name" : "new_df_dec_hidden",
+        "type" : "MultiArray"
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 7,
+    "mlProgramOperationTypeHistogram" : {
+      "Transpose" : 6,
+      "Ios16.scatter" : 1,
+      "Squeeze" : 1,
+      "Crop" : 2,
+      "Split" : 1,
+      "Ios16.linear" : 12,
+      "Ios16.add" : 32,
+      "Concat" : 6,
+      "Ios16.realDiv" : 1,
+      "Ios16.sigmoid" : 11,
+      "Ios16.reduceSum" : 2,
+      "Ios16.convTranspose" : 2,
+      "Ios16.log" : 1,
+      "ExpandDims" : 10,
+      "Ios16.sub" : 8,
+      "Ios16.cast" : 89,
+      "Ios16.sqrt" : 1,
+      "Ios16.matmul" : 12,
+      "Ios16.pow" : 1,
+      "SliceByIndex" : 52,
+      "Stack" : 4,
+      "Ios16.conv" : 22,
+      "Ios16.relu" : 20,
+      "Ios16.reshape" : 21,
+      "Ios16.constexprAffineDequantize" : 11,
+      "Ios16.mul" : 34,
+      "Ios16.tanh" : 6,
+      "Ios16.reduceL2Norm" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "13.0",
+      "tvOS" : "16.0",
+      "visionOS" : "1.0",
+      "watchOS" : "9.0",
+      "iOS" : "16.0",
+      "macCatalyst" : "16.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.conversion_date" : "2026-10-21",
+      "com.github.apple.coremltools.source" : "torch==2.14.1",
+      "com.github.apple.coremltools.version" : "9.0",
+      "com.github.apple.coremltools.source_dialect" : "TorchScript"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 480)",
+        "shortDescription" : "",
+        "shape" : "[480]",
+        "name" : "input_frame",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 32)",
+        "shortDescription" : "",
+        "shape" : "[32]",
+        "name" : "erb_norm_state",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 96 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 96, 1]",
+        "name" : "band_unit_norm_state",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 480)",
+        "shortDescription" : "",
+        "shape" : "[480]",
+        "name" : "analysis_mem",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 480)",
+        "shortDescription" : "",
+        "shape" : "[480]",
+        "name" : "synthesis_mem",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 3 × 32)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 3, 32]",
+        "name" : "rolling_erb_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 2 × 3 × 96)",
+        "shortDescription" : "",
+        "shape" : "[1, 2, 3, 96]",
+        "name" : "rolling_feat_spec_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 64 × 5 × 96)",
+        "shortDescription" : "",
+        "shape" : "[1, 64, 5, 96]",
+        "name" : "rolling_c0_buf",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 5 × 481 × 2)",
+        "shortDescription" : "",
+        "shape" : "[5, 481, 2]",
+        "name" : "rolling_spec_buf_x",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 7 × 481 × 2)",
+        "shortDescription" : "",
+        "shape" : "[7, 481, 2]",
+        "name" : "rolling_spec_buf_y",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 1 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[1, 1, 256]",
+        "name" : "enc_hidden",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[2, 1, 256]",
+        "name" : "erb_dec_hidden",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[2, 1, 256]",
+        "name" : "df_dec_hidden",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 960 × 481)",
+        "shortDescription" : "",
+        "shape" : "[960, 481]",
+        "name" : "gx_dft_cos",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float32",
+        "formattedType" : "MultiArray (Float32 960 × 481)",
+        "shortDescription" : "",
+        "shape" : "[960, 481]",
+        "name" : "gx_dft_sin",
+        "type" : "MultiArray"
+      }
+    ],
+    "generatedClassName" : "dfn3_stream_int8lin",
+    "method" : "predict"
+  }
+]

@@ -63,7 +63,15 @@ final class GravixMusicMixer: NSObject {
     private var outputFormat: AVAudioFormat?
 
     // Session state.
-    private var session: Session?
+    private var session: Session? {
+        didSet {
+            // Our noise suppression treats music as noise: crossfade it to dry
+            // while a music session exists (plan §1d, musicBypass).
+            if (oldValue == nil) != (session == nil) {
+                GxNoiseProcessor.shared.musicSession(active: session != nil)
+            }
+        }
+    }
     private var pendingStartTimer: DispatchSourceTimer?
 
     private final class Session {

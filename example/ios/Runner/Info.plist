@@ -70,5 +70,9 @@
 	<string>Camera is used for the Gravix Cloud video meeting.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Microphone is used for the Gravix Cloud audio meeting.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 </dict>
 </plist>

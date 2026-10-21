@@ -34,6 +34,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../rtc_core/src/managers/gravix_foreground_service.dart' show GravixForegroundService;
 import '../rtc_core/src/types/other.dart' show DisconnectReason;
 import 'gravix_join_log.dart';
 import 'gravix_room_refused.dart';
@@ -248,14 +249,37 @@ class GravixRejoinPolicy {
     _log('rejoinScheduled', 'n=${_attempt + 1} in=${d.inMilliseconds}ms after=$after');
     _cancel();
     _timer = Timer(d, () => unawaited(_run()));
+    _syncServiceHold();
   }
 
   void _cancel() {
     _timer?.cancel();
     _timer = null;
+    _syncServiceHold();
+  }
+
+  /// Android call foreground service: held while a rejoin is scheduled or
+  /// running (the whole backoff), so the rejoin never has to start it again
+  /// from the background (Android 14+ refuses that: mic and playback dead).
+  /// Released when nothing is pending (joined: the new room holds it; gave up,
+  /// refused, live ended, disposed).
+  void _syncServiceHold() {
+    if (pending && !_disposed) {
+      GravixForegroundService.incidentHold(this);
+    } else {
+      GravixForegroundService.incidentReleased(this);
+    }
   }
 
   Future<void> _run() async {
+    try {
+      await _runAttempt();
+    } finally {
+      _syncServiceHold();
+    }
+  }
+
+  Future<void> _runAttempt() async {
     _timer = null;
     if (_disposed || _refused || _roomRefused || _ended || !liveOn()) return;
     if (_total >= maxTotal) {
