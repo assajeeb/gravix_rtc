@@ -6,11 +6,20 @@
 // NS/AEC effects are bound when the AudioRecord is created; re-creating it
 // mid-call re-routes on some OEMs), so the mic track must be created with them.
 
+import '../rtc_core/src/audio/gravix_audio_scenario.dart';
 import '../rtc_core/src/track/options.dart';
 import 'gravix_noise_options.dart';
 
 /// Whether [engine] is one of ours (Gravix processing runs).
 bool gravixNsIsOurs(GravixNsEngine engine) => engine == GravixNsEngine.rnnoise || engine == GravixNsEngine.dfn3;
+
+/// [o] under the process audio scenario: [GravixAudioScenario.chatRoom] runs
+/// without AGC (Agora ChatRoom parity) unless the app chose
+/// [GravixNsAgcOrder.webrtcBeforeNs] (or [GravixNsAgcOrder.none]) itself.
+GravixNoiseSuppressionOptions gravixScenarioNsOptions(GravixNoiseSuppressionOptions o) =>
+    gravixAudioScenario == GravixAudioScenario.chatRoom && o.agcOrder == GravixNsAgcOrder.ownAfterNs
+    ? o.copyWith(agcOrder: GravixNsAgcOrder.none)
+    : o;
 
 /// The WebRTC processing to use while [engine] is active.
 ///
@@ -36,7 +45,7 @@ AudioProcessingOptions gravixNsProcessing(
       nsOn = false;
     }
   }
-  final agcOn = ns.agcOrder == GravixNsAgcOrder.ownAfterNs ? false : base.autoGainControl;
+  final agcOn = ns.agcOrder == GravixNsAgcOrder.webrtcBeforeNs ? base.autoGainControl : false;
   return AudioProcessingOptions(
     echoCancellation: base.echoCancellation,
     noiseSuppression: nsOn,

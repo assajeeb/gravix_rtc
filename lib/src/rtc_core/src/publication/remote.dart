@@ -124,9 +124,8 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
     // return if no change
     if (_streamState == streamState) return;
     _streamState = streamState;
-    [
-      participant.events,
-    ].emit(TrackStreamStateUpdatedEvent(participant: participant, publication: this, streamState: streamState));
+    [participant.events]
+        .emit(TrackStreamStateUpdatedEvent(participant: participant, publication: this, streamState: streamState));
   }
 
   // used to report renderer visibility to the server

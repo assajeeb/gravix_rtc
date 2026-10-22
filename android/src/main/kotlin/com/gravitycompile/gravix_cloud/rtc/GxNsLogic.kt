@@ -107,7 +107,7 @@ internal object GxNsFallback {
 /** Our AGC runs only with an engine on and the own-AGC order (off / kill switch: WebRTC's AGC owns the level). */
 internal object GxNsAgc {
   fun ownOn(requested: Int, agcOrder: String?): Boolean =
-    requested != GxNsNative.ENGINE_OFF && agcOrder != "webrtcBeforeNs"
+    requested != GxNsNative.ENGINE_OFF && agcOrder != "webrtcBeforeNs" && agcOrder != "none"
 }
 
 /**

@@ -53,6 +53,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   @Volatile private var requestReason = "mode_off"
   @Volatile private var agcOn = true
   @Volatile private var agcOrder = GxNsNative.AGC_AFTER_NS
+  @Volatile private var agcOrderName = "ownAfterNs"
   @Volatile private var musicBypassEnabled = true
   @Volatile private var preferHeadset = false
   @Volatile private var thermalFallback = true
@@ -142,8 +143,13 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
       shapeReject = GxNsFrameShape.reject(numFrames, cap, lastDirect, initChannels)
       audioTid = Process.myTid()
       shapeSeq++
+      if (procRate > 0) GxCaptureDump.start(appContext, procRate) // diagnostic: no-op unless debug.gravix.capdump=1
     }
-    if (shapeReject != null) return
+    GxCaptureDump.onPre(buffer, numFrames)
+    if (shapeReject != null) {
+      GxCaptureDump.onPost(buffer, numFrames, false)
+      return
+    }
     val t0 = System.nanoTime()
     inFlight.enter()
     try {
@@ -151,6 +157,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     } finally {
       inFlight.exit()
     }
+    GxCaptureDump.onPost(buffer, numFrames, true)
     if (watchdog.onFrame(System.nanoTime() - t0)) {
       watchdogTripped = true
       // studio -> standard right here (an atomic store in gx_ns); RNNoise over
@@ -171,6 +178,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     requestReason = args["reason"] as? String ?: "mode_$mode"
     // off / kill switch: WebRTC's AGC is back on there, ours must not stack on it (review #1)
     agcOn = GxNsAgc.ownOn(requested, args["agcOrder"] as? String)
+    agcOrderName = args["agcOrder"] as? String ?: "ownAfterNs"
     agcOrder = GxNsNative.AGC_AFTER_NS
     musicBypassEnabled = args["musicBypass"] as? Boolean ?: true
     preferHeadset = args["headsetNs"] == "preferHeadset"
@@ -223,7 +231,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     if ((mode == "auto" || mode == "studio") && studioLowLatency) ensurePack()
     log(
       "init", decided,
-      "mode=$mode requested=${GxNsNative.engineName(requested)} reason=$decidedReason agc=${if (agcOn) "ownAfterNs" else "webrtcBeforeNs"} " +
+      "mode=$mode requested=${GxNsNative.engineName(requested)} reason=$decidedReason agc=${if (agcOn) "ownAfterNs" else agcOrderName} " +
         "musicBypass=$musicBypassEnabled headsetNs=${if (preferHeadset) "preferHeadset" else "keepOurs"} installed=$installed",
       t0,
     )

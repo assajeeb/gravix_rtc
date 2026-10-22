@@ -16,6 +16,7 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
 import 'audio/audio_manager.dart';
+import 'audio/gravix_audio_scenario.dart';
 import 'audio/audio_session.dart';
 import 'support/native.dart';
 import 'support/platform.dart' show PlatformType, lkPlatformIs, lkPlatformIsMobile;
@@ -65,8 +66,19 @@ class GravixRtcClient {
     bool bypassVoiceProcessing = false,
     AudioSessionOptions? initialAudioSessionOptions,
     bool enableWARP = false,
+    GravixAudioScenario audioScenario = GravixAudioScenario.standard,
   }) async {
     if (lkPlatformIsMobile()) {
+      // GRAVIX (2026-10-22): chatRoom = Agora ChatRoom parity (communication
+      // profile, platform AEC, 16 kHz capture, no AGC); it needs WebRTC's voice
+      // processing, so it wins over bypassVoiceProcessing. Latched like every
+      // initialize option: an app that initialized WebRTC itself (and called
+      // gravixUseAudioScenario there) keeps its scenario.
+      final android = lkPlatformIs(PlatformType.android);
+      final scenarioOptions = rtc.WebRTC.initialized || !android
+          ? const <String, dynamic>{}
+          : gravixUseAudioScenario(audioScenario);
+      if (android && audioScenario == GravixAudioScenario.chatRoom) bypassVoiceProcessing = false;
       // bypassVoiceProcessing controls only WebRTC voice processing. Android
       // playout attributes are passed here because WebRTC reads them when it
       // creates the audio device module.
@@ -77,7 +89,7 @@ class GravixRtcClient {
           initialAudioSessionOptions: initialAudioSessionOptions,
           includeAndroidAudioConfiguration: lkPlatformIs(PlatformType.android),
           enableWARP: enableWARP,
-        ),
+        )..addAll(scenarioOptions),
       );
       if (lkPlatformIs(PlatformType.android) && initialAudioSessionOptions != null) {
         AudioManager.instance.setInitialAudioSessionOptions(initialAudioSessionOptions);

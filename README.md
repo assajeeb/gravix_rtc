@@ -459,6 +459,24 @@ that echo canceller on that phone. Part of the low-latency gain may come from
 a quieter echo path on the fast output: the raw echo level of that path was
 not measured.
 
+### Audio scenario: chatRoom (Android)
+
+Gift and entrance effects (SVGA, MP4) usually play outside WebRTC, so WebRTC's echo canceller
+never sees them and listeners hear them through the microphone. `GravixAudioScenario.chatRoom`
+works like Agora's ChatRoom scenario: call mode, the platform echo canceller (which cancels
+everything the phone plays), a 16 kHz voice capture and no AGC. Users can keep talking while an
+effect plays; the effect is not sent.
+
+```dart
+await GravixRtcClient.initialize(audioScenario: GravixAudioScenario.chatRoom);
+// or, when the app calls WebRTC.initialize itself (before anything else):
+await WebRTC.initialize(options: {...yourOptions, ...gravixUseAudioScenario(GravixAudioScenario.chatRoom)});
+```
+
+Trade-offs (as on Agora ChatRoom): call volume, voice-band capture, other apps cannot record
+while the microphone runs, screen recordings do not capture the room. Latched at the first
+initialize; Android only.
+
 ### Background audio (iOS)
 
 Keep the call audible with the screen locked or the app in the background.

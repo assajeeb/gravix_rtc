@@ -46,6 +46,12 @@ enum GravixNsAgcOrder {
 
   /// AEC -> WebRTC AGC -> our NS (plan option B).
   webrtcBeforeNs,
+
+  /// AEC -> our NS, no AGC at all (neither ours nor WebRTC's). Agora ChatRoom
+  /// runs without AGC; an AGC after the platform AEC lifts its echo residual
+  /// (Xiaomi 2026-10-22: +10 dB on a gift sound). The default under
+  /// [GravixAudioScenario.chatRoom].
+  none,
 }
 
 /// THE default processing order (owner 2026-10-21: target = [GravixNsAgcOrder.ownAfterNs];

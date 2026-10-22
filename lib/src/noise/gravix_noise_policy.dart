@@ -77,7 +77,15 @@ class GravixNsThresholds {
 /// - `uaRegex`: regular expression on the user agent (web)
 /// - `osMin` / `osMax`: inclusive dotted versions (`"12"`, `"17.4"`)
 class GravixNsRule {
-  const GravixNsRule({required this.platform, this.model, this.manufacturer, this.soc, this.uaRegex, this.osMin, this.osMax});
+  const GravixNsRule({
+    required this.platform,
+    this.model,
+    this.manufacturer,
+    this.soc,
+    this.uaRegex,
+    this.osMin,
+    this.osMax,
+  });
 
   final String platform;
   final String? model;
@@ -240,7 +248,9 @@ GravixNsPolicyParse gravixParseNsPolicy(Object? source) {
   final kill = root['killSwitch'] is Map ? root['killSwitch'] as Map : const {};
   final studio = root['studio'] is Map ? root['studio'] as Map : const {};
   final standard = root['standard'] is Map ? root['standard'] as Map : const {};
-  final th = root['thresholds'] is Map ? GravixNsThresholds.fromJson(Map<String, dynamic>.from(root['thresholds'] as Map)) : null;
+  final th = root['thresholds'] is Map
+      ? GravixNsThresholds.fromJson(Map<String, dynamic>.from(root['thresholds'] as Map))
+      : null;
   final policy = GravixNsPolicy(
     version: version,
     killAll: kill['all'] == true,

@@ -95,6 +95,7 @@ class GxNsLogicTest {
     assertFalse(GxNsAgc.ownOn(GxNsNative.ENGINE_OFF, "ownAfterNs"))
     assertFalse(GxNsAgc.ownOn(GxNsNative.ENGINE_OFF, null))
     assertFalse(GxNsAgc.ownOn(GxNsNative.ENGINE_RNNOISE, "webrtcBeforeNs"))
+    assertFalse(GxNsAgc.ownOn(GxNsNative.ENGINE_RNNOISE, "none"))
     assertTrue(GxNsAgc.ownOn(GxNsNative.ENGINE_RNNOISE, "ownAfterNs"))
     assertTrue(GxNsAgc.ownOn(GxNsNative.ENGINE_DFN3, null))
   }

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.2 — 2026-10-22
+
+### Added: `GravixAudioScenario.chatRoom` (Agora ChatRoom parity, Android)
+- `GravixRtcClient.initialize(audioScenario: GravixAudioScenario.chatRoom)`, or
+  `gravixUseAudioScenario(...)` merged into an app's own `WebRTC.initialize` options: the
+  communication profile (MODE_IN_COMMUNICATION, VOICE_COMMUNICATION capture), the platform AEC,
+  a 16 kHz mono capture (playout stays 48 kHz) and no AGC. The same as Agora's
+  `AUDIO_SCENARIO_CHATROOM` (verified by reverse engineering and on a device).
+- Why: the platform AEC also cancels sounds the app plays OUTSIDE WebRTC (gift / entrance SVGA
+  and MP4 effects), so they no longer reach the room while the user keeps talking. Xiaomi
+  measurement, a separate player's music: sent -11 dBFS before, about -112 dBFS mean with
+  chatRoom; speech during the music unchanged.
+- Trade-offs, as on Agora ChatRoom: call volume, voice-band (16 kHz) capture, another app cannot
+  record while the microphone runs, screen recordings do not capture the room.
+
+### Added
+- `GravixNsAgcOrder.none`: noise suppression without any AGC (ours or WebRTC's). The default
+  under `chatRoom`: an AGC after the platform AEC lifted the echo residual by up to 10 dB.
+- Android diagnostic: `adb shell setprop debug.gravix.capdump 1` before a capture records what
+  is sent (before and after noise suppression) as WAV files under the app's external files
+  directory (`gxdump/`). Off by default.
+
 ## 0.5.1 — 2026-10-22
 
 ### Fixed

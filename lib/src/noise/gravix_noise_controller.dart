@@ -245,10 +245,10 @@ class GravixNoiseSuppression {
     final prev = _options;
     final wasConfigured = prev != null;
     final before = _resolvedEngine;
-    _options = options;
+    _options = options == null ? null : gravixScenarioNsOptions(options);
     _configuredWith = options;
     if (options == null && !wasConfigured) return _state.value;
-    final o = options ?? GravixNoiseSuppressionOptions.legacy;
+    final o = _options ?? GravixNoiseSuppressionOptions.legacy;
     final s = await _apply(o, o.mode);
     // A live microphone keeps the WebRTC NS/AGC it was created with unless it is
     // re-applied: a runtime agcOrder / WebRTC-NS change must reach it too, or
@@ -267,7 +267,7 @@ class GravixNoiseSuppression {
   /// software NS / AGC on the live microphone. The Android platform NS is
   /// bound at capture start; a change of it applies to the next capture.
   Future<GravixNsState> setMode(GravixNoiseSuppressionMode mode) async {
-    final o = (_options ?? const GravixNoiseSuppressionOptions()).copyWith(mode: mode);
+    final o = gravixScenarioNsOptions(_options ?? const GravixNoiseSuppressionOptions()).copyWith(mode: mode);
     _options = o;
     final before = _resolvedEngine;
     final s = await _apply(o, mode);
