@@ -84,8 +84,13 @@ internal object GxNsStudio {
     return listOfNotNull(ai.sourceDir) + (ai.splitSourceDirs?.toList() ?: emptyList())
   }
 
-  private fun extracted(ctx: Context, name: String): File? =
-    File(ctx.applicationInfo.nativeLibraryDir ?: return null, name).takeIf { it.isFile }
+  // Block body, not `= File(dir ?: return null, ...)`: Kotlin 2.2 refuses a `return` inside an
+  // expression body ("Returns are prohibited in functions with expression body"), which broke
+  // gravix_rtc 0.5.0 in apps on Kotlin 2.2.x (seen with 2.2.20) at :gravix_rtc:compileReleaseKotlin.
+  private fun extracted(ctx: Context, name: String): File? {
+    val dir = ctx.applicationInfo.nativeLibraryDir ?: return null
+    return File(dir, name).takeIf { it.isFile }
+  }
 
   private fun libFileSize(ctx: Context, name: String): Long {
     extracted(ctx, name)?.let { return it.length() }

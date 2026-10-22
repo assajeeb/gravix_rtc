@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — 2026-10-22
+
+### Fixed
+- Android: 0.5.0 did not compile in apps on Kotlin 2.2.x (`Returns are prohibited in functions with
+  expression body` in `GxNsStudio.kt`, task `:gravix_rtc:compileReleaseKotlin`). No behaviour change.
+- The `llvm-strip ... not recognized as a valid object file` lines for `libgxns_dfn3_*.so` during an
+  Android build are harmless: those files carry the noise-suppression model data, which Gradle packs
+  unstripped.
+
+
 ## 0.5.0 — 2026-10-22
 
 Noise suppression is on by default, Opus DTX is on by default in `GravixRoomService`, and a join
