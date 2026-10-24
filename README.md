@@ -47,9 +47,10 @@ plays (mic volume and ducking are Android-only) and is not yet verified on a dev
   GravixAnalytics(url: …))` or `connect(analyticsUrl: …)` uploads one report
   per join to a Gravix analytics collector; fire-and-forget, never delays or
   fails a join.
-- **Video-effect hook** — `GravixRoomService(videoEffect: …)` plugs a beauty /
-  blur / filter package into the local camera track. The SDK ships no effect;
-  see [Video effects](#video-effects).
+- **Beauty effects** (0.6.0, Android) — `GravixBeautyEffect`: looks, face
+  reshape, makeup, stickers and 3D effects on the camera, built in. Removable
+  (~13 MB); third-party beauty SDKs plug into the same hook. See
+  [Video effects](#video-effects).
 - **Fast join** (0.4.19) — `GravixJoin`: `warm()` a room on screen (token +
   the server's pre-connect), `prepare()` at the tap (the connect starts now),
   `attach()` from the room screen (the same connect), `switchTo()` from room to
@@ -138,6 +139,48 @@ without a screen. Details and the per-piece APIs: `doc/FAST_JOIN.md`.
 
 ## Video effects
 
+### Built-in beauty effects (Android)
+
+```dart
+final room = GravixRoomService(videoEffect: GravixBeautyEffect(licenseToken: effectsToken));
+await room.setVideoEffectParams({'look': 'glow'});                  // a built-in look
+await room.setVideoEffectParams({'lookBytes': gfxBytes});           // a Gravix Studio .gfx
+await room.setVideoEffectParams({'reshape': {'faceSlim': 0.3}});    // tone / region / reshape
+```
+
+The effect opens the camera itself and the room publishes its picture as the
+camera track; `setCameraEnabled`, `switchCamera` and disconnect work as before.
+`effectsToken` comes from your server (the Gravix console issues it for App IDs
+with effects enabled); without a valid token the effects run with a watermark.
+For the preview widget and overlays use
+`(room.videoEffect as GravixBeautyEffect).camera` with `GravixPreview`. On iOS
+and web the room uses its normal camera.
+
+#### Removing them (about 13 MB)
+
+An app that does not use beauty effects can strip the native SDK, in
+`android/app/build.gradle.kts`:
+
+```kotlin
+configurations.all {
+    exclude(group = "com.gravix", module = "gravix-effects")
+    exclude(group = "com.google.mediapipe", module = "tasks-vision")
+    exclude(group = "com.google.ai.edge.litert", module = "litert")
+}
+```
+
+and in the app's R8 rules (`android/app/proguard-rules.pro`):
+
+```
+-dontwarn com.gravix.effects.**
+-dontwarn com.google.mediapipe.**
+```
+
+Do not pass a `GravixBeautyEffect` then; if one is passed anyway,
+`canOwnCamera()` finds the SDK missing and the room opens its normal camera.
+
+### Third-party effects (Banuba, Tencent, FaceUnity …)
+
 `GravixVideoEffect` is the contract an effect package implements. The service
 calls `attach(target)` when the camera track starts (and after a flip),
 `detach()` when it stops, and replays the app's `setVideoEffectEnabled` /
@@ -151,6 +194,12 @@ looked up by `target.trackId`:
   `LocalVideoTrack.addProcessor(ExternalVideoFrameProcessing)`.
 - iOS: `FlutterWebRTCPlugin.sharedSingleton.localTracks[trackId]` →
   `-[LocalVideoTrack addProcessing:]` with an `ExternalVideoProcessingDelegate`.
+
+Several effects: `GravixRoomService(videoEffects: [a, b])` attaches them in
+order. A frame processor runs on the SDK's own camera; it does not stack on
+`GravixBeautyEffect`'s camera (that picture is not a flutter_webrtc capturer
+track), so with both, the processor reports itself not attached. To own the
+camera like the built-in effect, implement `GravixCameraEffect`.
 
 The full contract is in the `GravixVideoEffect` API docs. The old
 `beauty:` / `GravixBeautyFilter` / `DefaultGravixBeautyFilter` still work and are

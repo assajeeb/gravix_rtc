@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-10-24
+
+### Added: built-in beauty effects (Android)
+- `GravixBeautyEffect(licenseToken:)`: Gravix Effects 1.1.0 (looks, face reshape, makeup, stickers,
+  3D effects) as the room's camera. Parameters: `look`, `lookBytes` (Gravix Studio `.gfx`), `tone`,
+  `region`, `reshape`. New dependency: `gravix_effects_webrtc` (+ `gravix_effects`).
+- `GravixCameraEffect`: an effect that opens the camera itself; the service publishes its track,
+  flips through it and closes it on camera off / disconnect.
+- `GravixRoomService(videoEffects: [...])`: several effects in order (at most one camera owner).
+- Removable: the native SDK (~13 MB) can be stripped with Gradle excludes + R8 `-dontwarn` (README,
+  "Removing them"); a native check then makes `GravixBeautyEffect` decline and the room uses its
+  normal camera.
+
 ## 0.5.2 — 2026-10-22
 
 ### Added: `GravixAudioScenario.chatRoom` (Agora ChatRoom parity, Android)

@@ -51,7 +51,12 @@ export 'src/connect/gravix_signal_isolate.dart';
 export 'src/connect/gravix_restart_strategy.dart';
 export 'src/beauty/default_gravix_beauty_filter.dart';
 export 'src/beauty/gravix_beauty_filter.dart';
-export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding;
+export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding, GravixVideoEffectChain;
+export 'src/beauty/gravix_beauty_effect.dart';
+
+export 'package:gravix_effects_webrtc/gravix_effects_webrtc.dart'
+    show GravixCamera, GravixPreview, GravixLook, GravixLooks, GravixLens;
+
 export 'src/join/gravix_join.dart';
 export 'src/join/gravix_join_event.dart';
 export 'src/join/gravix_join_hooks.dart';

@@ -14,6 +14,7 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
  *  - [GravixClientPlugin]: the RTC core's `gravix_client` channel (audio
  *    session + routing, audio processing, visualizer/renderer, screen-capture
  *    and call foreground services).
+ *  - [GravixEffectsProbe]: `com.gravitycompile.gravix_rtc/effects` (is the beauty effects SDK in this APK).
  *  - [MusicMixerPlugin]: `com.gravitycompile.gravix_rtc/music` (room music;
  *    and the fast-connect channel it already owns). Its `flutterEngine` companion keeps working for apps that
  *    set it from `configureFlutterEngine`.
@@ -21,13 +22,16 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 class GravixCloudPlugin : FlutterPlugin, ActivityAware {
   private val client = GravixClientPlugin()
   private val music = MusicMixerPlugin()
+  private val effects = GravixEffectsProbe()
 
   override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
     client.onAttachedToEngine(binding)
     music.onAttachedToEngine(binding)
+    effects.onAttachedToEngine(binding)
   }
 
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+    effects.onDetachedFromEngine()
     music.onDetachedFromEngine(binding)
     client.onDetachedFromEngine(binding)
   }

@@ -96,4 +96,30 @@ void main() {
       expect(n.calls.single['agcOrder'], 'ownAfterNs');
     });
   });
+
+  group('scenario switching and explicit none', () {
+    test('switching back to standard restores ownAfterNs and an empty option map', () async {
+      gravixUseAudioScenario(GravixAudioScenario.chatRoom);
+      expect(gravixUseAudioScenario(GravixAudioScenario.standard), isEmpty);
+      expect(gravixAudioScenario, GravixAudioScenario.standard);
+      final n = _FakeNative();
+      final c = GravixNoiseSuppression.forTesting(n);
+      await c.configure(const GravixNoiseSuppressionOptions());
+      expect(n.calls.single['agcOrder'], 'ownAfterNs');
+    });
+
+    test('explicit GravixNsAgcOrder.none reaches native as "none" under standard', () async {
+      final n = _FakeNative();
+      final c = GravixNoiseSuppression.forTesting(n);
+      await c.configure(const GravixNoiseSuppressionOptions(agcOrder: GravixNsAgcOrder.none));
+      expect(n.calls.single['agcOrder'], 'none');
+      expect(c.adjustCapture(_base).autoGainControl, isFalse);
+    });
+
+    test('chatRoom option map is a fresh copy per call', () {
+      final a = gravixUseAudioScenario(GravixAudioScenario.chatRoom);
+      a['audioSampleRate'] = 1;
+      expect(gravixUseAudioScenario(GravixAudioScenario.chatRoom)['audioSampleRate'], 16000);
+    });
+  });
 }

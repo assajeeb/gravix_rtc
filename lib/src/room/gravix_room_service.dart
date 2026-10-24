@@ -91,11 +91,14 @@ import '../rtc_core/src/internal/events.dart'
 /// - [roomMusic]: room music (a local file mixed into the published mic), bound
 ///   to each room this service connects; [music] is its low-level bridge.
 /// - [videoEffect]: an optional [GravixVideoEffect] (beauty, blur, …) on the
-///   local camera track, from an effect package. None by default: the service
-///   then calls no effect code and [videoEffectActive] stays false.
+///   local camera track: the built-in `GravixBeautyEffect` or a third-party
+///   one. [videoEffects] runs several in order (at most one camera owner).
+///   None by default: the service then calls no effect code and
+///   [videoEffectActive] stays false.
 class GravixRoomService implements GravixAudioHost {
   GravixRoomService({
     GravixVideoEffect? videoEffect,
+    List<GravixVideoEffect>? videoEffects,
     @Deprecated('Pass videoEffect: (a GravixVideoEffect). Removal no earlier than 2027-09.') GravixBeautyFilter? beauty,
     GravixMusicController? music,
     GravixRoomMusic? roomMusic,
@@ -116,7 +119,15 @@ class GravixRoomService implements GravixAudioHost {
        _prepareConnection = prepareConnection ?? _defaultPrepareConnection,
        _requestMicPermission = requestMicPermission ?? _defaultRequestMicPermission,
        assert(videoEffect == null || beauty == null, 'pass videoEffect OR the deprecated beauty, not both'),
-       _effect = GravixVideoEffectBinding(videoEffect ?? (beauty == null ? null : GravixBeautyFilterEffect(beauty))),
+       assert(
+         videoEffects == null || (videoEffect == null && beauty == null),
+         'pass videoEffects OR videoEffect, not both',
+       ),
+       _effect = GravixVideoEffectBinding(switch (videoEffects) {
+         final List<GravixVideoEffect> l when l.length > 1 => GravixVideoEffectChain(l),
+         final List<GravixVideoEffect> l when l.length == 1 => l.single,
+         _ => videoEffect ?? (beauty == null ? null : GravixBeautyFilterEffect(beauty)),
+       }),
        music = music ?? GravixMusicController(),
        roomMusic = roomMusic ?? GravixRoomMusic(null),
        _regionProber = regionProber ?? GravixRegionProber(),
@@ -2980,6 +2991,7 @@ class GravixRoomService implements GravixAudioHost {
   }
 
   Future<void> _setCameraEnabledNow(bool enabled) async {
+    if (await _setOwnedCameraEnabled(enabled)) return;
     try {
       await localParticipant?.setCameraEnabled(
         enabled,
@@ -3011,11 +3023,63 @@ class GravixRoomService implements GravixAudioHost {
     }
   }
 
+  /// The camera through a [GravixCameraEffect] (e.g. `GravixBeautyEffect`):
+  /// the effect opens the camera and the service publishes its track; off =
+  /// unpublish + the effect closes the camera. Returns false when no such
+  /// effect wants the camera now (the normal path runs instead).
+  Future<bool> _setOwnedCameraEnabled(bool enabled) async {
+    final owner = _effect.cameraOwner;
+    final local = localParticipant;
+    if (owner == null || local == null) return false;
+    final pub = local.getTrackPublicationBySource(TrackSource.camera);
+    final ownsTrack = pub?.track is LocalVideoTrack && _effect.target?.trackId == pub!.track!.mediaStreamTrack.id;
+    if (!enabled && pub != null && !ownsTrack) return false; // a normal-camera track: the normal path turns it off
+    if (enabled && !ownsTrack && !await owner.canOwnCamera()) return false;
+    try {
+      local.gravixCameraWanted = enabled;
+      if (enabled) {
+        if (ownsTrack) return true;
+        final track = await owner.openCamera(
+          CameraCaptureOptions(
+            cameraPosition: cameraPosition,
+            params: VideoParametersPresets.h540_169,
+            maxFrameRate: _effect.captureFps(24),
+            stopCameraCaptureOnMute: false,
+          ),
+        );
+        try {
+          await local.publishVideoTrack(track);
+        } catch (_) {
+          await owner.detach();
+          rethrow;
+        }
+        await _publishFacing();
+        isCameraEnabled.value = true;
+        await _effect.onCameraTrack(GravixVideoEffectTarget.fromTrack(track));
+      } else {
+        if (pub?.sid != null) await local.removePublishedTrack(pub!.sid);
+        await _effect.onCameraStopped();
+        isCameraEnabled.value = false;
+      }
+    } catch (e) {
+      debugPrint('Error setCameraEnabled($enabled) via "${owner.name}": $e');
+    }
+    return true;
+  }
+
   Future<void> switchCamera() async {
     try {
       final pub = _room?.localParticipant?.videoTrackPublications.firstOrNull;
       final track = pub?.track;
       if (track is! LocalVideoTrack) return;
+
+      final owner = _effect.cameraOwner;
+      if (owner != null && _effect.active.value && _effect.target?.trackId == track.mediaStreamTrack.id) {
+        // The effect owns the camera: it flips its own lens; the track stays.
+        cameraPosition = await owner.switchCamera();
+        await _publishFacing();
+        return;
+      }
 
       cameraPosition = cameraPosition == CameraPosition.front ? CameraPosition.back : CameraPosition.front;
 

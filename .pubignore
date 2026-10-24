@@ -10,3 +10,5 @@ native/gxns/tools/
 # iOS NS host check (dev only)
 tool/ns_ios_host/
 tool/ns_android/
+# Local development only
+pubspec_overrides.yaml

@@ -6,7 +6,7 @@
 // nothing about it.
 import 'package:flutter/foundation.dart';
 
-import '../rtc_core/gravix_client.dart' show LocalVideoTrack;
+import '../rtc_core/gravix_client.dart' show CameraCaptureOptions, CameraPosition, LocalVideoTrack;
 
 /// The local camera track an effect is asked to process.
 ///
@@ -40,11 +40,18 @@ class GravixVideoEffectTarget {
 }
 
 /// A real-time effect (beauty, background blur, filters …) on the LOCAL camera
-/// track. The SDK ships no effect — this is the hook an effect package plugs
-/// into, e.g. the separate `gravixEffect` package:
+/// track. Two kinds plug in here:
+///
+/// - a **frame processor** on the SDK's own camera track (this class): how a
+///   third-party beauty SDK (Banuba, Tencent, FaceUnity …) is added, through
+///   flutter_webrtc's processor chain (below);
+/// - a **camera owner** ([GravixCameraEffect]): the effect opens the camera
+///   itself and hands the SDK the finished picture as the camera track, like the
+///   built-in `GravixBeautyEffect`.
 ///
 /// ```dart
-/// final room = GravixRoomService(videoEffect: MyBeautyEffect());
+/// final room = GravixRoomService(videoEffect: GravixBeautyEffect(licenseToken: token));
+/// final room = GravixRoomService(videoEffects: [MyBanubaEffect(), MyBlurEffect()]);
 /// ```
 ///
 /// With no effect passed, the service calls nothing and claims nothing.
@@ -142,6 +149,13 @@ class GravixVideoEffectBinding {
 
   final GravixVideoEffect? effect;
 
+  /// The effect that opens the camera itself, if any (alone or in a chain).
+  GravixCameraEffect? get cameraOwner => switch (effect) {
+    final GravixCameraEffect c => c,
+    final GravixVideoEffectChain chain => chain.cameraOwner,
+    _ => null,
+  };
+
   /// True while the effect reported that it is processing the current track.
   final ValueNotifier<bool> active = ValueNotifier<bool>(false);
 
@@ -219,5 +233,111 @@ class GravixVideoEffectBinding {
     await onCameraStopped();
     _disposed = true;
     active.dispose();
+  }
+}
+
+/// A [GravixVideoEffect] that owns the camera: it opens the camera, renders the
+/// effect, and gives the service the result as a [LocalVideoTrack], which the
+/// service publishes as the room's camera. The built-in `GravixBeautyEffect` is
+/// one. At most one per service.
+///
+/// The service asks [canOwnCamera] each time the camera turns on. False (wrong
+/// platform, the native effect SDK stripped from the APK, no license check
+/// possible …): the service opens its normal camera instead, and [attach] on
+/// that track must then answer false.
+///
+/// Lifecycle: [openCamera] → the service publishes the track → [attach] with it
+/// (answer true only for the track [openCamera] returned) → [switchCamera] on
+/// flips (the track stays the same) → the service unpublishes the track →
+/// [detach], which must stop the camera.
+abstract class GravixCameraEffect extends GravixVideoEffect {
+  /// Whether this effect can own the camera on this device right now.
+  Future<bool> canOwnCamera();
+
+  /// Opens the camera at [options] (position, size, frame rate) with the effect
+  /// applied, and returns its track. Throws when the camera cannot open.
+  Future<LocalVideoTrack> openCamera(CameraCaptureOptions options);
+
+  /// Flips front ↔ back on the open camera; returns the new position.
+  Future<CameraPosition> switchCamera();
+}
+
+/// Several effects run as one, in order, for `GravixRoomService(videoEffects:)`.
+/// Internal: the service builds it; not exported from the package barrel.
+///
+/// [attach] answers true when at least one effect processes the track. A camera
+/// owner's track is not a flutter_webrtc capturer track, so processor effects
+/// answer false on it: a third-party processor and the built-in beauty effect do
+/// not stack (the processor is skipped, honestly reported in the log).
+class GravixVideoEffectChain extends GravixVideoEffect {
+  GravixVideoEffectChain(List<GravixVideoEffect> effects)
+    : effects = List.unmodifiable(effects),
+      assert(effects.whereType<GravixCameraEffect>().length <= 1, 'at most one GravixCameraEffect'),
+      assert(effects.isNotEmpty, 'an empty chain: pass no effect instead');
+
+  final List<GravixVideoEffect> effects;
+  final Set<GravixVideoEffect> _attached = {};
+
+  /// The camera owner among [effects], if any.
+  GravixCameraEffect? get cameraOwner => effects.whereType<GravixCameraEffect>().firstOrNull;
+
+  @override
+  String get name => effects.map((e) => e.name).join('+');
+
+  @override
+  int? get minFps {
+    int? m;
+    for (final e in effects) {
+      final f = e.minFps;
+      if (f != null && (m == null || f > m)) m = f;
+    }
+    return m;
+  }
+
+  @override
+  Future<bool> attach(GravixVideoEffectTarget target) async {
+    for (final e in effects) {
+      bool ok;
+      try {
+        ok = await e.attach(target);
+      } catch (err) {
+        debugPrint('video effect "${e.name}" attach failed: $err');
+        ok = false;
+      }
+      if (ok) {
+        _attached.add(e);
+      } else {
+        _attached.remove(e);
+        debugPrint('video effect "${e.name}" is not processing $target');
+      }
+    }
+    return _attached.isNotEmpty;
+  }
+
+  @override
+  Future<void> detach() async {
+    _attached.clear();
+    for (final e in effects.reversed) {
+      try {
+        await e.detach();
+      } catch (err) {
+        debugPrint('video effect "${e.name}" detach failed: $err');
+      }
+    }
+  }
+
+  @override
+  Future<void> setEnabled(bool enabled) async {
+    for (final e in effects.where(_attached.contains)) {
+      await e.setEnabled(enabled);
+    }
+  }
+
+  /// Every attached effect gets the same map; each reads its own keys.
+  @override
+  Future<void> setParams(Map<String, Object?> params) async {
+    for (final e in effects.where(_attached.contains)) {
+      await e.setParams(params);
+    }
   }
 }

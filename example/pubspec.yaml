@@ -54,6 +54,8 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  assets:
+    - assets/looks/caption.gfx
   # CocoaPods for the in-repo example: with SwiftPM the Flutter tool copies the
   # plugin's whole package root (this example's build/ included) into
   # build/ios/SourcePackages on every build, which nests without bound. Apps
