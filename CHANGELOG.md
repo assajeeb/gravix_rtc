@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1 — 2026-10-25
+
+### Fixed: a needless reconnect about 16 s after a host joins a room alone
+- The uplink watch (`uplinkFeedbackStallFor`) resumed a healthy connection once per join when the
+  server paused the camera layers (nobody watching): packets sent just before the pause counted as
+  unanswered. A stream must now still be sending to count; a dead uplink still resumes.
+
+### Changed: Gravix Effects 1.1.1
+- Requires `gravix_effects_webrtc` / `gravix_effects` ^1.1.1: licence tokens from the Gravix Cloud
+  panel (production key) now remove the watermark in release builds.
+- Flipping the camera on a phone with one camera no longer freezes the picture: the current camera
+  keeps running and `switchCamera()` leaves `cameraPosition` unchanged (`E_NO_CAMERA`).
+
 ## 0.6.0 — 2026-10-24
 
 ### Added: built-in beauty effects (Android)

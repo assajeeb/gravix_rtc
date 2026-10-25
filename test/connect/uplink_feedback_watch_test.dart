@@ -50,6 +50,30 @@ void main() {
     }
   });
 
+  // Infinix 2026-10-25 (blr1, host alone in the room): 10 s after the join the
+  // SFU paused both camera layers (nobody subscribed), so its receiver reports
+  // stopped too. The packets sent between the last report and the pause still
+  // counted, and 5 s later the watch resumed a healthy connection, once per join.
+  test('layer paused by the server after sending -> nothing (it is not sending now)', () {
+    expect(s('cam:h', 1000, 'rr1'), isFalse);
+    tick();
+    expect(s('cam:h', 1060, 'rr1'), isFalse, reason: '60 packets went out, then the layer was paused');
+    for (var i = 0; i < 6; i++) {
+      tick();
+      expect(s('cam:h', 1060, 'rr1'), isFalse, reason: 'paused: nothing sent since the last sample');
+    }
+  });
+
+  test('a paused layer resumed while the path is dead -> a resume', () {
+    s('cam:h', 1000, 'rr1');
+    tick();
+    s('cam:h', 1060, 'rr1'); // then paused
+    tick();
+    s('cam:h', 1060, 'rr1');
+    tick();
+    expect(s('cam:h', 1200, 'rr1'), isTrue, reason: 'sending again, still no report for 6 s');
+  });
+
   test('no report ever (none to compare) -> nothing', () {
     for (var i = 0; i < 6; i++) {
       expect(s('mic', 100 * i, null), isFalse);

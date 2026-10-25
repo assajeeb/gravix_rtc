@@ -3,7 +3,7 @@ description: >-
   Real-time video and audio rooms for Flutter on Gravix Cloud: one room
   service, region-aware connect, token providers, join analytics and a
   video-effect hook.
-version: 0.6.0
+version: 0.6.1
 homepage: https://www.gravixcloud.com/docs
 topics:
   - webrtc
@@ -33,7 +33,7 @@ dependencies:
   flutter_webrtc: '>=1.6.0 <1.7.0'
   # Built-in beauty effects (GravixBeautyEffect, Android). ~13 MB of native code an app can strip:
   # README "Beauty effects: removing them".
-  gravix_effects_webrtc: ^1.1.0
+  gravix_effects_webrtc: ^1.1.1
   dart_webrtc: ^1.8.0
   asn1lib: ^1.6.5
   async: ^2.13.0

@@ -20,18 +20,22 @@
 // (`remote-inbound-rtp`, [SenderStats.remoteReportMarker]) every 2 s. When a
 // stream sent at least [minPacketsSent] packets since its last new report,
 // that report is older than stallFor, and no other stream got a new report in
-// that time either (the path, not one stream), the caller resumes. At most once
-// per [minInterval]; [reset] after a resume or rejoin restarts every clock.
+// that time either (the path, not one stream), the caller resumes -- only while
+// the stream is still sending (at least [minPacketsSinceSample] since the
+// previous sample: a layer the server paused gets no report and needs none).
+// At most once per [minInterval]; [reset] after a resume or rejoin restarts
+// every clock.
 // A stream that never got a report has nothing to compare and never triggers.
 //
 // Inputs are the sender stats the local tracks already poll (no new poll, no
 // wire cost).
 
 class _UplinkStream {
-  _UplinkStream(this.feedbackAt, this.packetsAtFeedback, this.feedback);
+  _UplinkStream(this.feedbackAt, this.packetsAtFeedback, this.feedback) : lastPackets = packetsAtFeedback;
   DateTime feedbackAt;
   num? packetsAtFeedback;
   String? feedback;
+  num? lastPackets; // packetsSent of the previous sample
 }
 
 class GravixUplinkFeedbackWatch {
@@ -40,6 +44,13 @@ class GravixUplinkFeedbackWatch {
   /// Packets a stream must have sent since its last report: a muted track or a
   /// paused simulcast layer sends (almost) nothing and is never "unanswered".
   static const minPacketsSent = 20;
+
+  /// Packets a stream must have sent since its previous sample (2 s) to count as
+  /// sending NOW. Infinix 2026-10-25: 10 s after the join the SFU paused both
+  /// camera layers of a host alone in the room, and its receiver reports stopped
+  /// with the media; the packets sent between the last report and the pause made
+  /// a healthy, paused uplink look unanswered and resumed it 5 s later.
+  static const minPacketsSinceSample = 5;
 
   /// At most one resume per this long.
   static const minInterval = Duration(seconds: 20);
@@ -70,8 +81,11 @@ class GravixUplinkFeedbackWatch {
       _streams[key] = _UplinkStream(now, packetsSent, feedback);
       return false;
     }
+    final sinceSample = packetsSent - (s.lastPackets ?? packetsSent);
+    s.lastPackets = packetsSent;
     if (now.difference(s.feedbackAt) < stallFor) return false;
     if (packetsSent - (s.packetsAtFeedback ?? packetsSent) < minPacketsSent) return false;
+    if (sinceSample < minPacketsSinceSample) return false; // paused or muted now: nothing to answer
     // the path, not one stream: no other stream got a new report within stallFor either
     for (final e in _streams.entries) {
       if (e.key == key || e.value.feedback == null) continue;
