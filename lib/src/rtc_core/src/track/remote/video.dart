@@ -72,7 +72,7 @@ class RemoteVideoTrack extends RemoteTrack with VideoTrack {
 
     late List<rtc.StatsReport> stats;
     try {
-      stats = await receiver!.getStats();
+      stats = await gravixTrackStats();
     } catch (e) {
       rethrow;
     }

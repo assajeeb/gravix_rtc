@@ -30,6 +30,7 @@ import '../support/platform.dart';
 import '../types/other.dart';
 import '../utils.dart';
 import 'gravix_pub_log.dart';
+import '../support/gravix_native_gate.dart';
 
 const ddExtensionURI = 'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension';
 
@@ -527,7 +528,10 @@ class Transport extends Disposable {
         final pinned = sd.type == 'answer' ? gravixPinOpusAnswer(sd.sdp ?? '', _audioMidCid, _opusPins) : null;
         if (pinned != null) {
           try {
-            await pc.setRemoteDescription(rtc.RTCSessionDescription(pinned, 'answer'));
+            await GravixNativeGate.remoteDescription(
+              () => pc.setRemoteDescription(rtc.RTCSessionDescription(pinned, 'answer')),
+              pc: gravixLogLabel,
+            );
             GravixPubLog.step('answerPin', pc: gravixLogLabel, detail: 'opus usedtx/stereo pinned');
           } catch (e) {
             GravixPubLog.step(
@@ -535,10 +539,10 @@ class Transport extends Disposable {
               pc: gravixLogLabel,
               detail: 'refused (${GravixPubLog.reason(e)}), as answered',
             );
-            await pc.setRemoteDescription(sd);
+            await GravixNativeGate.remoteDescription(() => pc.setRemoteDescription(sd), pc: gravixLogLabel);
           }
         } else {
-          await pc.setRemoteDescription(sd);
+          await GravixNativeGate.remoteDescription(() => pc.setRemoteDescription(sd), pc: gravixLogLabel);
         }
         _remoteSet = true;
         if (sd.type == 'answer') _offerPending = false;
@@ -658,7 +662,7 @@ class Transport extends Disposable {
         // TODO: handle when ICE restart is needed but we don't have a remote description
         // the best thing to do is to recreate the peerconnection
         if (!(gravixRollbackStaleOffer && await _gravixRollbackLocalOffer())) {
-          await pc.setRemoteDescription(currentSD);
+          await GravixNativeGate.remoteDescription(() => pc.setRemoteDescription(currentSD), pc: gravixLogLabel);
         }
         _offerPending = false; // stable again: the restart offer is next
       } else {
@@ -1017,7 +1021,7 @@ class Transport extends Disposable {
         // GRAVIX (0.4.19): never an SDP body in a log (ice-pwd, fingerprint)
         logger.finer('description munged: ${GravixPubLog.describe(sd.type, munged)}');
         if (remote == true) {
-          await pc.setRemoteDescription(sd);
+          await GravixNativeGate.remoteDescription(() => pc.setRemoteDescription(sd), pc: gravixLogLabel);
         } else {
           await pc.setLocalDescription(sd);
         }
@@ -1035,7 +1039,7 @@ class Transport extends Disposable {
 
     try {
       if (remote == true) {
-        await pc.setRemoteDescription(sd);
+        await GravixNativeGate.remoteDescription(() => pc.setRemoteDescription(sd), pc: gravixLogLabel);
       } else {
         await pc.setLocalDescription(sd);
       }

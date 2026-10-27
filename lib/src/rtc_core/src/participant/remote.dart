@@ -217,6 +217,8 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
       }
     }
 
+    // GRAVIX (0.7.1): stats from the subscriber's connection-wide getStats().
+    track.gravixStatsPeerConnection = () => room.engine.subscriber?.pc;
     await pub.updateTrack(track);
     await pub.updateSubscriptionAllowed(true);
     addTrackPublication(pub);

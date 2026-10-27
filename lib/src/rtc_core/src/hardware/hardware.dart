@@ -23,6 +23,7 @@ import '../audio/audio_manager.dart';
 import '../audio/audio_session.dart';
 import '../logger.dart';
 import '../support/platform.dart';
+import '../support/gravix_native_gate.dart';
 
 class MediaDevice {
   const MediaDevice(this.deviceId, this.label, this.kind, this.groupId);
@@ -165,10 +166,13 @@ class Hardware {
       }
     }
     selectedVideoInput = device;
-    return rtc.navigator.mediaDevices.getUserMedia(<String, dynamic>{
-      'audio': false,
-      'video': device != null ? constraints : true,
-    });
+    return GravixNativeGate.localTrack(
+      () => rtc.navigator.mediaDevices.getUserMedia(<String, dynamic>{
+        'audio': false,
+        'video': device != null ? constraints : true,
+      }),
+      what: 'getUserMedia',
+    );
   }
 
   /// Requests permission to capture the screen before starting a screen share.

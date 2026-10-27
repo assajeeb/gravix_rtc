@@ -24,6 +24,7 @@ import '../logger.dart';
 import '../managers/broadcast_manager.dart';
 import 'native_audio.dart';
 import '../../../noise/gravix_noise_native.dart' show GravixNoiseNative, gravixNsNormalizeIosEvent;
+import 'gravix_native_gate.dart';
 
 // Method channel methods to call native code.
 class Native {
@@ -572,6 +573,8 @@ class Native {
     String visualizerId = '',
     bool smoothTransition = true,
   }) async {
+    // GRAVIX (0.7.1): the native side looks the remote track up via getTransceivers().
+    await GravixNativeGate.afterRemoteSet(what: 'startVisualizer');
     try {
       final result = await channel.invokeMethod<bool>('startVisualizer', <String, dynamic>{
         'trackId': trackId,
@@ -605,6 +608,7 @@ class Native {
     required String rendererId,
     required Map<String, dynamic> format,
   }) async {
+    await GravixNativeGate.afterRemoteSet(what: 'startAudioRenderer');
     try {
       final result = await channel.invokeMethod<bool>('startAudioRenderer', <String, dynamic>{
         'trackId': trackId,

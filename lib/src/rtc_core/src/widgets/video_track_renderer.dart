@@ -32,6 +32,7 @@ import '../track/local/video.dart';
 import '../track/options.dart';
 import '../track/video_track_view_registration.dart';
 import '../types/other.dart';
+import '../support/gravix_native_gate.dart';
 
 enum VideoViewMirrorMode { auto, off, mirror }
 
@@ -207,10 +208,14 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
   }
 
   Future<void> _attach() async {
+    // GRAVIX (0.7.1): setting srcObject runs getTransceivers() natively.
+    await GravixNativeGate.afterRemoteSet(what: 'rendererAttach');
+    if (!mounted) return;
     _renderer?.srcObject = widget.track.mediaStream;
     await _listener?.dispose();
     _listener = widget.track.createListener()
-      ..on<TrackStreamUpdatedEvent>((event) {
+      ..on<TrackStreamUpdatedEvent>((event) async {
+        await GravixNativeGate.afterRemoteSet(what: 'rendererAttach');
         if (!mounted) return;
         _renderer?.srcObject = event.stream;
       })
@@ -283,7 +288,6 @@ class _VideoTrackRendererState extends State<VideoTrackRenderer> {
         objectFit: widget.fit.toRTCType(),
         onViewReady: (controller) async {
           _renderer = controller;
-          _renderer?.srcObject = widget.track.mediaStream;
           await _attach();
         },
       );

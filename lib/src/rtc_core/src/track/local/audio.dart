@@ -329,7 +329,7 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
     late List<rtc.StatsReport> stats;
     try {
-      stats = await sender!.getStats();
+      stats = await gravixTrackStats();
     } catch (e) {
       rethrow;
     }

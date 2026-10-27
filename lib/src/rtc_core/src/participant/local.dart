@@ -361,6 +361,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       track.lastPublishOptions = publishOptions;
 
       final pub = LocalTrackPublication<LocalAudioTrack>(participant: this, info: trackInfo, track: track);
+      // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
+      track.gravixStatsPeerConnection = () => room.engine.publisher?.pc;
       addTrackPublication(pub);
       if (track.source == TrackSource.microphone) {
         // background capture needs the service's microphone type (when enabled)
@@ -794,6 +796,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     if (!gravixDetached) await track.start();
 
     final pub = LocalTrackPublication<LocalVideoTrack>(participant: this, info: trackInfo, track: track);
+    // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
+    track.gravixStatsPeerConnection = () => room.engine.publisher?.pc;
     addTrackPublication(pub);
     if (track.source == TrackSource.camera) {
       unawaited(GravixForegroundService.roomPublished(room, camera: true));

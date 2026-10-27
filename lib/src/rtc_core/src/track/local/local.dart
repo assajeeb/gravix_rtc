@@ -42,6 +42,7 @@ import '../track.dart';
 import '../video_track_view_registration.dart';
 import 'audio.dart';
 import 'video.dart';
+import '../../support/gravix_native_gate.dart';
 
 /// Used to group [LocalVideoTrack] and [RemoteVideoTrack].
 mixin VideoTrack on Track {
@@ -287,10 +288,16 @@ abstract class LocalTrack extends Track {
           constraints['video'] = true;
         }
       }
-      stream = await rtc.navigator.mediaDevices.getDisplayMedia(constraints);
+      stream = await GravixNativeGate.localTrack(
+        () => rtc.navigator.mediaDevices.getDisplayMedia(constraints),
+        what: 'getDisplayMedia',
+      );
     } else {
       // options is CameraVideoTrackOptions
-      stream = await rtc.navigator.mediaDevices.getUserMedia(constraints);
+      stream = await GravixNativeGate.localTrack(
+        () => rtc.navigator.mediaDevices.getUserMedia(constraints),
+        what: 'getUserMedia',
+      );
     }
 
     // Check if the stream looks good

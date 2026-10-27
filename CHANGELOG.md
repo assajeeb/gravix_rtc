@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.1 — 2026-10-27
+
+### Fixed: an Android crash while joining (native abort on WebRTC's signalling thread)
+- About 1 join in 20 (Redmi Note 11, joining a room that has publishers while publishing the
+  mic; 0.6.1 and 0.7.0 alike) the app died with `SIGABRT` / `jvm.cc, line 81` as the remote
+  tracks arrived. flutter_webrtc's Android `getUserMedia` looks every new track id up on every
+  peer connection, which disposes the transceiver/receiver/track objects its `onAddTrack` is
+  using on the signalling thread ("MediaStreamTrack/RtpTransceiver has been disposed").
+- The SDK now keeps local track creation (`getUserMedia`/`getDisplayMedia`) and
+  `setRemoteDescription` apart: a capture start waits for a remote description in flight
+  (milliseconds), and a remote description waits for a capture start that began less than
+  300 ms ago (at most that long). Logged as `[GravixGate] ...` when a wait happens.
+- Calls that name a remote track (enabling/disabling it, attaching it to a `VideoTrackRenderer`,
+  the audio visualizer/renderer) are sent only once no remote description is in flight: the
+  plugin looks remote tracks up through the same disposing `getTransceivers()`.
+- Track stats no longer use the per-track `sender/receiver.getStats()`, which disposes the same
+  objects: they come from the connection-wide `getStats()`, scoped to the track (the same
+  reports as before).
+- Tests fail if a raw `setRemoteDescription`/`getUserMedia`/`getDisplayMedia` or a per-track
+  `getStats()` call comes back. Not covered: an app calling flutter_webrtc directly (its own
+  `getUserMedia`, `RTCVideoRenderer.srcObject`, `track.enabled`) while remote tracks arrive;
+  use the SDK's tracks and `VideoTrackRenderer` for those.
+
 ## 0.7.0 — 2026-10-27
 
 ### Added: sign join tokens on the device

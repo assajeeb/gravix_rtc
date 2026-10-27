@@ -117,7 +117,7 @@ class LocalVideoTrack extends LocalTrack with VideoTrack {
       return [];
     }
 
-    final stats = await sender!.getStats();
+    final stats = await gravixTrackStats();
     final List<VideoSenderStats> items = [];
     for (var v in stats) {
       if (v.type == 'outbound-rtp') {

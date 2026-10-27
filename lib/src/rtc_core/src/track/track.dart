@@ -15,7 +15,7 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
@@ -26,9 +26,11 @@ import '../extensions.dart';
 import '../internal/events.dart';
 import '../logger.dart';
 import '../managers/event.dart';
+import '../stats/gravix_track_stats.dart';
 import '../stats/stats.dart';
 import '../support/disposable.dart';
 import '../types/other.dart';
+import '../support/gravix_native_gate.dart';
 
 /// Wrapper around a MediaStreamTrack with additional metadata.
 /// Base for [AudioTrack] and [VideoTrack],
@@ -62,6 +64,39 @@ abstract class Track extends DisposableChangeNotifier with EventsEmittable<Track
   rtc.RTCRtpSender? get sender => transceiver?.sender;
 
   rtc.RTCRtpReceiver? receiver;
+
+  /// GRAVIX (0.7.1): the peer connection this track's RTP stream is on (the
+  /// publisher for a local track, the subscriber for a remote one), read when
+  /// stats are taken so a replaced connection is followed. Set by the
+  /// participant that publishes / receives the track.
+  @internal
+  rtc.RTCPeerConnection? Function()? gravixStatsPeerConnection;
+
+  bool _gravixStatsLogged = false;
+
+  /// GRAVIX (0.7.1): this track's stats from the connection-wide getStats(),
+  /// never from `sender/receiver.getStats()`: on Android those race the plugin's
+  /// onAddTrack and abort the app (see gravix_track_stats.dart). Empty when the
+  /// connection is unknown or the track has no RTP stream yet.
+  @internal
+  Future<List<rtc.StatsReport>> gravixTrackStats() async {
+    final pc = gravixStatsPeerConnection?.call();
+    final id = mediaStreamTrack.id ?? '';
+    if (pc == null) {
+      _logStatsOnce('pc=none');
+      return const [];
+    }
+    final all = await pc.getStats();
+    final scoped = gravixScopeStatsToTrack(all, id);
+    _logStatsOnce('reports=${scoped.length}/${all.length}');
+    return scoped;
+  }
+
+  void _logStatsOnce(String detail) {
+    if (_gravixStatsLogged) return;
+    _gravixStatsLogged = true;
+    debugPrint('[GravixStats] track-scoped kind=${kind.name} source=${source.name} $detail');
+  }
 
   Track(this.kind, this.source, this._mediaStream, this._mediaStreamTrack, {this.receiver}) {
     // Any event emitted will trigger ChangeNotifier
@@ -148,6 +183,8 @@ abstract class Track extends DisposableChangeNotifier with EventsEmittable<Track
 
   Future<void> enable() async {
     logger.fine('$objectId.enable() enabling ${mediaStreamTrack.objectId}...');
+    // GRAVIX (0.7.1): a remote track's enable runs getTransceivers() natively.
+    await GravixNativeGate.afterRemoteSet(what: 'trackEnable');
     try {
       if (_active) {
         mediaStreamTrack.enabled = true;
@@ -159,6 +196,7 @@ abstract class Track extends DisposableChangeNotifier with EventsEmittable<Track
 
   Future<void> disable() async {
     logger.fine('$objectId.disable() disabling ${mediaStreamTrack.objectId}...');
+    await GravixNativeGate.afterRemoteSet(what: 'trackDisable');
     try {
       if (_active) {
         mediaStreamTrack.enabled = false;
