@@ -1220,11 +1220,40 @@ GravixRegionPick? _pickMeasured(
 /// The measured regions as join candidates, for a connect whose token came with
 /// no region list -- only when [connectUrl] is itself a measured region (a url
 /// outside them, e.g. the app's own server, is never redirected). Else empty.
-List<GravixRegionUrl> gravixMeasuredCandidates(String connectUrl, {DateTime? now}) {
+///
+/// [media] (2026-10-27): [connectUrl] is a fleet region of the last
+/// `/v1/regions` answer that was not measured (outside this caller's shortlist)
+/// and does not allow [media] (doh1 audio-only, a video join): the candidates
+/// are the measured regions plus the directory, so [gravixPickRegionFor] moves
+/// the join to the best measured region allowing [media], else the first
+/// shortlist region allowing it. No region allows [media]: empty (the token url
+/// stays) and the log says why. A lookup, nothing sent. Field 2026-10-27: such a
+/// video join stayed on doh1 and its camera publish was refused.
+List<GravixRegionUrl> gravixMeasuredCandidates(String connectUrl, {DateTime? now, GravixRoomMedia? media}) {
   final m = gravixRegionMeasurement(now: now);
   String norm(String u) => u.replaceAll(RegExp(r'/+$'), '');
-  if (m == null || !m.regions.any((r) => norm(r.url) == norm(connectUrl))) return const [];
-  return [for (final r in m.regions) r.entry];
+  if (m != null && m.regions.any((r) => norm(r.url) == norm(connectUrl))) {
+    return [for (final r in m.regions) r.entry];
+  }
+  if (media == null) return const [];
+  final dir = gravixLastRegionDirectory();
+  final n = gravixNormalizeRegionUrl(connectUrl);
+  final token = dir.where((c) => gravixNormalizeRegionUrl(c.url) == n).firstOrNull;
+  if (token == null || gravixRegionAllowsMedia(token, media, now: now)) return const [];
+  final why = '${token.region}(${gravixMediaSkipWhy(token, media, now: now)})';
+  if (!dir.any((c) => gravixRegionAllowsMedia(c, media, now: now))) {
+    GravixRegionLog.step('candidates', 'media=${media.name} pinned=$why kept cause=no-region-allows-${media.name}');
+    return const [];
+  }
+  final out = <GravixRegionUrl>[for (final r in m?.regions ?? const <GravixRegionMeasurement>[]) r.entry];
+  for (final c in dir) {
+    if (!out.any((o) => o.region == c.region || norm(o.url) == norm(c.url))) out.add(c);
+  }
+  GravixRegionLog.step(
+    'candidates',
+    'media=${media.name} pinned=$why unmeasured -> directory+measured cause=media-not-allowed',
+  );
+  return out;
 }
 
 /// Measure now, then every [refresh] and whenever the network changes. Call once

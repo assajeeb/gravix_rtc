@@ -21,6 +21,9 @@
 ///   callback, or your own backend's url) without holding the gateway secret,
 ///   (the deprecated key+secret-on-the-device client is not part of
 ///   gravix_rtc; see `doc/MIGRATION_TOKEN_PROVIDER.md`),
+///   or `GravixTokenProvider.local`, which signs on the device,
+/// - [GravixTokenBuilder] — signs a join token locally (the npm
+///   `gravix-rtc-token` twin); it needs the App Certificate on the device,
 /// - [GravixAudioRouting] — opt-in v2 audio routing (`v2 = true`).
 ///
 /// No state-management framework is required: observable fields are
@@ -29,6 +32,7 @@
 library;
 
 export 'src/audio/audio.dart';
+export 'src/backend/gravix_token_builder.dart';
 export 'src/backend/gravix_token_provider.dart';
 export 'src/connect/gravix_analytics.dart';
 export 'src/connect/gravix_connection_report.dart';

@@ -160,6 +160,91 @@ void main() {
       },
     );
 
+    // Field 2026-10-27: token url = doh1 (audio-only), no region list in the
+    // token, and doh1 not in this caller's shortlist (never measured): the video
+    // join stayed on doh1 and the camera was refused (media_not_allowed).
+    final unmeasuredDoh1 = {
+      'regions': [
+        _r('doh1', ['audio']),
+        _r('dac1'),
+        _r('blr1'),
+        _r('sgp1'),
+      ],
+      'shortlist': ['dac1', 'blr1', 'sgp1'],
+    };
+
+    test('an unmeasured audio-only token url: a video join takes the best measured region allowing video', () async {
+      await _measure(unmeasuredDoh1, {'doh1': 12, 'dac1': 140, 'blr1': 70, 'sgp1': 95});
+      final video = gravixJoinUrl(_creds('wss://doh1.example.test'), media: GravixRoomMedia.video);
+      expect(video.region, 'blr1');
+      expect(video.url, 'wss://blr1.example.test');
+      expect(video.source, GravixJoinUrlSource.measured);
+      expect(
+        lines,
+        contains(
+          '[GravixRegion] candidates media=video pinned=doh1(audio-only) unmeasured -> directory+measured cause=media-not-allowed',
+        ),
+      );
+      final audio = gravixJoinUrl(_creds('wss://doh1.example.test'), media: GravixRoomMedia.audio);
+      expect(audio.url, 'wss://doh1.example.test', reason: 'doh1 allows audio: the token url stays');
+      expect(audio.source, GravixJoinUrlSource.token);
+    });
+
+    test('an unmeasured audio-only token url, nothing measured: the first shortlist region allowing video', () async {
+      await _measure(unmeasuredDoh1, {});
+      final video = gravixJoinUrl(_creds('wss://doh1.example.test'), media: GravixRoomMedia.video);
+      expect(video.url, 'wss://dac1.example.test');
+      expect(video.source, GravixJoinUrlSource.measured);
+    });
+
+    test('no region allows the media: the token url stays, and the log says why', () async {
+      await _measure(
+        {
+          'regions': [
+            _r('doh1', ['audio']),
+            _r('blr1', ['audio']),
+          ],
+          'shortlist': ['blr1'],
+        },
+        {'blr1': 70},
+      );
+      final video = gravixJoinUrl(_creds('wss://doh1.example.test'), media: GravixRoomMedia.video);
+      expect(video.url, 'wss://doh1.example.test');
+      expect(video.source, GravixJoinUrlSource.token);
+      expect(
+        lines,
+        contains('[GravixRegion] candidates media=video pinned=doh1(audio-only) kept cause=no-region-allows-video'),
+      );
+    });
+
+    // 2026-10-27: a token signed on the device (GravixTokenProvider.local) has
+    // no region list either; the same rule must move its video join off doh1.
+    test('a device-signed token on doh1: a video join still moves to a region allowing video', () async {
+      await _measure(unmeasuredDoh1, {'doh1': 12, 'dac1': 140, 'blr1': 70, 'sgp1': 95});
+      final provider = GravixTokenProvider.local(
+        appId: 'APPlocal',
+        appCertificate: 'x' * 32,
+        url: 'wss://doh1.example.test',
+      );
+      final creds = await provider.getCredentials(
+        const GravixTokenRequest(room: 'r1', identity: 'u1', canPublish: true),
+      );
+      expect(creds.regionEntries, isEmpty);
+      final video = gravixJoinUrl(creds, media: GravixRoomMedia.video);
+      expect(video.url, 'wss://blr1.example.test');
+      expect(video.source, GravixJoinUrlSource.measured);
+      final audio = gravixJoinUrl(creds, media: GravixRoomMedia.audio);
+      expect(audio.url, 'wss://doh1.example.test');
+    });
+
+    test('a url outside the fleet is still never redirected', () async {
+      await _measure(unmeasuredDoh1, {'blr1': 70});
+      final video = gravixJoinUrl(_creds('wss://own.server.test'), media: GravixRoomMedia.video);
+      expect(video.url, 'wss://own.server.test');
+      expect(video.source, GravixJoinUrlSource.token);
+      expect(gravixMeasuredCandidates('wss://own.server.test', media: GravixRoomMedia.video), isEmpty);
+    });
+
     test('a standby open at an audio-only region does not take a video join', () async {
       await _measure(_gulf, {'doh1': 20, 'blr1': 60, 'sgp1': 90});
       final video = gravixJoinUrl(_creds('wss://doh1.example.test'), media: GravixRoomMedia.video);

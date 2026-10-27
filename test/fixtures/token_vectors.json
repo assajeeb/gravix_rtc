@@ -1,0 +1,67 @@
+{
+  "nowMs": 1793000000000,
+  "appId": "APPtestVec01",
+  "appCertificate": "cccccccccccccccc0123456789abcdefXYZ",
+  "cases": {
+    "minimal": {
+      "options": {
+        "room": "r1",
+        "identity": "u1"
+      },
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUFB0ZXN0VmVjMDEiLCJzdWIiOiJ1MSIsImlhdCI6MTc5MzAwMDAwMCwibmJmIjoxNzkzMDAwMDAwLCJleHAiOjE3OTMwMjE2MDAsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoiQVBQdGVzdFZlYzAxX3IxIiwiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuU3Vic2NyaWJlIjp0cnVlLCJjYW5QdWJsaXNoRGF0YSI6dHJ1ZSwiY2FuVXBkYXRlT3duTWV0YWRhdGEiOnRydWV9fQ.8XgpY6T6qf-ivzAV-jarR_AZ8VJKGqHotPcNxXODDI0"
+    },
+    "prefixed": {
+      "options": {
+        "room": "APPtestVec01_r1",
+        "identity": "u1"
+      },
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUFB0ZXN0VmVjMDEiLCJzdWIiOiJ1MSIsImlhdCI6MTc5MzAwMDAwMCwibmJmIjoxNzkzMDAwMDAwLCJleHAiOjE3OTMwMjE2MDAsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoiQVBQdGVzdFZlYzAxX3IxIiwiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuU3Vic2NyaWJlIjp0cnVlLCJjYW5QdWJsaXNoRGF0YSI6dHJ1ZSwiY2FuVXBkYXRlT3duTWV0YWRhdGEiOnRydWV9fQ.8XgpY6T6qf-ivzAV-jarR_AZ8VJKGqHotPcNxXODDI0"
+    },
+    "listener": {
+      "options": {
+        "room": "live",
+        "identity": "42",
+        "canPublish": false,
+        "ttlSeconds": 900
+      },
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUFB0ZXN0VmVjMDEiLCJzdWIiOiI0MiIsImlhdCI6MTc5MzAwMDAwMCwibmJmIjoxNzkzMDAwMDAwLCJleHAiOjE3OTMwMDA5MDAsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoiQVBQdGVzdFZlYzAxX2xpdmUiLCJjYW5QdWJsaXNoIjpmYWxzZSwiY2FuU3Vic2NyaWJlIjp0cnVlLCJjYW5QdWJsaXNoRGF0YSI6dHJ1ZSwiY2FuVXBkYXRlT3duTWV0YWRhdGEiOnRydWV9fQ.5vd1ysVAkNdUrFgNKmhmWlTfdnuomJCuUiPiVVGrjR0"
+    },
+    "everything": {
+      "options": {
+        "room": "party",
+        "identity": "u9",
+        "name": "Ñandú 🎉 أحمد",
+        "metadata": "say \"hi\"\nline2",
+        "attributes": {
+          "a": "1",
+          "b.c": "x"
+        },
+        "ttlSeconds": 86400,
+        "canPublish": true,
+        "canSubscribe": false,
+        "canPublishData": false,
+        "canUpdateOwnMetadata": false,
+        "canPublishSources": [
+          "camera",
+          "microphone"
+        ],
+        "hidden": true,
+        "roomAdmin": true
+      },
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUFB0ZXN0VmVjMDEiLCJzdWIiOiJ1OSIsImlhdCI6MTc5MzAwMDAwMCwibmJmIjoxNzkzMDAwMDAwLCJleHAiOjE3OTMwODY0MDAsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoiQVBQdGVzdFZlYzAxX3BhcnR5IiwiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuU3Vic2NyaWJlIjpmYWxzZSwiY2FuUHVibGlzaERhdGEiOmZhbHNlLCJjYW5VcGRhdGVPd25NZXRhZGF0YSI6ZmFsc2UsInJvb21BZG1pbiI6dHJ1ZSwiY2FuUHVibGlzaFNvdXJjZXMiOlsiY2FtZXJhIiwibWljcm9waG9uZSJdLCJoaWRkZW4iOnRydWV9LCJuYW1lIjoiw5FhbmTDuiDwn46JINij2K3ZhdivIiwibWV0YWRhdGEiOiJzYXkgXCJoaVwiXG5saW5lMiIsImF0dHJpYnV0ZXMiOnsiYSI6IjEiLCJiLmMiOiJ4In19.n14ojIs0Xuk3U4sog9S-sHHBN5RybkY8278Z90Jra7k"
+    },
+    "emptyOptionals": {
+      "options": {
+        "room": "r",
+        "identity": "u",
+        "name": "",
+        "metadata": "",
+        "attributes": {},
+        "canPublishSources": [],
+        "hidden": false,
+        "roomAdmin": false
+      },
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUFB0ZXN0VmVjMDEiLCJzdWIiOiJ1IiwiaWF0IjoxNzkzMDAwMDAwLCJuYmYiOjE3OTMwMDAwMDAsImV4cCI6MTc5MzAyMTYwMCwidmlkZW8iOnsicm9vbUpvaW4iOnRydWUsInJvb20iOiJBUFB0ZXN0VmVjMDFfciIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWUsImNhblVwZGF0ZU93bk1ldGFkYXRhIjp0cnVlfX0.M30GRyU4K0FdmcQPRtNJikCmakH5iS1yHJdqu19kGTM"
+    }
+  }
+}

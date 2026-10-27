@@ -72,4 +72,24 @@ void main() {
     expect(await service(connected).connect(url: sgp.url, token: 'opaque'), isTrue);
     expect(connected, [sgp.url]);
   });
+
+  // Field 2026-10-27: token url doh1 (audio-only), not in the shortlist so never
+  // measured, no region list: a video join must not dial doh1.
+  test('a video join with an unmeasured audio-only token url joins the measured video region', () async {
+    const doh = GravixRegionUrl(region: 'doh1', url: 'wss://rtc-doh1.example.com', media: ['audio']);
+    await gravixMeasureRegions(
+      regionsUrl: 'https://gw.example.com/v1/regions',
+      fetchDirectory: (_) async => const GravixRegionDirectory(regions: [doh, sgp, blr], shortlist: ['sgp1', 'blr1']),
+      sampler: (r) async => Duration(milliseconds: r.region == 'blr1' ? 30 : 90),
+      store: GravixMemoryRegionListStore(),
+      networkType: () async => 'unknown',
+    );
+    final video = <String>[];
+    expect(await service(video).connect(url: doh.url, token: 'opaque', media: GravixRoomMedia.video), isTrue);
+    expect(video, [blr.url]);
+    final audio = <String>[];
+    expect(await service(audio).connect(url: doh.url, token: 'opaque', media: GravixRoomMedia.audio), isTrue);
+    expect(audio, [doh.url]);
+    expect(probes, isEmpty);
+  });
 }

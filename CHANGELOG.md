@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.0 — 2026-10-27
+
+### Added: sign join tokens on the device
+- `GravixTokenBuilder.create(appId, appCertificate, GravixTokenOptions(...))`: the Dart twin of the
+  npm `gravix-rtc-token` package (byte-for-byte the same token; tested against vectors from the JS
+  build). Pure Dart (`crypto`), every platform.
+- `GravixTokenProvider.local(appId:, appCertificate:, url:)`: no token request on any join; cached
+  like the other providers. Without `regionEntries` the join uses the start-up region measurement,
+  and a video join whose `url` is on an audio-only region (doh1) still moves to a region allowing
+  video.
+- The App Certificate is then on the device: whoever extracts it can sign tokens for any user,
+  room and grant of that app until it is rotated. The endpoint provider remains the default.
+
+### Fixed: a video join no longer lands on an audio-only region it never measured
+- When the token's url is a region that allows audio only (doh1) and this device never measured it
+  (no region list in the token either), a video join now goes to the best measured region that
+  allows video, else the first shortlist region that allows it; an audio join stays. Before, the
+  video join dialed the audio-only region and the camera was refused (`media_not_allowed`). Lookup
+  only: no network call on the join path. The region-pick log line now shows `pinned=`.
+
 ## 0.6.1 — 2026-10-25
 
 ### Fixed: a needless reconnect about 16 s after a host joins a room alone

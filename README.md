@@ -110,6 +110,24 @@ await room.disconnect();
 await room.dispose();
 ```
 
+**Signing tokens on the device (no token request per join).** `GravixTokenProvider.local`
+signs each token in the app with your App Certificate (the same token the npm
+`gravix-rtc-token` package makes): no round trip to your server on any join. The
+certificate is then on the device, so anyone who extracts it can sign tokens for any
+user, room and grant of your app until you rotate it in the console. Deliver it only to
+signed-in users from your own server, and never commit it to source control.
+
+```dart
+final tokens = GravixTokenProvider.local(
+  appId: config.appId,
+  appCertificate: config.appCertificate, // from your server, after sign-in
+  url: config.url,                       // your region signalling url
+);
+```
+
+`GravixTokenBuilder.create(appId, appCertificate, GravixTokenOptions(...))` signs one
+token directly.
+
 A token you already hold works too: `room.connect(url: url, token: token)`, with
 the `url` from the same `{token, url}` response.
 

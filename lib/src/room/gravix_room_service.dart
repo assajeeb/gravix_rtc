@@ -1176,7 +1176,7 @@ class GravixRoomService implements GravixAudioHost {
       // goes to the fastest measured region -- a lookup, nothing sent. A token
       // minted by the app's own backend carries no region list: the measured
       // regions are the list then (only when [url] is one of them).
-      final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url);
+      final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url, media: joinMedia);
       final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion, media: joinMedia);
       if (measuredPick != null) {
         if (_regionEntries.isEmpty) _regionEntries = measuredList;

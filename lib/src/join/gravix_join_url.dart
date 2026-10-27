@@ -102,14 +102,17 @@ class GravixJoinUrlChoice {
 ///    redirected;
 ///  - no measurement yet: the token's url;
 ///  - [media] (2026-10-21): only regions that allow it (gravix_region_media.dart);
-///    a token url on a region that does not is replaced by the first shortlist
-///    region that does, even with nothing measured. Null: no filter.
+///    a token url on a region that does not is replaced by the best measured
+///    region that does, else the first shortlist region that does, even with
+///    nothing measured -- also when that url itself was not measured (2026-10-27,
+///    [gravixMeasuredCandidates]). No region allows it: the token url. Null: no
+///    filter.
 GravixJoinUrlChoice gravixJoinUrl(GravixJoinCredentials credentials, {DateTime? now, GravixRoomMedia? media}) {
   final serverUrl = credentials.url;
   try {
     final candidates = credentials.regionEntries.isNotEmpty
         ? credentials.regionEntries
-        : gravixMeasuredCandidates(serverUrl, now: now);
+        : gravixMeasuredCandidates(serverUrl, now: now, media: media);
     final home = credentials.homeRegion;
     final m = gravixRegionMeasurement(now: now);
     final best = m?.bestFor(media);

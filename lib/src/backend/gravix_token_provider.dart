@@ -10,6 +10,7 @@ import '../connect/gravix_region_report.dart';
 import '../rtc_core/src/exceptions.dart' show RetiredServerException;
 import '../rtc_core/src/token_source/jwt.dart';
 import '../rtc_core/src/token_source/token_source.dart';
+import 'gravix_token_builder.dart';
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  GravixTokenProvider — how an app gets a join token WITHOUT holding the
@@ -28,6 +29,11 @@ import '../rtc_core/src/token_source/token_source.dart';
 //   (c) endpoint — the SDK POSTs {room, identity, name, can_publish} to the
 //                  tenant's own backend, which answers with the gateway's
 //                  /v1/token response, unchanged.
+//   (d) local    — (2026-10-27, owner decision) the app holds the App
+//                  Certificate and the SDK signs every token on the device
+//                  ([GravixTokenBuilder]): no token round trip at all. This is
+//                  the one variant where the paragraph above does not hold;
+//                  see [GravixTokenProvider.local] for what that exposes.
 //
 // Why not just use the vendored upstream TokenSource as-is. Its response type
 // (`TokenSourceResponse`) has four fields and `region_urls` is not one of them,
@@ -543,6 +549,70 @@ class GravixTokenProvider implements TokenSourceConfigurable {
       unknownExpiryTtl: unknownExpiryTtl,
       maxEntries: maxEntries,
       refetchable: true,
+      reuse: reuse,
+      now: now,
+    );
+  }
+
+  /// (d) Signs every token on the device with [GravixTokenBuilder]: no token
+  /// round trip on any join (2026-10-27).
+  ///
+  /// [url] is the region signalling url the app's `/config` gives it (the url a
+  /// token endpoint would have answered with); [regionEntries] the region list,
+  /// when the app has one. With none, the join uses the start-up region
+  /// measurement, as for any token response without `region_urls`, and a video
+  /// join whose [url] is on an audio-only region (e.g. doh1) moves to a region
+  /// that allows video.
+  ///
+  /// The grant is whatever [options] returns; by default room, identity, name
+  /// and `canPublish: request.canPublish` (note: [GravixTokenRequest.canPublish]
+  /// defaults to false, i.e. a listener). With the certificate on the device
+  /// nothing on a server checks these: anyone who extracts it can sign a token
+  /// for any identity, room and grant of this app until the certificate is
+  /// rotated in the console. Deliver it to signed-in users from your own server
+  /// and never put it in source control.
+  ///
+  /// Throws [RetiredServerException] when [url] is on a retired Gravix host; a
+  /// [GravixTokenBuildException] from the builder (bad App ID, short certificate,
+  /// empty room or identity) surfaces as a [GravixTokenException] (`callback`).
+  factory GravixTokenProvider.local({
+    required String appId,
+    required String appCertificate,
+    required String url,
+    List<GravixRegionUrl> regionEntries = const <GravixRegionUrl>[],
+    Duration ttl = kGravixTokenDefaultTtl,
+    GravixTokenOptions Function(GravixTokenRequest request)? options,
+    Duration minRemainingValidity = const Duration(seconds: 60),
+    int maxEntries = 16,
+    GravixTokenReuse? reuse,
+    @visibleForTesting DateTime Function()? now,
+  }) {
+    RetiredServerException.check(url);
+    final clock = now ?? DateTime.now;
+    final entries = List<GravixRegionUrl>.unmodifiable(regionEntries);
+    return GravixTokenProvider.callback(
+      (request) {
+        final grant =
+            options?.call(request) ??
+            GravixTokenOptions(
+              room: request.room,
+              identity: request.identity,
+              name: request.name,
+              ttl: ttl,
+              canPublish: request.canPublish,
+            );
+        final fetchedAt = clock();
+        final token = GravixTokenBuilder.create(appId, appCertificate, grant, now: () => fetchedAt);
+        return GravixJoinCredentials(
+          token: token,
+          url: url,
+          regionEntries: entries,
+          expiresAt: _jwtPayload(token)?.expiresAt,
+          fetchedAt: fetchedAt,
+        );
+      },
+      minRemainingValidity: minRemainingValidity,
+      maxEntries: maxEntries,
       reuse: reuse,
       now: now,
     );
