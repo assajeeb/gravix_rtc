@@ -211,8 +211,8 @@ void main() {
     expect(sb['outcome'], 'used');
     expect(sb['path'], 'standby');
     expect(sb['reused'], isTrue);
-    // (0.4.19: the floor in the signal isolate is 0.4 s, kGravixStandbyIsolateUpgradeFloor)
-    expect(sb['boundMs'], 400, reason: '3 x 6 ms, at the 0.4 s signal-isolate floor');
+    // (0.7.2: an RTT under 30 ms waits kGravixStandbyLowRttUpgradeFloorDefault)
+    expect(sb['boundMs'], 1500, reason: '3 x 6 ms, at the 1.5 s low-RTT floor (0.7.2 default)');
     expect(sb['signalIsolate'], isTrue);
     expect(GravixSignalStandby.state(server.url, 'tok').state, 'none', reason: 'taken');
   });

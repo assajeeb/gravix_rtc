@@ -88,8 +88,14 @@ const Duration kGravixStandbyIsolateUpgradeFloor = Duration(milliseconds: 400);
 /// uses [kGravixStandbyIsolateUpgradeFloor].
 bool gravixStandbyInSignalIsolate = false;
 
+/// GRAVIX (0.7.2): the default of [gravixStandbyLowRttUpgradeFloor]. Field
+/// 2026-10-27 (Redmi on Wi-Fi, 11-18 ms to dac1): with the 0.4 s floor 2 of 14
+/// joins abandoned a standby upgrade the SFU was still answering
+/// (stalled_redialed, 4.3 s / 5.7 s joins); with 1.5 s, 0 of 30.
+const Duration kGravixStandbyLowRttUpgradeFloorDefault = Duration(milliseconds: 1500);
+
 /// GRAVIX (2026-10-12): see `GravixStandby.lowRttUpgradeFloor`. Null = off.
-Duration? gravixStandbyLowRttUpgradeFloor;
+Duration? gravixStandbyLowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault;
 
 /// Below this RTT (ms) [gravixStandbyLowRttUpgradeFloor] applies.
 const int kGravixStandbyLowRttMs = 30;

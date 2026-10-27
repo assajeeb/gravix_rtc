@@ -248,11 +248,37 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   RTCConfiguration? _gravixConnectPingRestore;
 
   void _gravixMark(String step, [Object? detail]) {
+    _gravixLogAnswerStep(step);
     final hook = gravixTimelineHook;
     if (hook == null) return;
     try {
       hook(step, detail);
     } catch (_) {}
+  }
+
+  // GRAVIX (0.7.2): the subscriber offer -> answer steps also as [GravixPubLog]
+  // lines, with ms since the offer arrived, for apps without a join timeline
+  // (field 2026-10-27 dac1: the SFU had the offer out in 0.2 s, the phone's
+  // answer arrived 2 s / 10.6 s later; nothing on the phone said where).
+  final Stopwatch _gravixOfferWatch = Stopwatch();
+
+  void _gravixLogAnswerStep(String step) {
+    const steps = {
+      'setRemoteDescriptionDone',
+      'createAnswerDone',
+      'setLocalDescriptionDone',
+      'answerSent',
+      'answerFailed',
+    };
+    if (step == 'offerReceived') {
+      _gravixOfferWatch
+        ..reset()
+        ..start();
+      GravixPubLog.step('subOffer', pc: 'sub', detail: 'received');
+      return;
+    }
+    if (!steps.contains(step) || !_gravixOfferWatch.isRunning) return;
+    GravixPubLog.step('subAnswer', pc: 'sub', detail: '$step +${_gravixOfferWatch.elapsedMilliseconds}ms');
   }
 
   /// GRAVIX: consecutive resumes that failed for a reason upstream does not

@@ -70,6 +70,9 @@ class _SilentServer {
 }
 
 void main() {
+  // these cases test the bound itself with low RTTs: the pre-0.7.2 floor
+  setUp(() => gravixStandbyLowRttUpgradeFloor = null);
+  tearDown(() => gravixStandbyLowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault);
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late LocalSignalServer server;

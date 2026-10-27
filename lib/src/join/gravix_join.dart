@@ -102,6 +102,7 @@ class GravixJoin {
     this.log,
     this.isRefusal,
     this.refusalMemo = defaultRefusalMemo,
+    this.retryCapacityRefusals = false,
     @visibleForTesting GravixStandbyState Function(String url, String token)? standbyState,
     @visibleForTesting DateTime Function()? now,
   }) : standbyPool = standbyPool ?? GravixStandbyPool.instance,
@@ -113,6 +114,19 @@ class GravixJoin {
     this.standbyPool.onOpened = _noteStandby;
     if (bindStandbyLifecycle) this.standbyPool.bindLifecycle();
   }
+
+  /// Opt-in (0.7.2): a join the SFU refuses because the app's owner is at its
+  /// concurrent-user cap ("app user limit reached") is tried again silently,
+  /// waiting 1, 2, 3, 5, 8 s, then every 10 s (each +-20 %), while the handle is
+  /// alive: the screen's attach just waits longer, no error is surfaced. Ends
+  /// with the handle (left, superseded, abandoned, the attach timeout before a
+  /// screen took it). The cap itself stays enforced on the server. Log lines
+  /// `capacityRetry n= in=` and `capacityRetryOk after= waited=`. Off: a
+  /// refused join fails at once, as before. An app [connect] hook must let the
+  /// SDK's error through unchanged when [GravixPrejoin.isCapacityRefusal] is
+  /// true for it (no wrapping, no teardown of the Room): a wrapped error is not
+  /// recognised and the join fails as before.
+  final bool retryCapacityRefusals;
 
   /// Where the join tokens come from (and are cached: pass
   /// `reuse: GravixTokenReuse.fastJoin`).
@@ -505,6 +519,7 @@ class GravixJoin {
       abandonInBackground: abandonInBackground ?? this.abandonInBackground,
       onEvent: onEvent,
       log: log,
+      retryCapacityRefusals: retryCapacityRefusals,
       isRefusal: (e) {
         final refused = isRefusalError(e);
         if (refused) _noteRefused(request);

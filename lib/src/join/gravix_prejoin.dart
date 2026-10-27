@@ -50,6 +50,7 @@
 //    retries (0.4.13), instead of waiting up to ~65 s for a join nobody wants.
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart' hide ConnectionState;
 
@@ -57,6 +58,7 @@ import '../backend/gravix_token_provider.dart' show GravixTokenRequest;
 import '../rtc_core/src/core/room.dart';
 import '../rtc_core/src/core/gravix_join_camera.dart';
 import '../rtc_core/src/core/gravix_join_mic.dart';
+import '../rtc_core/src/exceptions.dart' show ConnectException;
 import '../rtc_core/src/events.dart' show RoomConnectedEvent, RoomDisconnectedEvent;
 import '../rtc_core/src/options.dart';
 import '../rtc_core/src/token_source/jwt.dart';
@@ -192,6 +194,7 @@ class GravixPrejoin {
     required this.onEvent,
     this.log,
     bool Function(Object error)? isRefusal,
+    this.retryCapacityRefusals = false,
     bool ownsRoom = false,
     DateTime Function()? clock,
   }) : _isRefusal = isRefusal,
@@ -234,6 +237,7 @@ class GravixPrejoin {
     void Function(GravixJoinEvent event)? onEvent,
     GravixJoinLogSink? log,
     bool Function(Object error)? isRefusal,
+    bool retryCapacityRefusals = false,
     @visibleForTesting DateTime Function()? clock,
   }) {
     final live = pendingFor(key);
@@ -257,6 +261,7 @@ class GravixPrejoin {
       onEvent: onEvent,
       log: log,
       isRefusal: isRefusal,
+      retryCapacityRefusals: retryCapacityRefusals,
       ownsRoom: createRoom == null && leave == null,
       clock: clock,
     );
@@ -438,6 +443,29 @@ class GravixPrejoin {
   final GravixPrejoinConnect _connectFn;
   final GravixPrejoinLeave _leaveFn;
   final bool Function(Object error)? _isRefusal;
+
+  /// See [GravixJoin.retryCapacityRefusals].
+  final bool retryCapacityRefusals;
+
+  /// The waits between capacity retries ([retryCapacityRefusals]); the last one
+  /// repeats. Each is spread by +-20 % so refused viewers do not come back in
+  /// step.
+  static List<Duration> capacityRetryBackoff = const [
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 3),
+    Duration(seconds: 5),
+    Duration(seconds: 8),
+    Duration(seconds: 10),
+  ];
+
+  static final math.Random _jitter = math.Random();
+
+  /// The SFU refused the join because the app's owner is at its concurrent-user
+  /// cap (HTTP 403 "app user limit reached"). Not the billing refusal ("app
+  /// plan limit reached"): that one does not clear while the screen is open.
+  static bool isCapacityRefusal(Object e) =>
+      e is ConnectException && e.statusCode == 403 && e.message.contains('app user limit reached');
   bool _refused = false;
   // built with the default createRoom AND the default leave: the only Room the
   // handle cleans up after it died (see [GravixPrejoinEndReason.roomGone])
@@ -690,7 +718,7 @@ class GravixPrejoin {
     _connectStartMs = _watch.elapsedMilliseconds;
     mark(GravixJoinEventKind.connectStart, null, 'host=${GravixJoinLog.host(t.url)}');
     try {
-      await _connectFn(room, t);
+      await _connectRetryingCapacity(room, t);
     } catch (e) {
       if (_isEnded) {
         // abandoned during the connect: already left
@@ -724,6 +752,31 @@ class GravixPrejoin {
     _logStandby(room);
     mark(GravixJoinEventKind.connected);
     if (!_connected.isCompleted) _connected.complete(true);
+  }
+
+  // [retryCapacityRefusals]: a join the SFU refused at the owner's user cap is
+  // tried again on the same Room after a wait, silently (the handle stays
+  // `connecting`, the screen's attach keeps waiting), until it connects, fails
+  // otherwise, or the handle ends (left, superseded, abandoned). One
+  // `capacityRetry` line per wait.
+  Future<void> _connectRetryingCapacity(Room room, GravixJoinTarget t) async {
+    var n = 0;
+    while (true) {
+      try {
+        await _connectFn(room, t);
+        if (n > 0) _log('capacityRetryOk', 'after=$n waited=${_watch.elapsedMilliseconds - _connectStartMs}ms');
+        return;
+      } catch (e) {
+        if (!retryCapacityRefusals || _isEnded || !isCapacityRefusal(e)) rethrow;
+        final steps = capacityRetryBackoff;
+        final base = steps[n < steps.length ? n : steps.length - 1];
+        final wait = Duration(milliseconds: (base.inMilliseconds * (0.8 + 0.4 * _jitter.nextDouble())).round());
+        n++;
+        _log('capacityRetry', 'n=$n in=${wait.inMilliseconds}ms (app user limit reached)');
+        await Future<void>.delayed(wait);
+        if (_isEnded) rethrow;
+      }
+    }
   }
 
   // What the join's dial did with a standby connection (the signal client's

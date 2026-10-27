@@ -129,7 +129,7 @@ void main() {
       expect(const ConnectOptions(joinRetryDelays: []).joinRetryDelay(1), Duration.zero);
     });
 
-    test('retryable: a media-connect failure only', () {
+    test('retryable: a media-connect failure, or a gateway answer with no reason', () {
       expect(gravixIsJoinRetryable(MediaConnectException('pc')), isTrue);
       // a server refuses an upgraded join (room full) with a Leave and no
       // JoinResponse: the client sees the JoinResponse timeout
@@ -147,6 +147,24 @@ void main() {
         gravixIsJoinRetryable(
           ConnectException('no internet connection', reason: ConnectionErrorReason.InternalError, statusCode: 503),
         ),
+        isFalse,
+      );
+      // 0.7.2: a gateway answer with no reason text (the SFU restarting)
+      for (final code in [502, 503, 504]) {
+        expect(
+          gravixIsJoinRetryable(ConnectException('', reason: ConnectionErrorReason.NotAllowed, statusCode: code)),
+          isTrue,
+          reason: '$code empty',
+        );
+      }
+      expect(
+        gravixIsJoinRetryable(
+          ConnectException('app user limit reached', reason: ConnectionErrorReason.NotAllowed, statusCode: 503),
+        ),
+        isFalse,
+      );
+      expect(
+        gravixIsJoinRetryable(ConnectException('', reason: ConnectionErrorReason.NotAllowed, statusCode: 500)),
         isFalse,
       );
       expect(gravixIsJoinRetryable(CertificatePinningException('pin', host: 'h')), isFalse);
@@ -266,6 +284,16 @@ void main() {
         await t.room.dispose();
       });
     }
+
+    test('0.7.2: an empty 503 (the SFU restarting) is retried, then the join connects', () async {
+      final t = setUpRoom([ConnectException('', reason: ConnectionErrorReason.NotAllowed, statusCode: 503), null]);
+      await t.room.connect('wss://sfu.example', 'tok', connectOptions: _opts());
+      await settle();
+      expect(t.engine.attempts, 2);
+      expect(t.retries, hasLength(1));
+      expect(t.disconnects, isEmpty);
+      await t.room.dispose();
+    });
 
     test('a refusal on the retry ends the join at once (no further attempt)', () async {
       final refusal = ConnectException('expired', reason: ConnectionErrorReason.NotAllowed, statusCode: 401);

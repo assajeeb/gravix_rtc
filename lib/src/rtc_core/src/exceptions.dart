@@ -104,7 +104,17 @@ class MediaConnectException extends GravixRtcException {
 /// ([ConnectionErrorReason.NotAllowed]: 401/403, expired token), no
 /// connectivity, a certificate pinning failure, a superseded or refused
 /// WebSocket.
-bool gravixIsJoinRetryable(Object error) => error is MediaConnectException;
+///
+/// GRAVIX(0.7.2): also retryable, a WebSocket refused by a gateway answer with
+/// no reason text (502/503/504, empty body): the SFU restarting behind its
+/// proxy, or shutting down, never a refusal of this join. Field 2026-10-27
+/// 21:35:09Z (dac1, a drain roll): the join hit the restart, failed in 0.1 s
+/// with an empty `ConnectException`, and the viewer sat in a silent room; the
+/// new process was up a second later. The SDK's own 503 'no internet
+/// connection' carries a message and stays final.
+bool gravixIsJoinRetryable(Object error) =>
+    error is MediaConnectException ||
+    (error is ConnectException && error.statusCode >= 502 && error.statusCode <= 504 && error.message.trim().isEmpty);
 
 /// Certificate pinning validation failed for an SDK-owned TLS connection.
 class CertificatePinningException extends GravixRtcException {

@@ -82,4 +82,4 @@ export 'src/room/gravix_data_saver.dart' show GravixDataSaverEvent, GravixDataSa
 export 'src/room/gravix_red_mode.dart';
 export 'src/room/gravix_room_service.dart';
 export 'src/rtc_core/gravix_client.dart';
-export 'src/rtc_core/src/support/websocket/standby_types.dart' show GravixStandbyState, kGravixStandbyJoinWait;
+export 'src/rtc_core/src/support/websocket/standby_types.dart' show GravixStandbyState, kGravixStandbyJoinWait, kGravixStandbyLowRttUpgradeFloorDefault;

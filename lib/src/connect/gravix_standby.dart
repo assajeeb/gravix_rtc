@@ -49,9 +49,10 @@ abstract final class GravixStandby {
     }
   }
 
-  /// Opt-in (2026-10-12): the shortest wait for the join's upgrade over a
-  /// standby connection when the app passed an [open] `rttMs` below 30 ms.
-  /// Null (default) = 0.5 s, as before.
+  /// The shortest wait for the join's upgrade over a standby connection when
+  /// the app passed an [open] `rttMs` below 30 ms. Default 1.5 s since 0.7.2
+  /// (field 2026-10-27: 0 stalled_redialed in 30 joins, 2 in 14 with the old
+  /// 0.4 s); null = the old floor (0.4 s in the signal isolate, else 0.5 s).
   ///
   /// On such a path 3 x RTT is ~20 ms and the wait is the 0.5 s floor, which is
   /// about the APP, not the network: on a real Android phone 6 ms from its SFU,

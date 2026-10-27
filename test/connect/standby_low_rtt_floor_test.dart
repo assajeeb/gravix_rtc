@@ -11,12 +11,18 @@ import 'package:gravix_rtc/src/rtc_core/src/support/websocket/standby_types.dart
 
 void main() {
   tearDown(() {
-    GravixStandby.lowRttUpgradeFloor = null;
+    GravixStandby.lowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault;
     gravixStandbyInSignalIsolate = false;
   });
 
-  test('off (default): unchanged', () {
-    expect(GravixStandby.lowRttUpgradeFloor, isNull);
+  test('default (0.7.2): an RTT under 30 ms waits 1.5 s', () {
+    expect(GravixStandby.lowRttUpgradeFloor, const Duration(milliseconds: 1500));
+    expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 1500));
+    expect(gravixStandbyUpgradeBound(30), const Duration(milliseconds: 500));
+  });
+
+  test('off (null): the old floor', () {
+    GravixStandby.lowRttUpgradeFloor = null;
     expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 500));
     expect(gravixStandbyUpgradeBound(29), const Duration(milliseconds: 500));
     expect(gravixStandbyUpgradeBound(null), const Duration(milliseconds: 1500));
@@ -43,6 +49,7 @@ void main() {
   // SFU's 65-360 ms join handling in the field data).
   test('in the signal isolate: the floor is 0.4 s; 3 x RTT above it and the cap unchanged', () {
     gravixStandbyInSignalIsolate = true;
+    GravixStandby.lowRttUpgradeFloor = null;
     expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 400));
     expect(gravixStandbyUpgradeBound(110), const Duration(milliseconds: 400));
     expect(gravixStandbyUpgradeBound(171), const Duration(milliseconds: 513));

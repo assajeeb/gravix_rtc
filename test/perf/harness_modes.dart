@@ -7,6 +7,7 @@ import 'dart:io';
 import 'package:gravix_rtc/src/connect/gravix_signal_isolate.dart';
 import 'package:gravix_rtc/src/connect/gravix_standby.dart';
 import 'package:gravix_rtc/src/rtc_core/src/support/websocket/signal_isolate.dart';
+import 'package:gravix_rtc/src/rtc_core/src/support/websocket/standby_types.dart';
 
 Future<Future<void> Function()> applyHarnessMode(String mode, {String? certPath}) async {
   switch (mode) {
@@ -16,7 +17,7 @@ Future<Future<void> Function()> applyHarnessMode(String mode, {String? certPath}
       // the already-shipped opt-in (2026-10-12): a 1 s floor for the upgrade
       // over a standby connection on a < 30 ms path
       GravixStandby.lowRttUpgradeFloor = const Duration(seconds: 1);
-      return () async => GravixStandby.lowRttUpgradeFloor = null;
+      return () async => GravixStandby.lowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault;
     case 'isolate':
       // GravixSignalIsolate (2026-10-12): the signal isolate trusts the harness's
       // throwaway certificate too (the trust store is per isolate)

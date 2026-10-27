@@ -61,6 +61,9 @@ Future<GravixRtcWebSocket> _dial(String url, Object? pre) =>
     GravixRtcWebSocket.connect(Uri.parse('$url/rtc?x=1'), preconnected: pre);
 
 void main() {
+  // these cases test the bound itself with low RTTs: the pre-0.7.2 floor
+  setUp(() => gravixStandbyLowRttUpgradeFloor = null);
+  tearDown(() => gravixStandbyLowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault);
   late _Server server;
   late DateTime clock;
 

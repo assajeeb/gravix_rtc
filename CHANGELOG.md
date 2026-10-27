@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.2 — 2026-10-28
+
+### Changed: the standby upgrade waits 1.5 s on a low-RTT path (was 0.4/0.5 s)
+- `GravixStandby.lowRttUpgradeFloor` now defaults to 1.5 s (RTT under 30 ms only; set null for
+  the old floor). Field 2026-10-27, Redmi on Wi-Fi 11-18 ms from dac1: with 0.4 s, 2 of 14 joins
+  gave up on a standby upgrade the server was still answering and redialled (4.3 s / 5.7 s
+  joins); with 1.5 s, 0 of 30. Applies in the signal isolate too.
+
+### Fixed: a join that hit a server restart failed for good
+- A WebSocket refused with 502/503/504 and no reason text (the SFU restarting behind its proxy,
+  e.g. during a drain roll) is now tried again by `ConnectOptions.joinRetries` (default 2: after
+  0.5 s and 1.5 s). Field 2026-10-27: such a join failed in 0.1 s and the viewer sat in a silent
+  room while the new server process was up a second later. Refusals with a reason (401/403,
+  "app user limit reached", "no internet connection") stay final.
+
+### Added: `GravixJoin(retryCapacityRefusals: true)` (opt-in, off by default)
+- A join the server refuses because the app owner is at its concurrent-user cap
+  (`ConnectException` 403 "app user limit reached") is tried again silently on the same Room,
+  waiting 1, 2, 3, 5, 8 s, then every 10 s (each spread +-20 %), while the join is alive. The
+  screen's `attach()` just waits longer; no error is surfaced. It stops when the join is left,
+  superseded or abandoned. The cap stays enforced on the server; "app plan limit reached" (billing)
+  and every other error still fail at once.
+- An app `connect` hook must rethrow the SDK's error unchanged (and keep the Room) when
+  `GravixPrejoin.isCapacityRefusal(e)` is true; a wrapped error is not retried.
+- Log lines: `capacityRetry n= in=` per wait, `capacityRetryOk after= waited=` when it connects.
+- Each refused attempt still emits the Room's `RoomDisconnectedEvent(joinFailure)` to listeners
+  bound in `createRoom`.
+
 ## 0.7.1 — 2026-10-27
 
 ### Fixed: an Android crash while joining (native abort on WebRTC's signalling thread)
