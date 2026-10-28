@@ -46,29 +46,26 @@ void main() {
     await s.disconnect();
   });
 
-  test(
-    'an app that configured NS off keeps it off when a Room with default options joins (review 2026-10-21)',
-    () async {
-      // e.g. the connection checker or an agent session build Room(roomOptions: const RoomOptions())
-      final ns = GravixNoiseSuppression.instance;
-      await ns.configure(GravixNoiseSuppressionOptions.off);
-      var mics = 0;
-      late GravixRoomService s;
-      s = GravixRoomService(
-        connectRoom: (room, url, token) async => s.debugAttemptJoinMicrophone!.createTrack(),
-        createMicTrack: (options) async {
-          mics++;
-          final t = FakeMediaTrack('mic-$mics');
-          return LocalAudioTrack(TrackSource.microphone, FakeMediaStream([t]), t, options);
-        },
-      );
-      expect(await s.connect(url: 'wss://a.example', token: 't', publishMic: true, publishMicOnJoin: true), isTrue);
-      expect(mics, 1);
-      expect(identical(ns.configuredWith, GravixNoiseSuppressionOptions.off), isTrue);
-      expect(ns.state.value.mode, GravixNoiseSuppressionMode.off);
-      await s.disconnect();
-    },
-  );
+  test('an app that configured NS off keeps it off when a Room with default options joins (review 2026-10-21)', () async {
+    // e.g. the connection checker or an agent session build Room(roomOptions: const RoomOptions())
+    final ns = GravixNoiseSuppression.instance;
+    await ns.configure(GravixNoiseSuppressionOptions.off);
+    var mics = 0;
+    late GravixRoomService s;
+    s = GravixRoomService(
+      connectRoom: (room, url, token) async => s.debugAttemptJoinMicrophone!.createTrack(),
+      createMicTrack: (options) async {
+        mics++;
+        final t = FakeMediaTrack('mic-$mics');
+        return LocalAudioTrack(TrackSource.microphone, FakeMediaStream([t]), t, options);
+      },
+    );
+    expect(await s.connect(url: 'wss://a.example', token: 't', publishMic: true, publishMicOnJoin: true), isTrue);
+    expect(mics, 1);
+    expect(identical(ns.configuredWith, GravixNoiseSuppressionOptions.off), isTrue);
+    expect(ns.state.value.mode, GravixNoiseSuppressionMode.off);
+    await s.disconnect();
+  });
 
   test('joinShouldConfigure: defaults never override an earlier configure; explicit options always apply', () async {
     final ns = GravixNoiseSuppression.instance;

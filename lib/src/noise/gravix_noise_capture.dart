@@ -18,8 +18,8 @@ bool gravixNsIsOurs(GravixNsEngine engine) => engine == GravixNsEngine.rnnoise |
 /// [GravixNsAgcOrder.webrtcBeforeNs] (or [GravixNsAgcOrder.none]) itself.
 GravixNoiseSuppressionOptions gravixScenarioNsOptions(GravixNoiseSuppressionOptions o) =>
     gravixAudioScenario == GravixAudioScenario.chatRoom && o.agcOrder == GravixNsAgcOrder.ownAfterNs
-    ? o.copyWith(agcOrder: GravixNsAgcOrder.none)
-    : o;
+        ? o.copyWith(agcOrder: GravixNsAgcOrder.none)
+        : o;
 
 /// The WebRTC processing to use while [engine] is active.
 ///

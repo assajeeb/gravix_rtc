@@ -251,29 +251,32 @@ void main() {
       },
     );
 
-    test('republish path (guard off): a forced republish failure -> the camera is republished (rollback), state consistent', () async {
-      await hostRoom();
-      var reopens = 0;
-      final s = newSaver(
-        guard: false,
-        reopenCamera: () async {
-          reopens++;
-          return reopen();
-        },
-      );
-      await quality(lk_models.ConnectionQuality.POOR);
-      await ticks(s, 5);
+    test(
+      'republish path (guard off): a forced republish failure -> the camera is republished (rollback), state consistent',
+      () async {
+        await hostRoom();
+        var reopens = 0;
+        final s = newSaver(
+          guard: false,
+          reopenCamera: () async {
+            reopens++;
+            return reopen();
+          },
+        );
+        await quality(lk_models.ConnectionQuality.POOR);
+        await ticks(s, 5);
 
-      // the 0.4.14 republish of the same (now disposed) track failed, exactly as on the iPhone
-      expect(unpublished, hasLength(1));
-      expect(reopens, 1, reason: 'rolled back by publishing a fresh capture');
-      final pub = cameraPub();
-      expect(pub, isNotNull, reason: 'never unpublished while isCameraEnabled is true');
-      expect((pub!.track!.mediaStreamTrack as FakeMediaTrack).stopped, isFalse);
-      expect(cameraOn.value, isTrue);
-      expect(lowData.value, isFalse, reason: 'the previous (normal) profile is what is published');
-      expect(events.map((e) => e.kind), [GravixDataSaverEventKind.failed, GravixDataSaverEventKind.rolledBack]);
-    });
+        // the 0.4.14 republish of the same (now disposed) track failed, exactly as on the iPhone
+        expect(unpublished, hasLength(1));
+        expect(reopens, 1, reason: 'rolled back by publishing a fresh capture');
+        final pub = cameraPub();
+        expect(pub, isNotNull, reason: 'never unpublished while isCameraEnabled is true');
+        expect((pub!.track!.mediaStreamTrack as FakeMediaTrack).stopped, isFalse);
+        expect(cameraOn.value, isTrue);
+        expect(lowData.value, isFalse, reason: 'the previous (normal) profile is what is published');
+        expect(events.map((e) => e.kind), [GravixDataSaverEventKind.failed, GravixDataSaverEventKind.rolledBack]);
+      },
+    );
   });
 
   group('foreground return', () {

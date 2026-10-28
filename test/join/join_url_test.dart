@@ -89,8 +89,9 @@ void main() {
     );
 
     test('measured pick: an open standby in another region wins', () {
-      final c = pick(GravixJoinUrlSource.measured)
-          .withStandby(standbyUrl: blr.url, pickedOpen: false, standbyOpen: true);
+      final c = pick(
+        GravixJoinUrlSource.measured,
+      ).withStandby(standbyUrl: blr.url, pickedOpen: false, standbyOpen: true);
       expect(c.url, blr.url);
       expect(c.source, GravixJoinUrlSource.standby);
     });

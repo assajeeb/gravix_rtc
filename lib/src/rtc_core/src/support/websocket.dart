@@ -39,31 +39,33 @@ class WebSocketEventHandlers {
   const WebSocketEventHandlers({this.onData, this.onError, this.onDispose});
 }
 
-typedef WebSocketConnector = Future<GravixRtcWebSocket> Function(
-  Uri uri, {
-  WebSocketEventHandlers? options,
-  Map<String, String>? headers,
-  NetworkOptions? networkOptions,
-  Object? preconnected,
-});
+typedef WebSocketConnector =
+    Future<GravixRtcWebSocket> Function(
+      Uri uri, {
+      WebSocketEventHandlers? options,
+      Map<String, String>? headers,
+      NetworkOptions? networkOptions,
+      Object? preconnected,
+    });
 
 /// GRAVIX (2026-10-11): a [WebSocketConnector] that also takes the dial's
 /// bound. The SDK's own connector ([GravixRtcWebSocket.connect]) is one; the
 /// signal client hands [connectTimeout] only to a connector of this type, so a
 /// connector written against [WebSocketConnector] (an app's, a test fake) keeps
 /// working unchanged.
-typedef GravixBoundedWebSocketConnector = Future<GravixRtcWebSocket> Function(
-  Uri uri, {
-  WebSocketEventHandlers? options,
-  Map<String, String>? headers,
-  NetworkOptions? networkOptions,
-  Object? preconnected,
-  Duration? connectTimeout,
-  Duration? hedgeAfter,
-  Duration? connectWithin,
-  Duration? upgradeWindow,
-  Duration? dialCeiling,
-});
+typedef GravixBoundedWebSocketConnector =
+    Future<GravixRtcWebSocket> Function(
+      Uri uri, {
+      WebSocketEventHandlers? options,
+      Map<String, String>? headers,
+      NetworkOptions? networkOptions,
+      Object? preconnected,
+      Duration? connectTimeout,
+      Duration? hedgeAfter,
+      Duration? connectWithin,
+      Duration? upgradeWindow,
+      Duration? dialCeiling,
+    });
 
 /// GRAVIX (2026-10-11): a bounded signal dial that did not get through in time.
 /// [noConnection]: no TCP (+ TLS) connection to the host came up at all -- a

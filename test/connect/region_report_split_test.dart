@@ -138,8 +138,9 @@ void main() {
     // A probe still in flight when the race was decided must still appear, or
     // the array length stops meaning "candidates the server offered".
     test('a candidate with no result is reported as a non-responder, not omitted', () {
-      final json = build(results: const {'wss://blr1.example.com': (ok: true, elapsed: Duration(milliseconds: 20))})
-          .toJson();
+      final json = build(
+        results: const {'wss://blr1.example.com': (ok: true, elapsed: Duration(milliseconds: 20))},
+      ).toJson();
       final probes = (json['probes'] as List).cast<Map<String, dynamic>>();
       expect(probes, hasLength(2));
       expect(probes.first['region'], 'sgp1');
