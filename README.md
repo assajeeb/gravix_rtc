@@ -197,6 +197,34 @@ and in the app's R8 rules (`android/app/proguard-rules.pro`):
 Do not pass a `GravixBeautyEffect` then; if one is passed anyway,
 `canOwnCamera()` finds the SDK missing and the room opens its normal camera.
 
+#### Smaller app: download the face-tracking pack on first use (0.7.3)
+
+By default the effects pack (face models, LiteRT, MediaPipe) is built into the
+app and nothing needs to change. To ship a smaller Android app, add one line to
+`android/gradle.properties`:
+
+```properties
+gravixEffectsPack=models
+```
+
+The app keeps the small LiteRT library and downloads only the face models
+(about 5 MB) when needed, which is fine on Google Play. Do not use
+`gravixEffectsPack=false` for Play Store apps: it also leaves the native library
+out, and a Play install then cannot load it, so beauty effects stay off.
+
+Download the pack when the user opens beauty:
+
+```dart
+if (!(await GravixEffects.availability()).isReady) {
+  await GravixEffects.download(onProgress: (p) => print('pack $p'));
+}
+```
+
+`GravixEffects` also has `cancelDownload()`, `remove()` and
+`availabilityChanges`; the state is a `GravixPackState` (`notInstalled`,
+`downloading`, `ready`, `failed`). Until the pack is ready the camera, preview,
+streaming and licence work as usual and only the face effects are off.
+
 ### Third-party effects (Banuba, Tencent, FaceUnity …)
 
 `GravixVideoEffect` is the contract an effect package implements. The service

@@ -238,25 +238,25 @@ packages:
     dependency: transitive
     description:
       name: gravix_effects
-      sha256: "20cadf67f1de180c608d2a3a0e3d1881e3309759c4713635d54bc807038bdb4e"
+      sha256: "0719ca2828d555c7a833cbbedf4e670107dccf23f769e20cf6db8dbf6cf1ddbe"
       url: "https://pub.dev"
     source: hosted
-    version: "1.1.1"
+    version: "1.2.1"
   gravix_effects_webrtc:
     dependency: transitive
     description:
       name: gravix_effects_webrtc
-      sha256: "476095fba8e1d16cf173b320b3d18aedfe63ac6ea7064573ef78742242d80ba8"
+      sha256: a3b38a76b78665685430e61ab8e035c089be1b3d48a8c2e989ca20b7977af50c
       url: "https://pub.dev"
     source: hosted
-    version: "1.1.1"
+    version: "1.2.1"
   gravix_rtc:
     dependency: "direct main"
     description:
       path: ".."
       relative: true
     source: path
-    version: "0.7.2"
+    version: "0.7.3"
   hooks:
     dependency: transitive
     description:

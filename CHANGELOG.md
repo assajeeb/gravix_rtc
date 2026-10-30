@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.3 — 2026-10-31
+
+### Added: download-on-first-use for the beauty effects pack (Android)
+- Requires `gravix_effects_webrtc` ^1.2.1 (was ^1.1.1). By default the pack is still built in, so
+  apps that change nothing behave exactly as before.
+- Re-exports `GravixEffects`, `GravixPackAvailability` and `GravixPackState`, so apps can check and
+  download the pack (`availability()`, `download(onProgress:)`, `cancelDownload()`, `remove()`,
+  `availabilityChanges`) without importing gravix_effects themselves.
+- To use it, set `gravixEffectsPack=models` in `android/gradle.properties` (Play-safe: only the face
+  models, about 5 MB, are downloaded). Do not set `false` for Play Store apps. See README "Video effects".
+
 ## 0.7.2 — 2026-10-28
 
 ### Changed: the standby upgrade waits 1.5 s on a low-RTT path (was 0.4/0.5 s)

@@ -59,7 +59,8 @@ export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding, Grav
 export 'src/beauty/gravix_beauty_effect.dart';
 
 export 'package:gravix_effects_webrtc/gravix_effects_webrtc.dart'
-    show GravixCamera, GravixPreview, GravixLook, GravixLooks, GravixLens;
+    show GravixCamera, GravixPreview, GravixLook, GravixLooks, GravixLens,
+        GravixEffects, GravixPackAvailability, GravixPackState;
 
 export 'src/join/gravix_join.dart';
 export 'src/join/gravix_join_event.dart';
