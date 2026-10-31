@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.4 — 2026-11-01
+
+### Changed: beauty effects 1.3.0 (Android)
+- Requires `gravix_effects_webrtc` ^1.3.0 (was ^1.2.1). No API changes; update and rebuild.
+- Low-light handling runs at 15 fps on Android, with automatic colour balance and noise-aware
+  sharpening. The glow filter's warmth now defaults to 0.
+
 ## 0.7.3 — 2026-10-31
 
 ### Added: download-on-first-use for the beauty effects pack (Android)
