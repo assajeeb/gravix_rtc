@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.5 — 2026-11-02
+
+### Fixed: crash after a refused microphone start (Android)
+- When Android refused to start the microphone, the next start aborted the app (SIGABRT at
+  `jvm.cc:81` under `AudioRecordJni::StartRecording`). That next start could come from a mic toggle
+  or from the same negotiation, within milliseconds, so the app could crash during a join.
+- The next start now retries instead. The microphone stays silent until it succeeds, and each
+  refusal is logged with its reason under the `GxRecordStartGuard` tag. No API changes.
+
 ## 0.7.4 — 2026-11-01
 
 ### Changed: beauty effects 1.3.0 (Android)

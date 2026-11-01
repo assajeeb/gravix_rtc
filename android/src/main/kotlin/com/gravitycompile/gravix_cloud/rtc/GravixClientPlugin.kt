@@ -348,6 +348,8 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       return
     }
 
+    // before the engine's first start: a refused start must not abort the next one
+    GxRecordStartGuard.installOn(audioDeviceModule)
     // room music: the mixer hook goes in before the record thread starts
     com.gravitycompile.gravix_cloud.music.MusicMixerPlugin.installIfWanted(audioDeviceModule)
     // noise suppression: on the APM capture post-processing slot, before the
@@ -447,6 +449,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       result.success(false)
       return
     }
+    GxRecordStartGuard.installOn(audioDeviceModule)
     val mute = call.argument<Boolean>("mute") ?: false
     try {
       // flag first on mute, last on unmute: no window where a held mixer runs
