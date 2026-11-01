@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.7 — 2026-11-02
+
+### Changed: built-in beauty effects 1.3.1
+- `gravix_effects_webrtc` ^1.3.1: when a customer renews a package after it lapsed, the effects
+  watermark goes within about a minute on the next app start, or about 5 minutes in a running app.
+  Renewing before the package ends shows no watermark. No new token is needed.
+
 ## 0.7.6 — 2026-11-02
 
 ### Added: microphone failure reasons (Android)
