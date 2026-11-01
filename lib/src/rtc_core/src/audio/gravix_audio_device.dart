@@ -284,6 +284,13 @@ class GravixAudioDevice {
   /// phone is heard by the room" or offer a mute.
   static Stream<bool> get otherAppAudioPlayingChanged => GravixMicMonitor.instance.otherAppAudioChanges;
 
+  /// Recorder failures with the platform's reason, for logs and crash reports.
+  /// Android only; never emits elsewhere. Listen before capturing: a failure with
+  /// no listener is not kept. The room-facing state stays [micStateChanges],
+  /// which reports a microphone that is not recording.
+  static Stream<GravixMicrophoneFailure> get microphoneFailures =>
+      Native.microphoneFailureEvents.map(GravixMicrophoneFailure.fromMap);
+
   static bool get _mobile => !kIsWeb && (lkPlatformIs(PlatformType.android) || lkPlatformIs(PlatformType.iOS));
 
   /// Audio route changes (a headset connected/disconnected, a selection).

@@ -29,6 +29,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal object GxRecordStartGuard {
   private const val TAG = "GxRecordStartGuard"
 
+  /**
+   * Receives each recorder failure (`kind`, `code`, `message`) for Dart. Called
+   * with WebRTC's recorder locks held: it must only hand the event off.
+   */
+  @Volatile
+  var eventSink: ((Map<String, Any?>) -> Unit)? = null
+
   /** Idempotent. A failure leaves WebRTC as it was and is only logged. */
   fun installOn(adm: JavaAudioDeviceModule?) {
     val input = try {
@@ -65,17 +72,28 @@ internal object GxRecordStartGuard {
     override fun onWebRtcAudioRecordStartError(code: AudioRecordStartErrorCode?, message: String?) {
       nativeCalledStart.set(false)
       Log.w(TAG, "microphone start refused ($code): $message; the next start retries")
+      report("start", code?.name, message)
       chain { it.onWebRtcAudioRecordStartError(code, message) }
     }
 
     override fun onWebRtcAudioRecordInitError(message: String?) {
       Log.w(TAG, "microphone init failed: $message")
+      report("init", null, message)
       chain { it.onWebRtcAudioRecordInitError(message) }
     }
 
     override fun onWebRtcAudioRecordError(message: String?) {
       Log.w(TAG, "microphone error: $message")
+      report("runtime", null, message)
       chain { it.onWebRtcAudioRecordError(message) }
+    }
+
+    private fun report(kind: String, code: String?, message: String?) {
+      try {
+        eventSink?.invoke(mapOf("kind" to kind, "code" to code, "message" to message))
+      } catch (t: Throwable) {
+        Log.w(TAG, "microphone failure event not sent: $t")
+      }
     }
 
     private inline fun chain(call: (AudioRecordErrorCallback) -> Unit) {

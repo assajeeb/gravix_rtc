@@ -453,6 +453,19 @@ class Native {
     }
   }
 
+  static final StreamController<Map<String, Object?>> _microphoneFailures =
+      StreamController<Map<String, Object?>>.broadcast();
+
+  /// WebRTC's recorder failures on Android (0.7.6): `kind`, `code`, `message`.
+  /// Read by GravixAudioDevice.
+  @internal
+  static Stream<Map<String, Object?>> get microphoneFailureEvents {
+    // The channel installs its handler when first read: a listener attached
+    // before any other native call must still receive events.
+    channel;
+    return _microphoneFailures.stream;
+  }
+
   static final StreamController<Map<String, Object?>> _audioRoutes = StreamController<Map<String, Object?>>.broadcast();
 
   /// Audio route changes from both platforms (0.4.15): `routes` (available
@@ -689,6 +702,10 @@ class Native {
         GravixNoiseNative.handleEvent(call.arguments);
         final args = call.arguments;
         if (args is Map) _noiseSuppression.add(gravixNsNormalizeIosEvent(args.cast<String, Object?>()));
+        return null;
+      case 'onMicrophoneFailure':
+        final args = call.arguments;
+        if (args is Map) _microphoneFailures.add(args.cast<String, Object?>());
         return null;
       case 'onAudioRoutesChanged':
         final args = call.arguments;

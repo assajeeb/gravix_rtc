@@ -101,6 +101,53 @@ class GravixMicStateEvent {
   String toString() => 'GravixMicStateEvent(${state.name}, ${reason.name})';
 }
 
+/// Which recorder step failed in a [GravixMicrophoneFailure].
+enum GravixMicrophoneFailureKind {
+  /// Android refused to start the recorder. The microphone is silent until the
+  /// engine's next start succeeds.
+  start,
+
+  /// The recorder could not be created.
+  init,
+
+  /// A running recorder failed.
+  runtime,
+
+  /// A kind this version of the SDK does not know.
+  unknown,
+}
+
+/// A recorder failure WebRTC reported on Android, with the platform's reason.
+@immutable
+class GravixMicrophoneFailure {
+  const GravixMicrophoneFailure(this.kind, this.code, this.message, this.at);
+
+  factory GravixMicrophoneFailure.fromMap(Map<String, Object?> m) => GravixMicrophoneFailure(
+    GravixMicrophoneFailureKind.values.firstWhere(
+      (k) => k.name == m['kind'],
+      orElse: () => GravixMicrophoneFailureKind.unknown,
+    ),
+    m['code'] as String?,
+    m['message'] as String?,
+    DateTime.now(),
+  );
+
+  final GravixMicrophoneFailureKind kind;
+
+  /// WebRTC's error code name, for [GravixMicrophoneFailureKind.start]:
+  /// `AUDIO_RECORD_START_EXCEPTION` or `AUDIO_RECORD_START_STATE_MISMATCH`.
+  final String? code;
+
+  /// The platform's error text. Device-dependent: for logs, not for display.
+  final String? message;
+
+  /// When the SDK received the failure.
+  final DateTime at;
+
+  @override
+  String toString() => 'GravixMicrophoneFailure(${kind.name}, $code, $message)';
+}
+
 /// The raw inputs [gravixClassifyMic] decides from. Native fills the platform
 /// part (`onMicSignals`), the monitor the app part.
 @internal

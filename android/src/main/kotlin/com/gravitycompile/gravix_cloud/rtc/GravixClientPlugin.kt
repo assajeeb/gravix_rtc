@@ -104,6 +104,11 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
   }
 
+  // handed off at once: WebRTC calls it with its recorder locks held
+  private val recordFailureSink: (Map<String, Any?>) -> Unit = { m ->
+    mainHandler.post { invokeOnChannel("onMicrophoneFailure", m) }
+  }
+
   private fun invokeOnChannel(method: String, arguments: Any? = null) {
     try {
       if (::channel.isInitialized) channel.invokeMethod(method, arguments)
@@ -148,6 +153,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
     // noise suppression events (switch, routeReset, musicBypass, summary) to Dart
     GxNoiseProcessor.eventSink = { m -> mainHandler.post { invokeOnChannel("onNoiseSuppression", m) } }
+    GxRecordStartGuard.eventSink = recordFailureSink
     GxNoiseProcessor.stateReader = {
       flutterWebRTCPlugin?.getPeerConnectionFactory()?.audioProcessingState?.let { audioProcessingStateToMap(it).toString() }
     }
@@ -957,6 +963,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
     channel.setMethodCallHandler(null)
     flutterEngine = null
+    if (GxRecordStartGuard.eventSink === recordFailureSink) GxRecordStartGuard.eventSink = null
 
     micMonitor?.dispose()
     micMonitor = null

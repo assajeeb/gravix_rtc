@@ -60,7 +60,13 @@ export 'src/audio/audio_manager.dart';
 export 'src/audio/gravix_audio_device.dart';
 export 'src/audio/gravix_media_echo.dart';
 export 'src/audio/gravix_background_guard.dart' show GravixBackgroundKeepAlive, GravixProcessFreezeEvent;
-export 'src/audio/gravix_mic_state.dart' show GravixMicState, GravixMicStateReason, GravixMicStateEvent;
+export 'src/audio/gravix_mic_state.dart'
+    show
+        GravixMicrophoneFailure,
+        GravixMicrophoneFailureKind,
+        GravixMicState,
+        GravixMicStateReason,
+        GravixMicStateEvent;
 export 'src/audio/audio_frame_capture.dart' show AudioFormat, AudioFrame, AudioFrameCallback, AudioRendererOptions;
 export 'src/audio/audio_session.dart';
 export 'src/preconnect/pre_connect_audio_buffer.dart';

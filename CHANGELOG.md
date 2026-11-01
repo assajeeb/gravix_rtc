@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.6 — 2026-11-02
+
+### Added: microphone failure reasons (Android)
+- `GravixAudioDevice.microphoneFailures` reports each recorder failure WebRTC sees, with its kind,
+  error code and message, so an app can send it to a crash reporter. Listen before capturing.
+- Existing behaviour is unchanged. `GravixAudioDevice.micStateChanges` is still the signal for a
+  microphone that is not recording.
+
 ## 0.7.5 — 2026-11-02
 
 ### Fixed: crash after a refused microphone start (Android)
