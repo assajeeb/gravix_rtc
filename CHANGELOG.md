@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 — 2026-11-04
+
+### Changed: audio-only regions need no declaration (auto-detect)
+- A join with no `media` now goes to the fastest region, audio-only ones included. Nothing is
+  asked of the server first, so joins are not slower, and tokens are unchanged.
+- If the room carries video, at join or later, the session moves once to the next region that
+  carries video. Before, someone watching on such a region got no video and wasn't told.
+- A room seen with video goes straight to a video region for the rest of the app run.
+- `media:` stays optional: `GravixRoomMedia.video` or `.audio` skips the detection.
+- Rollback: set `gravixMediaAutoDetect = false` before the first join for the old behaviour,
+  where no `media` means video.
+
 ## 0.7.7 — 2026-11-02
 
 ### Changed: built-in beauty effects 1.3.1

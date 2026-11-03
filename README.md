@@ -155,6 +155,25 @@ A join is abandoned (its room left) when the app goes to the background before
 the room screen took it, or before that screen was ever shown, and after 20 s
 without a screen. Details and the per-piece APIs: `doc/FAST_JOIN.md`.
 
+## Audio-only regions
+
+Some regions carry audio only. You don't need to do anything for this:
+
+- A join goes to the fastest region, without any extra request, so joins are not slower.
+- If the room has video, at join or later, the session moves once to a region that carries
+  video. Remote participants return after the reconnect.
+
+If you already know the room type, you can skip the detection and that one reconnect:
+
+```dart
+media: GravixRoomMedia.video, // never lands on an audio-only region
+media: GravixRoomMedia.audio, // a voice room with no video at all
+```
+
+A video room's first viewer on an audio-only region has picture slightly later because of the
+move. Set `gravixMediaAutoDetect = false` before the first join to treat every undeclared room
+as video instead.
+
 ## Video effects
 
 ### Built-in beauty effects (Android)

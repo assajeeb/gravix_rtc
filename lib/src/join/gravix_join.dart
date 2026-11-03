@@ -227,7 +227,7 @@ class GravixJoin {
     }
   }
 
-  /// [request]'s media ([GravixTokenRequest.media], default video), promoted to
+  /// [request]'s media ([GravixTokenRequest.media], optional: see gravixJoinMedia), promoted to
   /// video by a join camera or the token's video grant (gravixJoinMedia).
   GravixJoinUrlChoice _choose(GravixJoinCredentials c, GravixTokenRequest request, {bool camera = false}) {
     final media = gravixJoinMedia(declared: request.media, enableVideo: camera, token: c.token);

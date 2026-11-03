@@ -227,15 +227,13 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// other region takes the medium (the refusal stays the app's). Called by the
   /// SDK on a refused request; an app may call it with a publish error. Never
   /// throws.
-  Future<bool> gravixFailoverForMediaRefusal(Object? reason) async {
+  Future<bool> gravixFailoverForMediaRefusal(Object? reason, {String cause = kGravixMediaNotAllowed}) async {
     if (!gravixIsMediaNotAllowed(reason)) return false;
     final refused = gravixRefusedMedia(reason);
     final from = connectedUrl ?? _connectedUrl;
     final fromRegion = connectedRegion ?? gravixRegionOfUrl(from, known: gravixRegionHints);
-    void log(String outcome) => GravixRegionLog.step(
-      'mediaFailover',
-      'media=${refused.name} from=${fromRegion ?? '?'} $outcome cause=$kGravixMediaNotAllowed',
-    );
+    void log(String outcome) =>
+        GravixRegionLog.step('mediaFailover', 'media=${refused.name} from=${fromRegion ?? '?'} $outcome cause=$cause');
     if (!roomOptions.recovery.mediaRefusalFailover) {
       log('stay reason=option-off');
       return false;
@@ -299,6 +297,68 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       log('stay reason=error(${e.runtimeType})');
       return false;
     }
+  }
+
+  /// GRAVIX (2026-11-04, auto-detect): whether this session already reacted to
+  /// video in the room. Per session, so a participant update costs one bool after that.
+  bool _gravixRoomVideoSeen = false;
+  bool _gravixRoomVideoNoted = false;
+
+  /// GRAVIX (2026-11-04, auto-detect): [participants] (a join response, a participant
+  /// update) may show the room carries video. It is remembered for later joins, and
+  /// a session on a region that doesn't carry video moves once, the same way a refused
+  /// publish does: an audio-only node doesn't pull video, so this viewer would
+  /// otherwise see nothing and never be told. Costs nothing on a region carrying video
+  /// and sends nothing to any server to decide. Never throws.
+  void _gravixCheckRoomVideo(Iterable<lk_models.ParticipantInfo> participants, {String? roomName}) {
+    if (!gravixMediaAutoDetect) return;
+    // Video can arrive in an update before the join response names the room, so the
+    // note may come on a later call. It also keeps this down to two bools afterwards.
+    final room = roomName ?? name;
+    if (_gravixRoomVideoSeen) {
+      if (!_gravixRoomVideoNoted && room != null) {
+        gravixNoteRoomHasVideo(room);
+        _gravixRoomVideoNoted = true;
+      }
+      return;
+    }
+    try {
+      if (!gravixInfosCarryVideo(participants)) return;
+      _gravixRoomVideoSeen = true;
+      if (room != null) {
+        gravixNoteRoomHasVideo(room);
+        _gravixRoomVideoNoted = true;
+      }
+      // Wherever this session is now, a later failover must not land on a region without
+      // video and go unnoticed: this check only runs once per session.
+      if (gravixJoinMedia != GravixRoomMedia.video) {
+        gravixJoinMedia = GravixRoomMedia.video;
+        _regionUrlProvider?.media = GravixRoomMedia.video;
+        engine.gravixRegionUrlProvider?.media = GravixRoomMedia.video;
+        gravixOnJoinMediaRaised?.call(GravixRoomMedia.video);
+      }
+      unawaited(_gravixMoveForRoomVideo());
+    } catch (e) {
+      logger.warning('room video check: ${e.runtimeType}');
+    }
+  }
+
+  Future<void> _gravixMoveForRoomVideo() async {
+    // At join the video shows in the join response, before the session is up, and
+    // the reconnect path takes a connected session.
+    // The state turns connected a moment before the url is noted.
+    bool ready() => connectionState == ConnectionState.connected && (connectedUrl ?? _connectedUrl) != null;
+    for (var i = 0; i < 100 && !ready(); i++) {
+      if (isDisposed || _gravixLeaving) return;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (isDisposed || _gravixLeaving || !ready()) {
+      GravixRegionLog.step('mediaFailover', 'media=video stay reason=not-connected cause=room-has-video');
+      return;
+    }
+    final url = connectedUrl ?? _connectedUrl;
+    if (url == null || gravixUrlAllowsMedia(url, GravixRoomMedia.video, known: gravixRegionHints)) return;
+    await gravixFailoverForMediaRefusal(kGravixMediaNotAllowed, cause: 'room-has-video');
   }
 
   /// After a media move: the refused camera is published again on the new
@@ -724,6 +784,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     connectOptions ??= ConnectOptions();
     _gravixLeaving = false;
     _gravixMediaMoveDone = false; // one media move per session
+    _gravixRoomVideoSeen = false;
+    _gravixRoomVideoNoted = false;
     _gravixPendingMediaRepublish = null;
     _pendingTrackQueue.updateTtl(connectOptions.timeouts.subscribe);
     // ignore: deprecated_member_use_from_same_package
@@ -1493,6 +1555,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       final restart = _restart;
       final kept = restart?.kept;
       restart?.kept = null;
+      // GRAVIX (2026-11-04): before the room's name is applied, so it's passed in
+      _gravixCheckRoomVideo(event.response.otherParticipants, roomName: event.response.room.name);
       for (final info in event.response.otherParticipants) {
         // GRAVIX (0.4.15, S5): a participant kept across the rejoin is updated in
         // place (sid, tracks); its publications stay the same objects.
@@ -1887,6 +1951,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   }
 
   Future<void> _onParticipantUpdateEvent(List<lk_models.ParticipantInfo> updates) async {
+    _gravixCheckRoomVideo(updates); // GRAVIX (2026-11-04)
     // trigger change notifier only if list of participants membership is changed
     var hasChanged = false;
     for (final info in updates) {

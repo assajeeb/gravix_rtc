@@ -19,17 +19,58 @@
 // answer) are still checked.
 import 'package:flutter/foundation.dart';
 
+import '../rtc_core/src/proto/gravixcloud_models.pb.dart' as lk_models;
 import '../rtc_core/src/token_source/jwt.dart' show GravixRtcJwtPayload;
 import 'gravix_region_failover.dart' show gravixRegionOfUrl;
 import 'gravix_region_report.dart';
 
-/// What a room uses, as the join declares it. Wire names = [name].
+/// What a room uses. Declaring it is optional (2026-11-04): with nothing declared
+/// a join goes to the fastest region, and the session moves once if the room turns
+/// out to carry video ([gravixMediaAutoDetect]).
 ///
 /// - [audio]: nobody in the room publishes or watches video (voice rooms);
-/// - [video]: the room uses video (published by this user or by others): the
-///   default, because it is the safe one -- it never lands on an audio-only
-///   region.
+/// - [video]: the room uses video (published by this user or by others): it never
+///   lands on an audio-only region, so it skips the one-time move.
 enum GravixRoomMedia { audio, video }
+
+/// Rollback switch for auto-detect (owner rule: a rollback stays one flag). True: a
+/// join with nothing declared may land on an audio-only region and moves once if the
+/// room carries video. False: the behaviour before 2026-11-04, where nothing declared
+/// means video. Set it before the first join.
+bool gravixMediaAutoDetect = true;
+
+/// Rooms seen carrying video in this app run, oldest first: a later join of one goes
+/// straight to a region that carries video instead of landing and moving again.
+/// In memory only, so nothing is stored about a room after the app ends.
+final Map<String, bool> _roomsWithVideo = <String, bool>{};
+const int _kRoomsWithVideoMax = 500;
+
+/// Remembers that [room] carries video.
+void gravixNoteRoomHasVideo(String room) {
+  if (room.isEmpty) return;
+  _roomsWithVideo.remove(room);
+  _roomsWithVideo[room] = true;
+  while (_roomsWithVideo.length > _kRoomsWithVideoMax) {
+    _roomsWithVideo.remove(_roomsWithVideo.keys.first);
+  }
+}
+
+/// True when [room] was seen carrying video in this app run.
+bool gravixRoomHadVideo(String? room) => room != null && _roomsWithVideo.containsKey(room);
+
+/// How many rooms are remembered (tests).
+@visibleForTesting
+int gravixRoomsWithVideoCount() => _roomsWithVideo.length;
+
+/// True when any of [participants]' tracks is video. Camera and screen share both are.
+bool gravixInfosCarryVideo(Iterable<lk_models.ParticipantInfo> participants) {
+  for (final p in participants) {
+    for (final t in p.tracks) {
+      if (t.type == lk_models.TrackType.VIDEO) return true;
+    }
+  }
+  return false;
+}
 
 /// Media names a region's `media` list uses.
 const kGravixMediaAudio = 'audio';
@@ -160,25 +201,51 @@ GravixRoomMedia? gravixMediaHintFromToken(String? token) {
   return null;
 }
 
-/// The media a join uses: [declared] (default [GravixRoomMedia.video]),
-/// promoted to video when [enableVideo] (the join publishes the camera) or the
-/// token may publish video ([gravixMediaHintFromToken]). Never demoted. Logs the
-/// decision and its cause.
-GravixRoomMedia gravixJoinMedia({GravixRoomMedia? declared, bool enableVideo = false, String? token}) {
-  final base = declared ?? GravixRoomMedia.video;
-  if (base == GravixRoomMedia.video) {
-    GravixRegionLog.step('media', 'media=video cause=${declared == null ? 'default' : 'declared'}');
+/// The room a token is for (`video.room`), or null. Never throws.
+String? gravixRoomOfToken(String? token) {
+  if (token == null || token.isEmpty) return null;
+  try {
+    final video = GravixRtcJwtPayload.fromToken(token)?.claims['video'];
+    final room = video is Map ? video['room'] : null;
+    return room is String && room.isNotEmpty ? room : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// The media a join uses, in this order: a join camera or a token's video grant is
+/// video ([gravixMediaHintFromToken]); then [declared]; then a room this app run has
+/// seen with video ([room], else the token's room); then audio, so the fastest
+/// region wins and the session moves if the room turns out to carry video. With
+/// [gravixMediaAutoDetect] off, nothing declared is video. Logs the decision and
+/// its cause. Never demotes a declared video.
+GravixRoomMedia gravixJoinMedia({GravixRoomMedia? declared, bool enableVideo = false, String? token, String? room}) {
+  if (declared == GravixRoomMedia.video) {
+    GravixRegionLog.step('media', 'media=video cause=declared');
+    return GravixRoomMedia.video;
+  }
+  final said = declared == null ? 'auto' : 'declared audio';
+  if (declared == null && !gravixMediaAutoDetect) {
+    GravixRegionLog.step('media', 'media=video cause=default');
     return GravixRoomMedia.video;
   }
   if (enableVideo) {
-    GravixRegionLog.step('media', 'media=video cause=enableVideo (declared audio)');
+    GravixRegionLog.step('media', 'media=video cause=enableVideo ($said)');
     return GravixRoomMedia.video;
   }
   if (gravixMediaHintFromToken(token) == GravixRoomMedia.video) {
-    GravixRegionLog.step('media', 'media=video cause=token-grant-camera (declared audio)');
+    GravixRegionLog.step('media', 'media=video cause=token-grant-camera ($said)');
     return GravixRoomMedia.video;
   }
-  GravixRegionLog.step('media', 'media=audio cause=declared');
+  if (declared == GravixRoomMedia.audio) {
+    GravixRegionLog.step('media', 'media=audio cause=declared');
+    return GravixRoomMedia.audio;
+  }
+  if (gravixRoomHadVideo(room ?? gravixRoomOfToken(token))) {
+    GravixRegionLog.step('media', 'media=video cause=room-had-video');
+    return GravixRoomMedia.video;
+  }
+  GravixRegionLog.step('media', 'media=audio cause=auto');
   return GravixRoomMedia.audio;
 }
 
@@ -208,6 +275,7 @@ void gravixClearRegionMedia() {
   _lastRegions = const [];
   _lastShortlist = const [];
   _refused.clear();
+  _roomsWithVideo.clear();
 }
 
 /// `[GravixRegion] <step> <detail>`: one line per region decision (owner rule

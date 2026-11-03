@@ -106,8 +106,8 @@ void main() {
   });
 
   group('the join media', () {
-    test('default video; audio when declared; promoted, never demoted', () {
-      expect(gravixJoinMedia(), GravixRoomMedia.video);
+    test('auto when nothing declared; audio when declared; promoted, never demoted', () {
+      expect(gravixJoinMedia(), GravixRoomMedia.audio);
       expect(gravixJoinMedia(declared: GravixRoomMedia.audio), GravixRoomMedia.audio);
       expect(gravixJoinMedia(declared: GravixRoomMedia.audio, enableVideo: true), GravixRoomMedia.video);
       final camera = _jwt({
@@ -131,7 +131,7 @@ void main() {
       expect(gravixJoinMedia(declared: GravixRoomMedia.audio, token: micOnly), GravixRoomMedia.audio);
       expect(gravixJoinMedia(declared: GravixRoomMedia.video, token: micOnly), GravixRoomMedia.video);
       expect(lines, contains('[GravixRegion] media media=video cause=token-grant-camera (declared audio)'));
-      expect(lines, contains('[GravixRegion] media media=video cause=default'));
+      expect(lines, contains('[GravixRegion] media media=audio cause=auto'));
     });
   });
 

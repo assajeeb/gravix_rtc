@@ -654,12 +654,12 @@ class GravixRoomService implements GravixAudioHost {
     // is within max(25 ms, 30 %) of the fastest region, so the join skips the
     // relay hop to the host's region. Hosts pass none. See gravixPickMeasuredRegion.
     String? homeRegion,
-    // [media] what the room uses (2026-10-21, per-region media): audio = a voice
-    //   room nobody publishes or watches video in, so the join may land on an
-    //   audio-only region (e.g. doh1); null / video (the default, the safe one)
-    //   keeps it on regions that allow video. Promoted to video by [enableVideo]
-    //   or a token that may publish the camera; a mic-only token does not demote
-    //   it (the user may still watch video). See gravix_region_media.dart.
+    // [media] optional (2026-11-04, auto-detect). Null: the join goes to the fastest
+    //   region, and the session moves once if the room turns out to carry video.
+    //   video: never lands on an audio-only region (e.g. doh1), so no move. audio: a
+    //   voice room. A join camera or a token that may publish the camera makes it
+    //   video; a mic-only token doesn't (the user may still watch video). See
+    //   gravix_region_media.dart.
     GravixRoomMedia? media,
     bool regionProbe = false,
     bool regionDecisionCache = true,
