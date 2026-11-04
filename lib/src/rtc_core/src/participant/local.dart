@@ -39,6 +39,7 @@ import '../core/gravix_pub_log.dart';
 import '../core/transport.dart';
 import '../data_stream/stream_writer.dart';
 import '../events.dart';
+import '../../../connect/gravix_region_media.dart';
 import '../exceptions.dart';
 import '../extensions.dart';
 import '../internal/events.dart';
@@ -401,10 +402,82 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     VideoPublishOptions? publishOptions,
   }) async {
     if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(track.source);
-    final result = await _publishRunners
-        .forSource(track.source)
-        .run(() => _publishVideoTrack(track, publishOptions: publishOptions));
-    return result! as LocalTrackPublication<LocalVideoTrack>;
+    final started = Stopwatch()..start();
+    final isCamera = track.source == TrackSource.camera;
+    Future<LocalTrackPublication<LocalVideoTrack>> publish() async {
+      final result = await _publishRunners
+          .forSource(track.source)
+          .run(() => _publishVideoTrack(track, publishOptions: publishOptions));
+      return result! as LocalTrackPublication<LocalVideoTrack>;
+    }
+
+    final bool moved;
+    room.gravixForgetRefusal();
+    try {
+      moved = await room.gravixBeforeVideoPublish(track.source);
+    } catch (e) {
+      _gravixVideoEnableFailed(track.source, e, started);
+      rethrow;
+    }
+    // a refused camera of the caller's is the caller's to publish again, not a new capture's
+    if (isCamera) _gravixOwnCameraPublishes++;
+    try {
+      LocalTrackPublication<LocalVideoTrack> pub;
+      try {
+        pub = await publish();
+      } catch (e) {
+        if (!gravixIsMediaNotAllowed(e)) rethrow;
+        if (!await room.gravixAfterRefusedPublish(e)) {
+          _gravixVideoEnableFailed(track.source, e, started);
+          rethrow;
+        }
+        pub = await publish();
+        _gravixVideoEnableOk(track.source, started);
+        return pub;
+      }
+      if (moved) _gravixVideoEnableOk(track.source, started);
+      return pub;
+    } finally {
+      if (isCamera) _gravixOwnCameraPublishes--;
+    }
+  }
+
+  /// GRAVIX (2026-11-04): a camera the app captured itself is on its way through
+  /// [publishVideoTrack]: a media move's republish leaves the camera to that call.
+  @internal
+  bool get gravixPublishingOwnCamera => _gravixOwnCameraPublishes > 0;
+  int _gravixOwnCameraPublishes = 0;
+
+  void _gravixVideoEnableOk(TrackSource source, Stopwatch started) => GravixRegionLog.step(
+    'videoEnable',
+    'source=${source.name} ok region=${room.connectedRegion ?? '?'} waited=${started.elapsedMilliseconds}ms',
+  );
+
+  /// The call fails, so the camera isn't wanted any more: a later move must not turn it on.
+  void _gravixVideoEnableFailed(TrackSource source, Object error, Stopwatch started) {
+    if (source == TrackSource.camera) gravixCameraWanted = false;
+    final reason = gravixIsMediaNotAllowed(error) ? kGravixMediaNotAllowed : error.runtimeType;
+    GravixRegionLog.step(
+      'videoEnable',
+      'source=${source.name} fail region=${room.connectedRegion ?? '?'} '
+          'reason=$reason waited=${started.elapsedMilliseconds}ms',
+    );
+  }
+
+  /// A capture this call opened closes with its failed publish: a move's republish opens its
+  /// own, and a camera may not open twice.
+  Future<LocalTrackPublication<LocalVideoTrack>?> _gravixPublishCapture(LocalVideoTrack track) async {
+    try {
+      return await _publishVideoTrack(track);
+    } catch (_) {
+      try {
+        await track.stop();
+        await track.dispose();
+      } catch (e) {
+        logger.warning('closing a capture after a failed publish: ${e.runtimeType}');
+      }
+      rethrow;
+    }
   }
 
   /// GRAVIX (2026-10-13, fast publish for video): publishes the join's camera
@@ -967,7 +1040,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
             logger.info('republishing the stopped muted ${track.source} without a capture');
             await _publishRunners.forSource(track.source).run(() => _publishVideoTrack(track, gravixDetached: true));
           } else {
-            await publishVideoTrack(track);
+            // the queue, not publishVideoTrack: that one waits for the move this republish is part of
+            if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(track.source);
+            await _publishRunners.forSource(track.source).run(() => _publishVideoTrack(track));
           }
         }
         _gravixRepublishPending.remove(pub);
@@ -1130,6 +1205,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   /// request (true = on), whether or not its publish succeeded.
   bool gravixCameraWanted = false;
 
+  /// GRAVIX (2026-11-04): the capture options of the app's last camera request: a media
+  /// move's republish opens the same camera.
+  @internal
+  CameraCaptureOptions? gravixCameraOptions;
+
   Future<LocalTrackPublication?> setSourceEnabled(
     TrackSource source,
     bool enabled, {
@@ -1141,7 +1221,69 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(source);
     // GRAVIX (2026-10-21): what the app asked for last, so a region move after a
     // media refusal can publish the camera again (Room.gravixFailoverForMediaRefusal)
-    if (source == TrackSource.camera) gravixCameraWanted = enabled;
+    if (source == TrackSource.camera) {
+      gravixCameraWanted = enabled;
+      if (enabled) gravixCameraOptions = cameraCaptureOptions ?? gravixCameraOptions;
+    }
+    final isVideo = source == TrackSource.camera || source == TrackSource.screenShareVideo;
+    final started = Stopwatch()..start();
+    var moved = false;
+    if (enabled && getTrackPublicationBySource(source) == null) {
+      if (isVideo && !(source == TrackSource.screenShareVideo && lkPlatformIsWebMobile())) {
+        // GRAVIX (2026-11-04): before the capture, so a call that can only fail opens no camera
+        // and asks for no permission
+        room.gravixForgetRefusal();
+        try {
+          moved = await room.gravixBeforeVideoPublish(source);
+        } catch (e) {
+          _gravixVideoEnableFailed(source, e, started);
+          rethrow;
+        }
+        // turned off while it moved
+        if (source == TrackSource.camera && !gravixCameraWanted) return null;
+      } else if (source == TrackSource.microphone) {
+        await room.gravixAfterMediaMove();
+      }
+    }
+    try {
+      final publication = await _gravixSetSourceEnabledNow(
+        source,
+        enabled,
+        captureScreenAudio: captureScreenAudio,
+        audioCaptureOptions: audioCaptureOptions,
+        cameraCaptureOptions: cameraCaptureOptions,
+        screenShareCaptureOptions: screenShareCaptureOptions,
+      );
+      if (moved && publication != null) _gravixVideoEnableOk(source, started);
+      return publication;
+    } catch (e) {
+      // GRAVIX (2026-11-04): the server refused the camera, or a media move ended its publish.
+      // The move publishes it again, so this call reports how that ended: no failure when the
+      // camera is up.
+      final mediaLoss =
+          enabled &&
+          source == TrackSource.camera &&
+          (gravixIsMediaNotAllowed(e) || (e is GravixSessionReplacedException && room.gravixMediaMoveUnderWay));
+      if (!mediaLoss) rethrow;
+      await room.gravixAfterRefusedPublish(e);
+      final publication = getTrackPublicationBySource(source);
+      if (publication != null) {
+        _gravixVideoEnableOk(source, started);
+        return publication;
+      }
+      _gravixVideoEnableFailed(source, e, started);
+      rethrow;
+    }
+  }
+
+  Future<LocalTrackPublication?> _gravixSetSourceEnabledNow(
+    TrackSource source,
+    bool enabled, {
+    bool? captureScreenAudio,
+    AudioCaptureOptions? audioCaptureOptions,
+    CameraCaptureOptions? cameraCaptureOptions,
+    ScreenShareCaptureOptions? screenShareCaptureOptions,
+  }) {
     return _publishRunners.forSource(source).run(() async {
       if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
         throw TrackCreateException('Screen sharing is not supported on mobile devices');
@@ -1183,7 +1325,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
             );
           }
           final track = await LocalVideoTrack.createCameraTrack(captureOptions);
-          return await _publishVideoTrack(track);
+          return await _gravixPublishCapture(track);
         } else if (source == TrackSource.microphone) {
           final AudioCaptureOptions captureOptions = audioCaptureOptions ?? room.roomOptions.defaultAudioCaptureOptions;
           final track = await LocalAudioTrack.create(captureOptions);
@@ -1236,7 +1378,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
               return publication;
             }
             final track = await LocalVideoTrack.createScreenShareTrack(captureOptions);
-            return await _publishVideoTrack(track);
+            return await _gravixPublishCapture(track);
           } catch (_) {
             if (androidCapture) await AndroidScreenCapture.release();
             rethrow;

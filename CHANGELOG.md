@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.8.1 — 2026-11-04
+
+### Changed: turning on video on an audio-only region moves first
+- Turning on the camera or a screen share on a region known not to carry video no longer tries the
+  publish there. The session moves once to the fastest measured region that carries video, then
+  publishes. Audio follows the session, and a muted mic stays muted.
+- `setCameraEnabled(true)` returns once the camera is up. With no region carrying video, a failed
+  move, or `mediaRefusalFailover` off, it fails with `media_not_allowed`: at once, or within 20 s
+  if a move started and can't land. `GravixRoomService.setCameraEnabled` now returns a `bool`
+  saying whether the camera ended up as asked.
+- A region not known to lack video publishes as before, and `gravixMediaAutoDetect = false` turns
+  the move-first step off.
+
+### Fixed
+- If a server refuses a camera the SDK couldn't foresee, `setCameraEnabled(true)` now waits for the
+  move and republish, instead of failing while the camera comes up anyway. The app's capture options
+  are kept, and the refused capture is closed.
+- `GravixRoomService.isCameraEnabled` is true when the call returns with the camera up. Before, it
+  stayed false after such a move although the camera was live, and it waited for the camera facing
+  write, which can take 5 s.
+- A refusal that names no track ends a pending publish at once, instead of at the publish deadline.
+- A muted microphone's engine mute is asserted again on the new session after a full reconnect. If the
+  module refuses it, the track is disabled, so it is never live there.
+
+### Docs
+- README "Audio-only regions": declaring `media` only skips the first landing. A session declared
+  `audio` still moves if video appears. The region list must carry `media`.
+
 ## 0.8.0 — 2026-11-04
 
 ### Changed: audio-only regions need no declaration (auto-detect)

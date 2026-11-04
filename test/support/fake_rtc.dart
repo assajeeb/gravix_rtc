@@ -79,6 +79,16 @@ class FakeWs extends GravixRtcWebSocket {
         );
       });
     }
+    if (req.hasUpdateMetadata() && server?.answerMetadata == true) {
+      final id = req.updateMetadata.requestId;
+      Timer(const Duration(milliseconds: 1), () {
+        deliver(
+          lk_rtc.SignalResponse(
+            requestResponse: lk_rtc.RequestResponse(requestId: id, reason: lk_rtc.RequestResponse_Reason.OK),
+          ),
+        );
+      });
+    }
     // the server answers a publisher offer
     if (req.hasOffer() && server?.answerOffers == true) {
       server!.offersSeen++;
@@ -169,6 +179,9 @@ class FakeSignalServer {
 
   /// When each pingReq reached the server, in order (any socket).
   final pingsAt = <DateTime>[];
+
+  /// Answer metadata updates with OK (default false).
+  bool answerMetadata = false;
 
   /// Answer publisher offers (default false: the test answers or not).
   bool answerOffers = false;

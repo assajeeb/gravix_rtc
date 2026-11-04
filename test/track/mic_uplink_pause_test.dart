@@ -255,13 +255,13 @@ void main() {
     t.transceiver = _FakeTransceiver(s2);
     calls.clear();
     await t.onPublish();
-    expect(calls, ['s2.setParameters(6000)']);
+    expect(calls, ['native.mute(true)', 's2.setParameters(6000)']);
     // full reconnect: publish again WITHOUT an unpublish (super.onPublish returns false)
     final s3 = _FakeSender('s3');
     t.transceiver = _FakeTransceiver(s3);
     calls.clear();
     await t.onPublish();
-    expect(calls, ['s3.setParameters(6000)']);
+    expect(calls, ['native.mute(true)', 's3.setParameters(6000)']);
     calls.clear();
     await t.unmute(stopOnMute: false);
     expect(calls, ['s3.setParameters(64000)', 'native.mute(false)'], reason: 'never the removed senders');

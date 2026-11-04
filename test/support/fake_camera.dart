@@ -29,6 +29,54 @@ void installCameraChannelMocks() {
   );
 }
 
+int _captures = 0;
+int _capturesStopped = 0;
+
+/// Cameras opened since [installCameraCaptureMocks].
+int captureCount() => _captures;
+
+/// Of those, how many were stopped.
+int capturesStopped() => _capturesStopped;
+
+/// [installCameraChannelMocks] plus a camera that opens: `setCameraEnabled` gets a track.
+/// Install after [installRecoveryChannelMocks].
+void installCameraCaptureMocks() {
+  _captures = 0;
+  _capturesStopped = 0;
+  final m = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  m.setMockMethodCallHandler(const MethodChannel('FlutterWebRTC.Method'), (call) async {
+    switch (call.method) {
+      case 'getUserMedia':
+        final video = (call.arguments as Map)['constraints']?['video'];
+        if (video == null || video == false) {
+          return <String, dynamic>{
+            'streamId': 'mic-stream',
+            'audioTracks': <dynamic>[
+              <String, dynamic>{'id': 'mic', 'label': 'mic', 'kind': 'audio', 'enabled': true},
+            ],
+            'videoTracks': <dynamic>[],
+          };
+        }
+        _captures++;
+        return <String, dynamic>{
+          'streamId': 'cap-stream-$_captures',
+          'audioTracks': <dynamic>[],
+          'videoTracks': <dynamic>[
+            <String, dynamic>{'id': 'cap-$_captures', 'label': 'camera', 'kind': 'video', 'enabled': true},
+          ],
+        };
+      case 'trackDispose':
+        _capturesStopped++;
+        return null;
+      case 'getSources':
+        return <String, dynamic>{'sources': <dynamic>[]};
+      case 'getRtpReceiverCapabilities':
+        return <String, dynamic>{'codecs': <dynamic>[], 'headerExtensions': <dynamic>[], 'fecMechanisms': <dynamic>[]};
+    }
+    return null;
+  });
+}
+
 /// A video sender. [parameters] is ONE cached object, like the native sender's
 /// (`RTCRtpSenderNative._parameters`): setParameters stores what it is given
 /// before the native call, so a failed call leaves its values in the cache.

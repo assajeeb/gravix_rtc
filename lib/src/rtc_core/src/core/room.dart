@@ -203,9 +203,16 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   bool _gravixMediaMoveDone = false;
 
-  /// The refused medium + target region of a media move under way: the camera is
+  /// The media move of this session, once its reconnect started. The camera is
   /// published again once the full reconnect is done (EngineRestartedEvent).
-  (GravixRoomMedia, String?)? _gravixPendingMediaRepublish;
+  _GravixMediaMove? _gravixMediaMove;
+
+  /// A move a camera or screen share turned on started, shared by all publishes meanwhile.
+  Future<void>? _gravixVideoOnMove;
+
+  /// The move the server's last refusal started: the refusal reaches the publish that lost
+  /// to it and this Room by two routes, in either order.
+  Completer<Future<bool>>? _gravixRefusalSeen;
 
   /// GRAVIX (2026-10-21): called when a refusal raised the session's media to
   /// video ([gravixJoinMedia]), so the SDK's room service joins with it again.
@@ -238,7 +245,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       log('stay reason=option-off');
       return false;
     }
-    if (fromRegion != null) gravixNoteMediaRefused(fromRegion, refused);
+    final foreseen = cause == kGravixCauseCameraOn || cause == kGravixCauseScreenOn;
+    if (fromRegion != null && !foreseen) gravixNoteMediaRefused(fromRegion, refused);
     final provider = _regionUrlProvider ?? engine.gravixRegionUrlProvider;
     if (refused == GravixRoomMedia.video) {
       // review #7: every later restart / failover of this session orders the
@@ -266,6 +274,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         currentUrl: from,
         measuredOrder: roomOptions.recovery.measuredRegionFailover,
         lastGoodFallback: roomOptions.recovery.lastGoodRegionList,
+        fetchTimeout: engine.connectOptions.timeouts.connection,
       );
       if (next == null ||
           gravixNormalizeRegionUrl(next) == gravixNormalizeRegionUrl(from) ||
@@ -275,11 +284,12 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         return false;
       }
       final toRegion = gravixRegionOfUrl(next, known: [...gravixRegionHints, ...gravixLastRegionDirectory()]);
-      _gravixPendingMediaRepublish = (refused, toRegion);
+      final move = _gravixMediaMove = _GravixMediaMove(refused, toRegion, cause);
       // the engine's reconnect path (JS gravixRestartTo / Android
       // gravixRestartConnection): a failed dial retries or fails over there
       if (!engine.gravixRestartTo(next)) {
-        _gravixPendingMediaRepublish = null;
+        _gravixEndMediaMove(move);
+        _gravixMediaMove = null;
         _gravixMediaMoveDone = false;
         log('stay reason=reconnect-busy');
         return false;
@@ -292,11 +302,118 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       log('-> ${toRegion ?? Uri.tryParse(next)?.host ?? '?'} reason=moved');
       return true;
     } catch (e) {
-      _gravixPendingMediaRepublish = null;
+      final move = _gravixMediaMove;
+      if (move != null) _gravixEndMediaMove(move);
+      _gravixMediaMove = null;
       _gravixMediaMoveDone = false;
       log('stay reason=error(${e.runtimeType})');
       return false;
     }
+  }
+
+  /// Ends [move]'s waits; a wait already answered keeps its answer.
+  void _gravixEndMediaMove(_GravixMediaMove move, {bool landed = false}) {
+    if (!move.reconnected.isCompleted) move.reconnected.complete(landed);
+    if (!move.finished.isCompleted) move.finished.complete(landed);
+  }
+
+  /// False only when [url]'s region is known not to carry video. A region not known has its
+  /// say by the server's refusal. The server's name for its region counts too: it need not be
+  /// the entry the url matches.
+  bool _gravixRegionCarriesVideo(String url) {
+    if (!gravixUrlAllowsMedia(url, GravixRoomMedia.video, known: gravixRegionHints)) return false;
+    final region = connectedRegion;
+    return region == null || gravixRegionAllowsMedia(GravixRegionUrl(region: region, url: url), GravixRoomMedia.video);
+  }
+
+  /// GRAVIX (2026-11-04): waits for a media move under way, whose reconnect would end a
+  /// publish made now. Returns whether there was one. Never throws, bounded by
+  /// [gravixMediaMoveDeadline].
+  @internal
+  Future<bool> gravixAfterMediaMove() async {
+    var waited = false;
+    final videoOn = _gravixVideoOnMove;
+    if (videoOn != null) {
+      waited = true;
+      try {
+        await videoOn;
+      } catch (_) {
+        // its publish reports that; this one looks again
+      }
+    }
+    final move = _gravixMediaMove;
+    if (move != null && !move.reconnected.isCompleted) {
+      waited = true;
+      await move.reconnected.future.timeout(gravixMediaMoveDeadline, onTimeout: () => false);
+    }
+    return waited;
+  }
+
+  /// GRAVIX (2026-11-04, owner's design): runs before a publish of video from [source]. On a
+  /// connected session in a region known not to carry video the session moves FIRST (same
+  /// target, order and once-per-session as a refusal's move), with nothing tried there, and the
+  /// publish then goes to the new region. Throws a clear `media_not_allowed` when no region takes
+  /// it, the move fails, or [GravixRecoveryOptions.mediaRefusalFailover] is off. A region not
+  /// known, a session not connected, or [gravixMediaAutoDetect] off publish as before, the
+  /// server's refusal being the safety net. Returns whether the publish waited for a move.
+  /// Outside the publish queue: the reconnect's republish needs that.
+  @internal
+  Future<bool> gravixBeforeVideoPublish(TrackSource source) async {
+    final waited = await gravixAfterMediaMove();
+    if (!gravixMediaAutoDetect) return waited;
+    final url = connectedUrl ?? _connectedUrl;
+    if (_gravixVideoOnMove == null &&
+        (connectionState != ConnectionState.connected || url == null || _gravixRegionCarriesVideo(url))) {
+      return waited;
+    }
+    final move = _gravixVideoOnMove ??= _gravixMoveForVideoOn(
+      source == TrackSource.screenShareVideo ? kGravixCauseScreenOn : kGravixCauseCameraOn,
+    );
+    try {
+      await move;
+    } finally {
+      if (identical(_gravixVideoOnMove, move)) _gravixVideoOnMove = null;
+    }
+    return true;
+  }
+
+  Future<void> _gravixMoveForVideoOn(String cause) async {
+    final moved = await gravixFailoverForMediaRefusal(kGravixMediaNotAllowed, cause: cause);
+    if (moved) {
+      final back = await _gravixMediaMove!.reconnected.future.timeout(gravixMediaMoveDeadline, onTimeout: () => false);
+      final now = connectedUrl ?? _connectedUrl;
+      if (back && connectionState == ConnectionState.connected && now != null && _gravixRegionCarriesVideo(now)) {
+        return;
+      }
+      GravixRegionLog.step('mediaFailover', 'media=video stay reason=move-failed cause=$cause');
+    }
+    throw TrackPublishException('$kGravixMediaNotAllowed: this region carries no video and the session could not move');
+  }
+
+  /// A new publish of video: a refusal from here on is its own.
+  @internal
+  void gravixForgetRefusal() => _gravixRefusalSeen = null;
+
+  /// True while a media move's reconnect or republish is running.
+  @internal
+  bool get gravixMediaMoveUnderWay => _gravixMediaMove?.finished.isCompleted == false;
+
+  /// GRAVIX (2026-11-04): a publish of video ended with [error], a refusal or the session being
+  /// replaced by a media move. Waits for how that move ended, its republish included. False
+  /// when no move started or it failed. Bounded, never throws. Outside the publish queue.
+  @internal
+  Future<bool> gravixAfterRefusedPublish(Object error) async {
+    if (gravixIsMediaNotAllowed(error)) {
+      final seen = _gravixRefusalSeen ??= Completer<Future<bool>>();
+      final started = await seen.future.timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () => Future<bool>.value(false),
+      );
+      if (!await started) return false;
+    }
+    final move = _gravixMediaMove;
+    if (move == null) return false;
+    return move.finished.future.timeout(gravixMediaMoveDeadline, onTimeout: () => false);
   }
 
   /// GRAVIX (2026-11-04, auto-detect): whether this session already reacted to
@@ -372,13 +489,17 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       GravixRegionLog.step('mediaRepublish', 'camera skip reason=not-wanted');
       return;
     }
+    if (local.gravixPublishingOwnCamera) {
+      GravixRegionLog.step('mediaRepublish', 'camera skip reason=caller-publishes');
+      return;
+    }
     if (local.getTrackPublicationBySource(TrackSource.camera) != null) {
       GravixRegionLog.step('mediaRepublish', 'camera skip reason=republished-by-reconnect');
       return;
     }
     GravixRegionLog.step('mediaRepublish', 'camera start region=${region ?? connectedRegion ?? '?'}');
     try {
-      await local.setCameraEnabled(true);
+      await local.setCameraEnabled(true, cameraCaptureOptions: local.gravixCameraOptions);
       final ok = local.getTrackPublicationBySource(TrackSource.camera) != null;
       GravixRegionLog.step('mediaRepublish', 'camera ${ok ? 'ok' : 'fail reason=no-publication'}');
     } catch (e) {
@@ -784,9 +905,11 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     connectOptions ??= ConnectOptions();
     _gravixLeaving = false;
     _gravixMediaMoveDone = false; // one media move per session
+    _gravixMediaMove = null;
+    _gravixVideoOnMove = null;
+    _gravixRefusalSeen = null;
     _gravixRoomVideoSeen = false;
     _gravixRoomVideoNoted = false;
-    _gravixPendingMediaRepublish = null;
     _pendingTrackQueue.updateTtl(connectOptions.timeouts.subscribe);
     // ignore: deprecated_member_use_from_same_package
     if ((effectiveRoomOptions.encryption != null || effectiveRoomOptions.e2eeOptions != null) &&
@@ -1689,11 +1812,20 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.rejoin);
       // GRAVIX (2026-10-21): a media move is done (wherever the reconnect landed):
       // the refused camera is published again, after the republish above
-      final mediaRepublish = _gravixPendingMediaRepublish;
-      _gravixPendingMediaRepublish = null;
-      if (mediaRepublish != null) {
+      final move = _gravixMediaMove;
+      if (move != null && !move.reconnected.isCompleted) {
+        move.reconnected.complete(true);
         final landed = connectedRegion;
-        unawaited(_gravixRepublishAfterMediaMove(mediaRepublish.$1, landed ?? mediaRepublish.$2));
+        unawaited(() async {
+          try {
+            // the call that asked for a camera-on move publishes by itself once it is done
+            if (move.cause != kGravixCauseCameraOn) {
+              await _gravixRepublishAfterMediaMove(move.refused, landed ?? move.region);
+            }
+          } finally {
+            _gravixEndMediaMove(move, landed: true);
+          }
+        }());
       }
       final announced = restart?.announced;
       if (identical(_restart, restart)) _restart = null;
@@ -1764,7 +1896,10 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       localParticipant?.handleSignalRequestResponse(event.response);
       // GRAVIX (2026-10-21): a medium this node does not take (media_not_allowed)
       if (gravixIsMediaNotAllowed(event.response.message)) {
-        unawaited(gravixFailoverForMediaRefusal(event.response.message));
+        final move = gravixFailoverForMediaRefusal(event.response.message);
+        var seen = _gravixRefusalSeen;
+        if (seen == null || seen.isCompleted) seen = _gravixRefusalSeen = Completer<Future<bool>>();
+        seen.complete(move);
       }
     })
     ..on<EngineRoomMovedEvent>((event) async {
@@ -2237,7 +2372,9 @@ extension RoomPrivateMethods on Room {
   // resets internal state to a re-usable state
   Future<void> _cleanUp({bool disposeLocalParticipant = true}) async {
     logger.fine('[${objectId}] cleanUp()');
-    _gravixPendingMediaRepublish = null;
+    final mediaMove = _gravixMediaMove;
+    if (mediaMove != null) _gravixEndMediaMove(mediaMove);
+    _gravixMediaMove = null;
 
     // GRAVIX (2026-10-13): the join's camera still being published after
     // connect() returned is released (privacy: no camera left open by a leave)
@@ -2861,3 +2998,18 @@ class _GravixRestartState {
 
 /// GRAVIX (2026-10-11): the longer of [a] (when set) and [b].
 Duration _gravixLonger(Duration? a, Duration b) => a != null && a > b ? a : b;
+
+/// GRAVIX (2026-11-04): a media move whose reconnect started.
+class _GravixMediaMove {
+  _GravixMediaMove(this.refused, this.region, this.cause);
+  final GravixRoomMedia refused;
+  final String? region;
+  final String cause;
+
+  /// The reconnect ended (true: it landed). A publish waits on this one: the republish needs
+  /// the publish queues.
+  final reconnected = Completer<bool>();
+
+  /// The republish after it ended too. The call the refusal took a publish from waits on this.
+  final finished = Completer<bool>();
+}

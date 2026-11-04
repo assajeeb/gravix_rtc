@@ -2,6 +2,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gravix_rtc/src/rtc_core/src/core/add_track_rejection.dart';
+import 'package:gravix_rtc/src/rtc_core/src/proto/gravixcloud_models.pb.dart' as lk_models;
 import 'package:gravix_rtc/src/rtc_core/src/proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 import 'package:gravix_rtc/src/rtc_core/src/proto/gravixcloud_rtc.pbenum.dart' as lk_rtc_enum;
 
@@ -49,5 +50,31 @@ void main() {
       ),
       isNull,
     );
+  });
+
+  test('a media refusal naming no AddTrack ends a pending publish of that medium only', () {
+    final refusal = lk_rtc.RequestResponse(
+      reason: lk_rtc_enum.RequestResponse_Reason.NOT_ALLOWED,
+      message: 'media_not_allowed',
+    );
+    expect(gravixAddTrackMediaRefusal(refusal, lk_models.TrackType.VIDEO), contains('media_not_allowed'));
+    expect(gravixAddTrackMediaRefusal(refusal, lk_models.TrackType.AUDIO), isNull);
+    final audio = lk_rtc.RequestResponse(
+      reason: lk_rtc_enum.RequestResponse_Reason.NOT_ALLOWED,
+      message: 'media_not_allowed: audio',
+    );
+    expect(gravixAddTrackMediaRefusal(audio, lk_models.TrackType.AUDIO), isNotNull);
+    expect(gravixAddTrackMediaRefusal(audio, lk_models.TrackType.VIDEO), isNull);
+  });
+
+  test('a media refusal naming an AddTrack, or another refusal, is left to the cid match', () {
+    final named = resp(
+      reason: lk_rtc_enum.RequestResponse_Reason.NOT_ALLOWED,
+      message: 'media_not_allowed',
+      cid: 'TR_x',
+    );
+    expect(gravixAddTrackMediaRefusal(named, lk_models.TrackType.VIDEO), isNull);
+    final other = resp(reason: lk_rtc_enum.RequestResponse_Reason.NOT_ALLOWED, addTrack: false);
+    expect(gravixAddTrackMediaRefusal(other, lk_models.TrackType.VIDEO), isNull);
   });
 }

@@ -110,6 +110,7 @@ class GravixRoomService implements GravixAudioHost {
     GravixRegionProber? regionProber,
     GravixRegionDecisionCache? regionDecisionCache,
     @visibleForTesting Future<void> Function(Room room, String url, String token)? connectRoom,
+    @visibleForTesting Room Function(RoomOptions options)? createRoom,
     @visibleForTesting Future<void> Function(String httpUrl)? prepareConnection,
     @visibleForTesting Future<bool> Function()? requestMicPermission,
     @visibleForTesting Future<void> Function(bool enabled)? applyMic,
@@ -132,7 +133,8 @@ class GravixRoomService implements GravixAudioHost {
        roomMusic = roomMusic ?? GravixRoomMusic(null),
        _regionProber = regionProber ?? GravixRegionProber(),
        _regionCache = regionDecisionCache ?? GravixRegionDecisionCache.shared,
-       _connectRoomSeam = connectRoom;
+       _connectRoomSeam = connectRoom,
+       _createRoomSeam = createRoom;
 
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
   StreamSubscription<void>? _becomingNoisySub;
@@ -331,6 +333,7 @@ class GravixRoomService implements GravixAudioHost {
   /// The one place a url becomes a connection. A seam so the connect ladder can be
   /// tested without a transport.
   final Future<void> Function(Room room, String url, String token)? _connectRoomSeam;
+  final Room Function(RoomOptions options)? _createRoomSeam;
 
   Future<void> _connectRoom(Room room, String url, String token) =>
       _connectRoomSeam?.call(room, url, token) ??
@@ -1278,29 +1281,28 @@ class GravixRoomService implements GravixAudioHost {
       // race); only v1 also overlaps the WebSocket/ICE/DTLS below.
       if (parallelAudioSession && _v2Active) await audioReady;
 
-      final room = Room(
-        roomOptions: RoomOptions(
-          adaptiveStream: enableVideo, // only meaningful for video
-          dynacast: true, // server stops forwarding unsubscribed tracks → CPU saver
-          defaultAudioCaptureOptions: _audioCaptureOptions,
-          defaultAudioPublishOptions: _audioPublishOptions(red: red == GravixRedMode.on),
-          defaultVideoPublishOptions: _videoPublishOptions(lowDataMode),
-          // Skips the explicit track.stop() on unpublish ONLY. It does not keep
-          // an unpublished track reusable: removePublishedTrack always ends in
-          // pub.dispose(), which disposes the track (the 0.4.14 data saver's
-          // republish failed on exactly that - iOS field 2026-10-11). The data
-          // saver now changes the encodings in place (GravixDataSaver).
-          stopLocalTrackOnUnpublish: false,
-          reconnectPolicy: reconnectPolicy,
-          foregroundService: foregroundService,
-          recovery: recovery,
-          noiseSuppression: noiseSuppression,
-          // (RoomOptions.fastPublish used to be set here. Nothing reads it - not
-          // in this fork and not upstream; publisher negotiation is started early
-          // by the SERVER's JoinResponse.fastPublish, in engine.dart. Setting it
-          // only suggested a join-time optimisation that was not happening.)
-        ),
+      final options = RoomOptions(
+        adaptiveStream: enableVideo, // only meaningful for video
+        dynacast: true, // server stops forwarding unsubscribed tracks → CPU saver
+        defaultAudioCaptureOptions: _audioCaptureOptions,
+        defaultAudioPublishOptions: _audioPublishOptions(red: red == GravixRedMode.on),
+        defaultVideoPublishOptions: _videoPublishOptions(lowDataMode),
+        // Skips the explicit track.stop() on unpublish ONLY. It does not keep
+        // an unpublished track reusable: removePublishedTrack always ends in
+        // pub.dispose(), which disposes the track (the 0.4.14 data saver's
+        // republish failed on exactly that - iOS field 2026-10-11). The data
+        // saver now changes the encodings in place (GravixDataSaver).
+        stopLocalTrackOnUnpublish: false,
+        reconnectPolicy: reconnectPolicy,
+        foregroundService: foregroundService,
+        recovery: recovery,
+        noiseSuppression: noiseSuppression,
+        // (RoomOptions.fastPublish used to be set here. Nothing reads it - not
+        // in this fork and not upstream; publisher negotiation is started early
+        // by the SERVER's JoinResponse.fastPublish, in engine.dart. Setting it
+        // only suggested a join-time optimisation that was not happening.)
       );
+      final room = _createRoomSeam?.call(options) ?? Room(roomOptions: options);
 
       // GRAVIX (0.4.15): the region entries name Room.connectedRegion
       room.gravixRegionHints = [for (final e in _regionEntries) e];
@@ -2985,15 +2987,18 @@ class GravixRoomService implements GravixAudioHost {
   // ═══════════════════════════════════════════════════════════════════════════
   //  CAMERA  — video rooms only (audio room never calls these)
   // ═══════════════════════════════════════════════════════════════════════════
-  Future<void> setCameraEnabled(bool enabled) async {
+  /// True when the camera ended up as asked. Turning it on from a region that carries no video
+  /// moves the session first (the call waits for that); false when no region can take it.
+  Future<bool> setCameraEnabled(bool enabled) async {
     await _awaitInitialPublish();
-    await _setCameraEnabledNow(enabled);
+    return _setCameraEnabledNow(enabled);
   }
 
-  Future<void> _setCameraEnabledNow(bool enabled) async {
-    if (await _setOwnedCameraEnabled(enabled)) return;
+  Future<bool> _setCameraEnabledNow(bool enabled) async {
+    if (await _setOwnedCameraEnabled(enabled)) return isCameraEnabled.value == enabled;
+    final local = localParticipant;
     try {
-      await localParticipant?.setCameraEnabled(
+      final published = await local?.setCameraEnabled(
         enabled,
         cameraCaptureOptions: CameraCaptureOptions(
           cameraPosition: cameraPosition,
@@ -3006,8 +3011,11 @@ class GravixRoomService implements GravixAudioHost {
           stopCameraCaptureOnMute: false,
         ),
       );
-      await _publishFacing();
+      // turned off while the session moved: that call has the last word
+      if (enabled && local != null && published == null) return false;
+      // before the facing, whose write may wait 5 s for an answer: the camera is up now
       isCameraEnabled.value = enabled;
+      await _publishFacing();
 
       if (enabled) {
         final pub = localParticipant?.getTrackPublicationBySource(TrackSource.camera);
@@ -3018,8 +3026,10 @@ class GravixRoomService implements GravixAudioHost {
       } else {
         await _effect.onCameraStopped();
       }
+      return true;
     } catch (e) {
       debugPrint('Error setCameraEnabled($enabled): $e');
+      return false;
     }
   }
 

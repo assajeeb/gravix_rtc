@@ -163,12 +163,20 @@ Some regions carry audio only. You don't need to do anything for this:
 - If the room has video, at join or later, the session moves once to a region that carries
   video. Remote participants return after the reconnect.
 
-If you already know the room type, you can skip the detection and that one reconnect:
+If you already know the room type, declaring it skips that first landing and its reconnect:
 
 ```dart
 media: GravixRoomMedia.video, // never lands on an audio-only region
 media: GravixRoomMedia.audio, // a voice room with no video at all
 ```
+
+Declaring only decides where the join lands first. A session declared `audio` still moves once
+if video appears.
+
+Turning on the camera or a screen share on an audio-only region moves the session first, then
+publishes, and the call returns once the camera is up. It fails at once with `media_not_allowed`
+if no region with video can take the session. All of this needs a region list that carries `media`
+(the console's `/v1/regions`): a list without it means no moves.
 
 A video room's first viewer on an audio-only region has picture slightly later because of the
 move. Set `gravixMediaAutoDetect = false` before the first join to treat every undeclared room

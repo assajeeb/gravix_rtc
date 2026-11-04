@@ -2,6 +2,8 @@
 
 import 'package:meta/meta.dart';
 
+import '../../../connect/gravix_region_media.dart';
+import '../proto/gravixcloud_models.pb.dart' as lk_models;
 import '../proto/gravixcloud_rtc.pb.dart' as lk_rtc;
 
 /// The failure message if [response] is the SFU refusing OUR addTrack
@@ -26,4 +28,18 @@ String? gravixAddTrackRejection(lk_rtc.RequestResponse response, String cid) {
   if (response.addTrack.cid != cid) return null;
   final detail = response.message.isEmpty ? '' : ' - ${response.message}';
   return 'addTrack rejected: ${response.reason.name}$detail';
+}
+
+/// GRAVIX (2026-11-04): a server refusal of [type]'s medium on this node that names no
+/// AddTrack: no TrackPublished will come for a pending publish of that medium, so it ends
+/// now instead of at timeouts.publish. Null otherwise, also for a refusal naming another
+/// AddTrack ([gravixAddTrackRejection] decides those).
+@internal
+String? gravixAddTrackMediaRefusal(lk_rtc.RequestResponse response, lk_models.TrackType type) {
+  if (response.reason == lk_rtc.RequestResponse_Reason.OK) return null;
+  if (response.whichRequest() == lk_rtc.RequestResponse_Request.addTrack) return null;
+  if (!gravixIsMediaNotAllowed(response.message)) return null;
+  final video = gravixRefusedMedia(response.message) == GravixRoomMedia.video;
+  if (video != (type == lk_models.TrackType.VIDEO)) return null;
+  return 'addTrack rejected: ${response.reason.name} - ${response.message}';
 }

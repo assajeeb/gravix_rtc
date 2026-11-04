@@ -945,7 +945,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       if (!completer.isCompleted) completer.complete(event.track);
     }, filter: (event) => event.cid == req.cid);
     final cancelRejected = _signalListener.on<SignalRequestResponseEvent>((event) {
-      final reason = gravixAddTrackRejection(event.response, req.cid);
+      final reason =
+          gravixAddTrackRejection(event.response, req.cid) ?? gravixAddTrackMediaRefusal(event.response, req.type);
       if (reason != null && !completer.isCompleted) {
         logger.warning('[addTrack] $reason');
         completer.completeError(TrackPublishException(reason));

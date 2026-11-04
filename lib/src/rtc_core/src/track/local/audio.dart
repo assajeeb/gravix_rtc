@@ -228,6 +228,20 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
   @override
   Future<bool> onPublish() async {
     final did = await super.onPublish();
+    // GRAVIX (2026-11-04): a new session reads the mute back from the module, not from memory.
+    // Refused, this track goes silent the old way: it must not be live on the new session.
+    if (_engineMuted && !await GravixEngineMicMute.engage()) {
+      logger.severe('mic mute: the engine mute was refused on the new session; disabling the track');
+      await disable();
+      _engineMuted = false;
+      if (_voiceOnlyMuted) {
+        _voiceOnlyMuted = false;
+        // now a plain mute, which the wire has to know
+        updateMuted(false, shouldNotify: false);
+        updateMuted(true, shouldSendSignal: true);
+      }
+      if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+    }
     if (wireMuted) await _uplinkPause.pause(sender);
     return did;
   }

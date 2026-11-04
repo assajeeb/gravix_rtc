@@ -80,6 +80,15 @@ const kGravixMediaVideo = 'video';
 /// reason) when this node does not take it, e.g. video on an audio-only region.
 const kGravixMediaNotAllowed = 'media_not_allowed';
 
+/// The `cause` of a move made first because this user turns on the camera, or a screen
+/// share, on a region known not to carry video (nothing is tried there).
+const kGravixCauseCameraOn = 'camera-on';
+const kGravixCauseScreenOn = 'screen-on';
+
+/// How long a call turning video on waits for its media move before it fails. A reconnect
+/// that can't land has its own ladder, which may outlast what an app's button should.
+Duration gravixMediaMoveDeadline = const Duration(seconds: 20);
+
 /// How long a region that refused a medium is avoided for it.
 const kGravixMediaRefusalLife = Duration(minutes: 10);
 
