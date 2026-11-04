@@ -355,6 +355,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         return lk_models.TrackInfo();
       }
 
+      // the session this AddTrack goes to (no await before it goes out)
+      final gravixSessionGen = room.engine.gravixRestartGen;
       late lk_models.TrackInfo trackInfo;
       if (gravixJoin != null || (room.engine.enabledPublishCodecs?.isNotEmpty ?? false)) {
         final rets = await Future.wait<lk_models.TrackInfo>([
@@ -389,6 +391,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       track.lastPublishOptions = publishOptions;
 
       final pub = LocalTrackPublication<LocalAudioTrack>(participant: this, info: trackInfo, track: track);
+      _gravixPublishedOnSession[pub] = gravixSessionGen;
       // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
       track.gravixStatsPeerConnection = () => room.engine.publisher?.pc;
       addTrackPublication(pub);
@@ -787,6 +790,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         ..clear()
         ..addAll(layers);
     }
+    // the session this AddTrack goes to
+    final gravixSessionGen = room.engine.gravixRestartGen;
     late lk_models.TrackInfo trackInfo;
     if (room.engine.enabledPublishCodecs?.isNotEmpty ?? false) {
       try {
@@ -913,6 +918,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     if (!gravixDetached) await track.start();
 
     final pub = LocalTrackPublication<LocalVideoTrack>(participant: this, info: trackInfo, track: track);
+    _gravixPublishedOnSession[pub] = gravixSessionGen;
     // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
     track.gravixStatsPeerConnection = () => room.engine.publisher?.pc;
     addTrackPublication(pub);
@@ -1023,6 +1029,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     }
   }
 
+  /// The full reconnect's generation each publication's AddTrack went out on: a reconnect's
+  /// republish leaves alone what is on its own session already.
+  final Expando<int> _gravixPublishedOnSession = Expando<int>('gravixPublishedOnSession');
+
   /// Publications a full rejoin is republishing that are not published yet. A
   /// newer rejoin takes them over (otherwise the muted mic could be lost between
   /// two back-to-back rejoins).
@@ -1048,14 +1058,27 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     // what the previous rejoin did not finish, then what is published now; one
     // entry per track
     final pubs = <LocalTrackPublication>[];
+    final onThisSession = <String, LocalTrackPublication>{};
+    final keep = room.roomOptions.recovery.republishKeepsNewSessionTracks;
     for (final pub in [..._gravixRepublishPending, ...trackPublications.values]) {
+      if (keep && _gravixPublishedOnSession[pub] == restartGen) {
+        onThisSession[pub.sid] = pub;
+        continue;
+      }
       if (pub.track == null || pubs.any((p) => identical(p.track, pub.track))) continue;
       pubs.add(pub);
     }
+    // GRAVIX (2026-11-04, simulator, 3 of 12 joins into a room with video): a publish that passed
+    // its "move under way?" check before the move can reach its AddTrack after the new session's
+    // JoinResponse (the recorder start takes 150 ms). It is published on this session; sending the
+    // same cid again gets no answer from the SFU, the reconnect sits out the publish deadline, and
+    // the publication is dropped with the mic still live at the server.
+    pubs.removeWhere((p) => onThisSession.values.any((k) => identical(k.track, p.track)));
     _gravixRepublishPending
       ..clear()
       ..addAll(pubs);
     trackPublications.clear();
+    trackPublications.addAll(onThisSession);
     final detachStopped = room.roomOptions.recovery.republishStoppedTracksMuted;
     for (LocalTrackPublication pub in pubs) {
       if (superseded()) {

@@ -273,12 +273,15 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         return false;
       }
       provider.media = refused;
-      final ordered = await provider.getNextBestRegionUrl(
-        currentUrl: from,
-        measuredOrder: roomOptions.recovery.measuredRegionFailover,
-        lastGoodFallback: roomOptions.recovery.lastGoodRegionList,
-        fetchTimeout: engine.connectOptions.timeouts.connection,
-      );
+      // asking the provider again would give the region after this one: its list moves on per ask
+      final ordered =
+          _gravixBusyMoveUrl ??
+          await provider.getNextBestRegionUrl(
+            currentUrl: from,
+            measuredOrder: roomOptions.recovery.measuredRegionFailover,
+            lastGoodFallback: roomOptions.recovery.lastGoodRegionList,
+            fetchTimeout: engine.connectOptions.timeouts.connection,
+          );
       // Owner, 2026-11-04 (R1): the region this medium's joins use, with its hysteresis, not the
       // raw fastest. It may be one the server's list doesn't have.
       final target = roomOptions.recovery.measuredRegionFailover ? gravixMediaMoveTarget(refused) : null;
@@ -305,9 +308,12 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         _gravixEndMediaMove(move);
         _gravixMediaMove = null;
         _gravixMediaMoveDone = false;
+        _gravixMoveFoundBusy = true;
+        _gravixBusyMoveUrl = ordered;
         log('stay reason=reconnect-busy');
         return false;
       }
+      _gravixBusyMoveUrl = null;
       // names Room.connectedRegion after the move
       if (toRegion != null &&
           !gravixRegionHints.any((e) => gravixNormalizeRegionUrl(e.url) == gravixNormalizeRegionUrl(next))) {
@@ -529,22 +535,42 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     }
   }
 
+  /// GRAVIX (2026-11-04, tester review): how long a session on a region without video keeps trying
+  /// to move for the room's video, while the session is not up yet or a reconnect holds the engine.
+  /// Past it the viewer would see nothing, so it is long; each look costs one bool or two.
+  @visibleForTesting
+  static Duration gravixRoomVideoMoveWindow = const Duration(seconds: 60);
+
+  /// GRAVIX: a move found the engine reconnecting; asking again later can work.
+  bool _gravixMoveFoundBusy = false;
+
+  /// The provider's answer to the move that found the engine reconnecting.
+  String? _gravixBusyMoveUrl;
+
   Future<void> _gravixMoveForRoomVideo() async {
     // At join the video shows in the join response, before the session is up, and
     // the reconnect path takes a connected session.
     // The state turns connected a moment before the url is noted.
     bool ready() => connectionState == ConnectionState.connected && (connectedUrl ?? _connectedUrl) != null;
-    for (var i = 0; i < 100 && !ready(); i++) {
+    final watch = Stopwatch()..start();
+    var why = 'not-connected';
+    while (true) {
       if (isDisposed || _gravixLeaving) return;
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (ready()) {
+        final url = connectedUrl ?? _connectedUrl;
+        if (url == null || gravixUrlAllowsMedia(url, GravixRoomMedia.video, known: gravixRegionHints)) return;
+        _gravixMoveFoundBusy = false;
+        if (await gravixFailoverForMediaRefusal(kGravixMediaNotAllowed, cause: 'room-has-video')) return;
+        // no region takes video, or the session moved already: asking again changes nothing
+        if (!_gravixMoveFoundBusy) return;
+        why = 'reconnect-busy';
+      }
+      if (watch.elapsed >= gravixRoomVideoMoveWindow) {
+        GravixRegionLog.step('mediaFailover', 'media=video stay reason=$why cause=room-has-video');
+        return;
+      }
+      await Future<void>.delayed(Duration(milliseconds: ready() ? 1000 : 100));
     }
-    if (isDisposed || _gravixLeaving || !ready()) {
-      GravixRegionLog.step('mediaFailover', 'media=video stay reason=not-connected cause=room-has-video');
-      return;
-    }
-    final url = connectedUrl ?? _connectedUrl;
-    if (url == null || gravixUrlAllowsMedia(url, GravixRoomMedia.video, known: gravixRegionHints)) return;
-    await gravixFailoverForMediaRefusal(kGravixMediaNotAllowed, cause: 'room-has-video');
   }
 
   /// After a media move: the refused camera is published again on the new
@@ -974,6 +1000,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     connectOptions ??= ConnectOptions();
     _gravixLeaving = false;
     _gravixMediaMoveDone = false; // one media move per session
+    _gravixBusyMoveUrl = null;
     _gravixMediaMove = null;
     _gravixVideoOnMove = null;
     _gravixRefusalSeen = null;

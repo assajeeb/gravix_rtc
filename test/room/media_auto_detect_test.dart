@@ -63,6 +63,21 @@ Future<void> _measure(Map<String, Object?> body, Map<String, int?> rtt) => gravi
   networkType: () async => 'unknown',
 );
 
+/// An engine that answers "a reconnect is under way" the first [busy] times it is asked to move.
+class _BusyEngine extends Engine {
+  _BusyEngine(
+    this.busy, {
+    required super.connectOptions,
+    required super.roomOptions,
+    required super.signalClient,
+    required super.peerConnectionCreate,
+  });
+  final int busy;
+  int asked = 0;
+  @override
+  bool gravixRestartTo(String url) => ++asked > busy && super.gravixRestartTo(url);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final lines = <String>[];
@@ -161,6 +176,62 @@ void main() {
       expect(lines.where((l) => l.contains('mediaFailover') && l.contains('-> sgp1')).length, 1);
       expect(lines.any((l) => l.contains('cause=room-has-video')), isTrue);
       expect(r.gravixJoinMedia, GravixRoomMedia.video);
+    });
+
+    // Review of the Gulf test, 2026-11-04: a session whose move found the engine reconnecting logged
+    // `stay reason=reconnect-busy` and never asked again: the viewer stayed on Doha with no video.
+    group('when a reconnect holds the engine', () {
+      Future<(Room, FakeSignalServer, _BusyEngine)> busyOnDoha(int busy) async {
+        final server = FakeSignalServer()..joinResponse = (uri) => fakeJoinResponse();
+        final pcs = FakePcFactory();
+        autoConnectPcs(pcs);
+        final options = RoomOptions(reconnectPolicy: FastPolicy());
+        final engine = _BusyEngine(
+          busy,
+          connectOptions: ConnectOptions(timeouts: fastTimeouts(peerConnection: const Duration(seconds: 10))),
+          roomOptions: options,
+          signalClient: SignalClient(server.connect),
+          peerConnectionCreate: pcs.create,
+        );
+        final r = room = Room(engine: engine, roomOptions: options);
+        r.gravixRegionHints = const [GravixRegionUrl(region: 'doh1', url: 'wss://doh1.example')];
+        r.gravixJoinMedia = GravixRoomMedia.audio;
+        r.engine.setRegionUrlProvider(_list());
+        await r.connect('wss://doh1.example', 'tok', connectOptions: ConnectOptions(timeouts: fastTimeouts()));
+        return (r, server, engine);
+      }
+
+      tearDown(() => Room.gravixRoomVideoMoveWindow = const Duration(seconds: 60));
+
+      test('the move is asked for again and goes through', () async {
+        final (_, server, engine) = await busyOnDoha(2);
+        server.sockets.last.deliver(_update(_peer('host', lk_models.TrackType.VIDEO)));
+        expect(await eventually(moved, timeout: const Duration(seconds: 6)), isTrue, reason: lines.join('\n'));
+        expect(engine.asked, 3);
+        expect(lines.where((l) => l.contains('reason=moved')).length, 1);
+      });
+
+      test('it gives up after the window and says why', () async {
+        Room.gravixRoomVideoMoveWindow = const Duration(milliseconds: 50);
+        final (_, server, engine) = await busyOnDoha(1 << 30);
+        server.sockets.last.deliver(_update(_peer('host', lk_models.TrackType.VIDEO)));
+        bool gaveUp() => lines.any((l) => l.contains('media=video stay reason=reconnect-busy cause=room-has-video'));
+        expect(await eventually(gaveUp, timeout: const Duration(seconds: 4)), isTrue, reason: lines.join('\n'));
+        expect(moved(), isFalse);
+        final asked = engine.asked;
+        await Future<void>.delayed(const Duration(milliseconds: 1200));
+        expect(engine.asked, asked, reason: 'nothing runs after giving up');
+      });
+
+      test('leaving ends the asking', () async {
+        final (r, server, engine) = await busyOnDoha(1 << 30);
+        server.sockets.last.deliver(_update(_peer('host', lk_models.TrackType.VIDEO)));
+        expect(await eventually(() => engine.asked >= 1), isTrue);
+        await r.disconnect();
+        final asked = engine.asked;
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        expect(engine.asked, asked);
+      });
     });
 
     test('video already in the room at join moves once connected', () async {

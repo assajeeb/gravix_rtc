@@ -22,6 +22,7 @@ class GravixRecoveryOptions {
     this.noVideoMinInterval = const Duration(seconds: 60),
     this.keepParticipantsOnRejoin = true,
     this.republishStoppedTracksMuted = true,
+    this.republishKeepsNewSessionTracks = true,
     this.startBitrateBySetupTime = true,
     this.resumePrimaryDeadline = const Duration(seconds: 3),
     this.leaveAbortsResumeWait = true,
@@ -82,6 +83,7 @@ class GravixRecoveryOptions {
     noVideoWatchdog: false,
     keepParticipantsOnRejoin: false,
     republishStoppedTracksMuted: false,
+    republishKeepsNewSessionTracks: false,
     startBitrateBySetupTime: false,
     resumePrimaryDeadline: null,
     leaveAbortsResumeWait: false,
@@ -185,6 +187,12 @@ class GravixRecoveryOptions {
   /// addTransceiver, which fails ("track is null"). A track that still fails to
   /// republish is reported, never thrown.
   final bool republishStoppedTracksMuted;
+
+  /// A full rejoin's republish leaves alone a track already published on the new session (a
+  /// publish that landed between the JoinResponse and the republish). Off: it is sent again, the
+  /// SFU doesn't answer the duplicate, and the reconnect waits out the publish deadline and drops
+  /// the publication.
+  final bool republishKeepsNewSessionTracks;
 
   /// Ported from the upstream client SDK 2.13.1: the video start bitrate hint is
   /// one connection-level value written once per publisher connection, capped at
@@ -548,6 +556,7 @@ class GravixRecoveryOptions {
     Duration? noVideoMinInterval,
     bool? keepParticipantsOnRejoin,
     bool? republishStoppedTracksMuted,
+    bool? republishKeepsNewSessionTracks,
     bool? startBitrateBySetupTime,
     Duration? resumePrimaryDeadline,
     bool clearResumePrimaryDeadline = false,
@@ -604,6 +613,7 @@ class GravixRecoveryOptions {
     noVideoMinInterval: noVideoMinInterval ?? this.noVideoMinInterval,
     keepParticipantsOnRejoin: keepParticipantsOnRejoin ?? this.keepParticipantsOnRejoin,
     republishStoppedTracksMuted: republishStoppedTracksMuted ?? this.republishStoppedTracksMuted,
+    republishKeepsNewSessionTracks: republishKeepsNewSessionTracks ?? this.republishKeepsNewSessionTracks,
     startBitrateBySetupTime: startBitrateBySetupTime ?? this.startBitrateBySetupTime,
     resumePrimaryDeadline: clearResumePrimaryDeadline ? null : resumePrimaryDeadline ?? this.resumePrimaryDeadline,
     leaveAbortsResumeWait: leaveAbortsResumeWait ?? this.leaveAbortsResumeWait,

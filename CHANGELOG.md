@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.3 — 2026-11-05
+
+Fixes found by testing the automatic room-video move. Three real Gulf test runs of 0.8.2 passed; these
+are the two failures seen on the simulator or by review.
+
+### Fixed
+- The microphone is no longer lost when a region move starts just as a join publishes it. A publish
+  that passed its "move under way?" check could reach the new session before the reconnect's
+  republish, which then sent the same track again. The SFU doesn't answer that, so the reconnect sat
+  out the 10 s publish deadline and the SDK dropped the publication: the app said the mic was on, the
+  SDK had no publication, and a mute could no longer reach it. A publication already on the new session
+  is now kept. `GravixRecoveryOptions.republishKeepsNewSessionTracks` turns this off.
+- A session that sees video in the room while the engine is busy reconnecting, or that takes more than
+  10 s to connect, now keeps trying to move for up to 60 s. Before, it gave up at once and the viewer
+  stayed on an audio-only region with no video.
+
 ## 0.8.2 — 2026-11-04
 
 Fixes from a real test between Saudi Arabia and Dhaka.

@@ -54,6 +54,17 @@ Iterable<lk_rtc.AddTrackRequest> _addTracksOn(FakeSignalServer server, String ho
     .where((q) => q.hasAddTrack() && q.addTrack.type == type)
     .map((q) => q.addTrack);
 
+/// A microphone whose start the test holds: a recorder start, about 0.15 s on a phone.
+class _SlowStartMic extends LocalAudioTrack {
+  _SlowStartMic(this.gate, FakeMediaTrack t) : super(TrackSource.microphone, FakeMediaStream([t]), t, const AudioCaptureOptions());
+  final Future<void> gate;
+  @override
+  Future<bool> start() async {
+    await gate;
+    return super.start();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final lines = <String>[];
@@ -80,12 +91,20 @@ void main() {
     room = null;
   });
 
-  Future<(Room, FakeSignalServer)> onDoha({lk_rtc.JoinResponse Function(Uri)? join}) async {
+  Future<(Room, FakeSignalServer)> onDoha({lk_rtc.JoinResponse Function(Uri)? join, Duration? newSessionPcs}) async {
     final server = FakeSignalServer()
       ..joinResponse = join ?? ((uri) => fakeJoinResponse())
       ..answerOffers = true;
     final pcs = FakeCamPcFactory();
     autoConnectPcs(pcs);
+    if (newSessionPcs != null) {
+      final connect = pcs.onCreate!;
+      var made = 0;
+      pcs.onCreate = (pc) {
+        if (++made <= 2) return connect(pc);
+        Timer(newSessionPcs, () => connect(pc));
+      };
+    }
     final r = room = Room(
       engine: Engine(
         connectOptions: ConnectOptions(timeouts: fastTimeouts()),
@@ -129,6 +148,31 @@ void main() {
     expect(pub.track!.isActive, isTrue, reason: 'a capture behind the new publication');
     expect(_addTracksOn(server, 'sgp1.gravixcloud.run', lk_models.TrackType.AUDIO), hasLength(1));
     expect(lines.any((l) => l.contains('mediaRepublish microphone')), isTrue, reason: lines.join('\n'));
+  });
+
+  // Simulator, 2026-11-04, 3 joins into a room with video: the publish passed its "a move under way?"
+  // check, the recorder start took 150 ms, the move began meanwhile, and the AddTrack went out on the
+  // NEW session, between its JoinResponse and the reconnect's republish. The republish sent the same
+  // cid again; the SFU doesn't answer that, so 10 s later the publication was dropped: app_mic_on true,
+  // track_published false for the rest of the call.
+  test('a mic that lands on the new session before its republish is kept, with no second AddTrack', () async {
+    final (r, server) = await onDoha(newSessionPcs: const Duration(milliseconds: 200));
+    final lp = r.localParticipant!;
+    final started = Completer<void>();
+    final track = _SlowStartMic(started.future, FakeMediaTrack('mic-slow'));
+    final publishing = lp.publishAudioTrack(track);
+    await settle(20);
+    server.afterJoin = (ws) {
+      if (ws.uri.host == 'sgp1.gravixcloud.run') Timer(Duration.zero, started.complete);
+    };
+    // what the SFU does: a cid it already has on this session gets no answer
+    server.holdAddTrack = (ws) => ws.sent.where((q) => q.hasAddTrack()).length > 1;
+    videoStarts(server);
+    final pub = await publishing;
+    expect(await eventually(() => r.connectedRegion == 'sgp1'), isTrue, reason: lines.join('\n'));
+    await settle(500);
+    expect(_addTracksOn(server, 'sgp1.gravixcloud.run', lk_models.TrackType.AUDIO), hasLength(1), reason: lines.join('\n'));
+    expect(lp.getTrackPublicationBySource(TrackSource.microphone), same(pub), reason: lines.join('\n'));
   });
 
   test('a mic muted while the move runs stays unpublished, and the call does not throw', () async {
