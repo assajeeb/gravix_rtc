@@ -170,8 +170,13 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   int _gravixRestartGen = 0;
   Completer<void> _gravixRestartSignal = Completer<void>();
 
+  /// From a full reconnect's start to its JoinResponse there is no session to publish on: an
+  /// AddTrack sent now goes to a socket that is closing or closed.
+  bool _gravixBetweenSessions = false;
+
   void _gravixSessionReplaced() {
     _gravixRestartGen++;
+    _gravixBetweenSessions = true;
     final old = _gravixRestartSignal;
     _gravixRestartSignal = Completer<void>();
     if (!old.isCompleted) old.complete();
@@ -936,6 +941,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   /// deliver it, and the next attempt must not wait behind it).
   @internal
   Future<lk_models.TrackInfo> addTrack(lk_rtc.AddTrackRequest req, {Future<void>? gravixAbort}) async {
+    // GRAVIX (2026-11-04, Gulf test): emulator, 0.8.1, 3 of 12 joins into a room with video: a publish
+    // began as the session went and waited out the whole publish deadline for an answer no socket
+    // could bring.
+    if (_gravixBetweenSessions) {
+      throw GravixSessionReplacedException('addTrack ${req.cid}: no session, a full reconnect is under way');
+    }
     // Race TrackPublished against a RequestResponse refusal for the same cid,
     // so a server rejection (e.g. video above the plan's resolution cap) fails
     // the publish promptly with the server's reason instead of a timeout.
@@ -2794,6 +2805,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
   void _setUpSignalListeners() => _signalListener
     ..on<SignalJoinResponseEvent>((event) async {
+      _gravixBetweenSessions = false;
       // create peer connections
       _subscriberPrimary = event.response.subscriberPrimary;
       _serverInfo = event.response.serverInfo;

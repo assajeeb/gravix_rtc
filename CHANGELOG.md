@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.2 — 2026-11-04
+
+Fixes from a real test between Saudi Arabia and Dhaka.
+
+### Fixed
+- A microphone or camera wanted during a join that a region move interrupts now goes out on the new
+  session, with no app action. Before, the publish failed, the mic stayed off, and the app and the
+  SDK disagreed: the user believed the mic was on and nobody heard them. The same holds for any
+  full reconnect. A mute during the move wins.
+- A participant is no longer reported as left after a move to a region where the room is new. An
+  update arriving right behind the join response was lost, so the participant was dropped 5 s later
+  with their media playing, and came back about 30 s later with nothing subscribed. Media arriving
+  now proves they are there, a move waits 35 s (`rejoinAbsentMoveGrace`), and a participant who was
+  dropped and returns is subscribed to again.
+- One peer's camera stopping, for example when their app goes to the background, no longer makes a
+  healthy device resume and then rejoin, which cut its own audio. It takes two tracks going quiet
+  together to count as a bad path, and no rejoin happens while another camera is decoding.
+
+### Changed: which region a move goes to
+- When the fastest measured region is audio-only, the other video regions are measured too, in the
+  background: never on the join path, at most once per region-list lifetime and network, with the same
+  budget. So a move to video really goes to the nearest video region.
+- A move now goes to the region video joins use, with its hysteresis, so two near-equal regions don't
+  flip between steps. A `mediaTarget` log line says why it was chosen.
+
+### Changed: rejoining a room
+- A room is remembered as having video only if it still had video when the session left (remote video,
+  or your own camera), and for 10 minutes at most. Rejoining a room with no video goes to the fastest
+  region by the normal path; rejoining one that still has video goes straight to a video region.
+- A muted camera no longer counts as video in the room: nobody moves for it until it is unmuted.
+
 ## 0.8.1 — 2026-11-04
 
 ### Changed: turning on video on an audio-only region moves first

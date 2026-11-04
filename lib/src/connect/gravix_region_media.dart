@@ -39,34 +39,51 @@ enum GravixRoomMedia { audio, video }
 /// means video. Set it before the first join.
 bool gravixMediaAutoDetect = true;
 
-/// Rooms seen carrying video in this app run, oldest first: a later join of one goes
-/// straight to a region that carries video instead of landing and moving again.
-/// In memory only, so nothing is stored about a room after the app ends.
-final Map<String, bool> _roomsWithVideo = <String, bool>{};
+/// Rooms that carried video when last seen, oldest first: a later join of one goes straight to
+/// a region that carries video instead of landing and moving again. In memory only, so nothing
+/// is stored about a room after the app ends. Owner, 2026-11-04: a rejoin of a room whose video is
+/// over goes back to the fastest region, so the session settles this at its leave
+/// ([gravixForgetRoomVideo]) and an entry ends after [kGravixRoomVideoMemoryLife].
+final Map<String, DateTime> _roomsWithVideo = <String, DateTime>{};
 const int _kRoomsWithVideoMax = 500;
 
+/// How long a room is remembered as carrying video.
+const kGravixRoomVideoMemoryLife = Duration(minutes: 10);
+
 /// Remembers that [room] carries video.
-void gravixNoteRoomHasVideo(String room) {
+void gravixNoteRoomHasVideo(String room, {DateTime? now}) {
   if (room.isEmpty) return;
   _roomsWithVideo.remove(room);
-  _roomsWithVideo[room] = true;
+  _roomsWithVideo[room] = now ?? DateTime.now();
   while (_roomsWithVideo.length > _kRoomsWithVideoMax) {
     _roomsWithVideo.remove(_roomsWithVideo.keys.first);
   }
 }
 
-/// True when [room] was seen carrying video in this app run.
-bool gravixRoomHadVideo(String? room) => room != null && _roomsWithVideo.containsKey(room);
+/// Forgets [room]: it had no video when it was left.
+void gravixForgetRoomVideo(String room) => _roomsWithVideo.remove(room);
+
+/// True when [room] was remembered as carrying video in the last [kGravixRoomVideoMemoryLife].
+bool gravixRoomHadVideo(String? room, {DateTime? now}) {
+  final at = room == null ? null : _roomsWithVideo[room];
+  if (at == null) return false;
+  if ((now ?? DateTime.now()).difference(at) > kGravixRoomVideoMemoryLife) {
+    _roomsWithVideo.remove(room);
+    return false;
+  }
+  return true;
+}
 
 /// How many rooms are remembered (tests).
 @visibleForTesting
 int gravixRoomsWithVideoCount() => _roomsWithVideo.length;
 
-/// True when any of [participants]' tracks is video. Camera and screen share both are.
+/// True when any of [participants]' tracks is live video. Camera and screen share both are; a
+/// muted one carries nothing, and its unmute is an update that says so.
 bool gravixInfosCarryVideo(Iterable<lk_models.ParticipantInfo> participants) {
   for (final p in participants) {
     for (final t in p.tracks) {
-      if (t.type == lk_models.TrackType.VIDEO) return true;
+      if (t.type == lk_models.TrackType.VIDEO && !t.muted) return true;
     }
   }
   return false;

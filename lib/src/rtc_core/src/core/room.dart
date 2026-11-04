@@ -65,10 +65,12 @@ import '../utils.dart' show isSVCCodec, unpackStreamId;
 import '../participant/gravix_publish_runners.dart'; // GRAVIX (0.4.8)
 import '../../../connect/gravix_region_failover.dart'
     show gravixNormalizeRegionUrl, gravixRegionOfUrl; // GRAVIX (0.4.15)
+import '../../../connect/gravix_init_measure.dart' show gravixMediaMoveTarget, gravixMediaMoveWhy;
 import '../../../connect/gravix_region_media.dart'; // GRAVIX (2026-10-21)
 import '../../../connect/gravix_region_report.dart' show GravixRegionUrl; // GRAVIX (0.4.15)
 import '../publication/local.dart';
 import '../publication/remote.dart';
+import '../publication/track_publication.dart';
 import '../track/remote/audio.dart';
 import '../track/remote/video.dart';
 import 'gravix_media_watchdog.dart';
@@ -135,6 +137,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   @internal
   void gravixMarkLeaving() {
+    _gravixSettleRoomVideoMemory(); // before the service turns the camera off
     _gravixLeaving = true;
     _gravixWakeJoinRetry();
   }
@@ -270,11 +273,22 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         return false;
       }
       provider.media = refused;
-      final next = await provider.getNextBestRegionUrl(
+      final ordered = await provider.getNextBestRegionUrl(
         currentUrl: from,
         measuredOrder: roomOptions.recovery.measuredRegionFailover,
         lastGoodFallback: roomOptions.recovery.lastGoodRegionList,
         fetchTimeout: engine.connectOptions.timeouts.connection,
+      );
+      // Owner, 2026-11-04 (R1): the region this medium's joins use, with its hysteresis, not the
+      // raw fastest. It may be one the server's list doesn't have.
+      final target = roomOptions.recovery.measuredRegionFailover ? gravixMediaMoveTarget(refused) : null;
+      final next = target != null && gravixNormalizeRegionUrl(target.url) != gravixNormalizeRegionUrl(from)
+          ? target.url
+          : ordered;
+      GravixRegionLog.step(
+        'mediaTarget',
+        'media=${refused.name} -> ${gravixRegionOfUrl(next, known: gravixLastRegionDirectory()) ?? '?'} '
+            '${gravixMediaMoveWhy(refused)}',
       );
       if (next == null ||
           gravixNormalizeRegionUrl(next) == gravixNormalizeRegionUrl(from) ||
@@ -390,6 +404,31 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     throw TrackPublishException('$kGravixMediaNotAllowed: this region carries no video and the session could not move');
   }
 
+  /// Calls waiting for a full reconnect to end (true: it landed).
+  final List<Completer<bool>> _gravixRestartWaits = [];
+
+  void _gravixRestartEnded(bool landed) {
+    for (final w in _gravixRestartWaits) {
+      if (!w.isCompleted) w.complete(landed);
+    }
+    _gravixRestartWaits.clear();
+  }
+
+  /// GRAVIX (2026-11-04, Gulf test): a publish found its session replaced. Waits for the full
+  /// reconnect to end, its republish included. True: the room is connected on a new session.
+  /// False: the room was left, or the reconnect is still not done after
+  /// [gravixMediaMoveDeadline] (it publishes what was interrupted when it is). Never throws.
+  @internal
+  Future<bool> gravixAfterSessionReplaced() async {
+    bool up() =>
+        connectionState == ConnectionState.connected && _restart == null && !engine.gravixFullReconnectInProgress;
+    if (isDisposed || _gravixLeaving) return false;
+    if (up()) return true;
+    final wait = Completer<bool>();
+    _gravixRestartWaits.add(wait);
+    return wait.future.timeout(gravixMediaMoveDeadline, onTimeout: () => false);
+  }
+
   /// A new publish of video: a refusal from here on is its own.
   @internal
   void gravixForgetRefusal() => _gravixRefusalSeen = null;
@@ -432,6 +471,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     // Video can arrive in an update before the join response names the room, so the
     // note may come on a later call. It also keeps this down to two bools afterwards.
     final room = roomName ?? name;
+    if (room != null) _gravixSessionRoom = room;
     if (_gravixRoomVideoSeen) {
       if (!_gravixRoomVideoNoted && room != null) {
         gravixNoteRoomHasVideo(room);
@@ -457,6 +497,35 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       unawaited(_gravixMoveForRoomVideo());
     } catch (e) {
       logger.warning('room video check: ${e.runtimeType}');
+    }
+  }
+
+  /// The room's name in this session: it is reset during a full reconnect.
+  String? _gravixSessionRoom;
+  bool _gravixRoomVideoSettled = false;
+
+  /// GRAVIX (owner, 2026-11-04, R3): the session ends. The memory of [gravixNoteRoomHasVideo] is
+  /// kept only if the room still has video now, remote tracks or this user's own camera; a rejoin
+  /// of a room without it goes back to the fastest region by the normal path. Before anything is
+  /// torn down, once per session. A session that saw no video and showed none does nothing. Never
+  /// throws.
+  void _gravixSettleRoomVideoMemory() {
+    if (_gravixRoomVideoSettled || !gravixMediaAutoDetect) return;
+    final room = name ?? _gravixSessionRoom;
+    if (room == null) return;
+    _gravixRoomVideoSettled = true;
+    try {
+      bool live(TrackPublication p) => p.kind == TrackType.VIDEO && !p.muted;
+      final video =
+          (localParticipant?.trackPublications.values.any(live) ?? false) ||
+          _remoteParticipants.toList().any((p) => p.trackPublications.values.any(live));
+      if (video) {
+        gravixNoteRoomHasVideo(room);
+      } else {
+        gravixForgetRoomVideo(room);
+      }
+    } catch (e) {
+      logger.warning('room video memory: ${e.runtimeType}');
     }
   }
 
@@ -910,6 +979,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     _gravixRefusalSeen = null;
     _gravixRoomVideoSeen = false;
     _gravixRoomVideoNoted = false;
+    _gravixRoomVideoSettled = false;
+    _gravixSessionRoom = null;
     _pendingTrackQueue.updateTtl(connectOptions.timeouts.subscribe);
     // ignore: deprecated_member_use_from_same_package
     if ((effectiveRoomOptions.encryption != null || effectiveRoomOptions.e2eeOptions != null) &&
@@ -1466,6 +1537,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   }
 
   void _setUpSignalListeners() => _signalListener
+    // GRAVIX (2026-11-04): what the OLD session said before its socket went doesn't count
+    ..on<SignalJoinResponseEvent>((_) => _restart?.seenInUpdate.clear())
     ..on<SignalParticipantUpdateEvent>((event) => _onParticipantUpdateEvent(event.participants))
     ..on<SignalSpeakersChangedEvent>((event) => _onSignalSpeakersChangedEvent(event.speakers))
     ..on<SignalConnectionQualityUpdateEvent>((event) => _onSignalConnectionQualityUpdateEvent(event.updates))
@@ -1704,12 +1777,23 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         // on a node where the room was just created, arrive through the relay a
         // moment later (F6, device r127 / r149: the host reported left, then
         // joined, 2 ms apart): they get rejoinAbsentGrace to reappear
-        final present = {for (final info in event.response.otherParticipants) info.identity};
-        final grace = roomOptions.recovery.rejoinAbsentGrace;
+        // GRAVIX (2026-11-04, Gulf test): the update carrying them may have overtaken this
+        // handler (it waits for the peer connections and the local participant; on the real
+        // server the relay's presence came 60 ms after the room was created): nothing would ever
+        // cancel a grace armed after it. Field: host presence on blr1 at 22.6, the grace armed
+        // at 22.86, "left" at 27.865 with its audio and video playing.
+        final present = {for (final info in event.response.otherParticipants) info.identity, ...?restart?.seenInUpdate};
+        // another node: the room may be new there, see rejoinAbsentMoveGrace
+        final previousUrl = _connectedUrl;
+        final moved =
+            previousUrl != null &&
+            engine.url != null &&
+            gravixNormalizeRegionUrl(previousUrl) != gravixNormalizeRegionUrl(engine.url!);
+        final grace = moved ? roomOptions.recovery.rejoinAbsentMoveGrace : roomOptions.recovery.rejoinAbsentGrace;
         for (final identity in kept.where((i) => !present.contains(i)).toList()) {
           if (grace > Duration.zero) {
             _gravixAbsentAfterRejoin[identity]?.cancel();
-            _gravixAbsentAfterRejoin[identity] = Timer(grace, () => unawaited(_gravixDropAbsent(identity)));
+            _gravixAbsentAfterRejoin[identity] = Timer(grace, () => unawaited(_gravixAbsentGraceOver(identity)));
           } else {
             await _gravixDropAbsent(identity);
           }
@@ -1789,6 +1873,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       final restart = _restart;
       // re-publish all tracks
       await localParticipant?.rePublishAllTracks();
+      // GRAVIX (2026-11-04, Gulf test): and what never got published because this restart began
+      if (restart == null || identical(_restart, restart)) await localParticipant?.gravixPublishInterrupted();
       if (restart != null && !identical(_restart, restart)) {
         // GRAVIX (0.4.15, F5): a newer full restart began while this one was
         // finishing (its republish was abandoned): that one announces and
@@ -1836,6 +1922,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         }
       }
       events.emit(const RoomReconnectedEvent());
+      _gravixRestartEnded(true);
       notifyListeners();
     })
     ..on<EngineResumingEvent>((event) async {
@@ -1883,6 +1970,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (!engine.gravixFullReconnectInProgress || event.reason == DisconnectReason.clientInitiated) {
         _restart = null;
         _gravixCancelAbsent();
+        _gravixDroppedByGrace.clear();
+        _gravixRestartEnded(false);
         await _cleanUp(disposeLocalParticipant: false);
         events.emit(RoomDisconnectedEvent(reason: event.reason));
         notifyListeners();
@@ -2005,6 +2094,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
+    _gravixSettleRoomVideoMemory();
     _gravixLeaving = true;
     _gravixWakeJoinRetry();
     final bool isPendingReconnect = engine.isPendingReconnect;
@@ -2071,6 +2161,25 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     _gravixAbsentAfterRejoin.clear();
   }
 
+  /// GRAVIX (2026-11-04, Gulf test): what the grace dropped (identity -> sid). The server knows
+  /// nothing of that: if the participant comes back, its subscriptions are still up on the server,
+  /// and no new track is sent for them.
+  final Map<String, String> _gravixDroppedByGrace = {};
+
+  /// The grace ran out. Media received on the new session proves the participant is in the
+  /// room (its tracks were unsubscribed when the restart began): a real leave is then told by
+  /// the server, which knows of it.
+  Future<void> _gravixAbsentGraceOver(String identity) async {
+    final participant = _remoteParticipants.byIdentity[identity];
+    if (participant != null && participant.trackPublications.values.any((p) => p.track != null)) {
+      _gravixAbsentAfterRejoin.remove(identity)?.cancel();
+      logger.info('kept participant $identity: not in the rejoin\'s list, but its media is flowing; kept');
+      return;
+    }
+    if (participant != null) _gravixDroppedByGrace[identity] = participant.sid;
+    await _gravixDropAbsent(identity);
+  }
+
   /// A kept participant that is really gone: as _handleParticipantDisconnect, but
   /// emitted directly (the room may not count as connected yet during a rejoin).
   Future<void> _gravixDropAbsent(String identity) async {
@@ -2083,6 +2192,19 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     events.emit(ParticipantDisconnectedEvent(participant: participant));
     await participant.dispose();
     notifyListeners();
+  }
+
+  /// The server still holds [participant]'s subscriptions and won't send their tracks a second
+  /// time (field: `peer_track_published` at 03:44:52 and no `track_subscribed` until the leave,
+  /// 28 s of silence). Asks for them again, a moment apart so the server really drops the old
+  /// ones. Costs one renegotiation; only for a participant the grace dropped wrongly.
+  void _gravixPullAgain(RemoteParticipant participant) {
+    final pubs = participant.trackPublications.values.where((p) => p.track == null).toList();
+    if (pubs.isEmpty) return;
+    logger.info('participant ${participant.identity} is back: subscribing to its ${pubs.length} tracks again');
+    for (final pub in pubs) {
+      pub.gravixPullAgain();
+    }
   }
 
   Future<void> _onParticipantUpdateEvent(List<lk_models.ParticipantInfo> updates) async {
@@ -2099,6 +2221,16 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (localParticipant?.identity == info.identity) {
         await localParticipant?.updateFromInfo(info);
         continue;
+      }
+
+      // GRAVIX (2026-11-04): seen before the JoinResponse handler decides who is absent
+      final restart = _restart;
+      if (restart != null) {
+        if (info.state == lk_models.ParticipantInfo_State.DISCONNECTED) {
+          restart.seenInUpdate.remove(info.identity);
+        } else {
+          restart.seenInUpdate.add(info.identity);
+        }
       }
 
       // GRAVIX (0.4.15, F6): a kept participant the rejoin's JoinResponse did not
@@ -2146,6 +2278,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
         }
         _remoteParticipants.set(result.participant);
         await _flushPendingTracks(participant: result.participant);
+        // GRAVIX (2026-11-04, Gulf test): back after the grace dropped it, same session
+        final droppedSid = _gravixDroppedByGrace.remove(info.identity);
+        if (droppedSid != null && droppedSid == info.sid) _gravixPullAgain(result.participant);
       } else {
         final wasUpdated = await result.participant.updateFromInfo(info);
         if (wasUpdated) {
@@ -2372,9 +2507,11 @@ extension RoomPrivateMethods on Room {
   // resets internal state to a re-usable state
   Future<void> _cleanUp({bool disposeLocalParticipant = true}) async {
     logger.fine('[${objectId}] cleanUp()');
+    _gravixSettleRoomVideoMemory(); // the server ended it, or the room is disposed
     final mediaMove = _gravixMediaMove;
     if (mediaMove != null) _gravixEndMediaMove(mediaMove);
     _gravixMediaMove = null;
+    _gravixRestartEnded(false);
 
     // GRAVIX (2026-10-13): the join's camera still being published after
     // connect() returned is released (privacy: no camera left open by a leave)
@@ -2994,6 +3131,9 @@ class _GravixRestartState {
 
   /// keepParticipantsOnRejoin: identities kept across it, until its JoinResponse.
   Set<String>? kept;
+
+  /// Identities a participant update of the new session named as present.
+  final Set<String> seenInUpdate = <String>{};
 }
 
 /// GRAVIX (2026-10-11): the longer of [a] (when set) and [b].

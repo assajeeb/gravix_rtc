@@ -47,14 +47,19 @@ void main() {
   });
 
   test('R1: at most once per 10 s even when media flowed in between', () {
+    a(1);
     v(1);
     tick();
+    a(1);
     expect(v(1), GravixStallAction.resume);
     tick(1000);
+    a(2);
     v(2); // flows again
     tick(2000);
+    a(2);
     expect(v(2), GravixStallAction.none, reason: 'within 10 s of the last');
     tick(8000);
+    a(2);
     expect(v(2), GravixStallAction.resume);
   });
 
@@ -110,6 +115,62 @@ void main() {
     w.noteResumed();
     tick(4000);
     expect(v(4, frames: 1), GravixStallAction.rejoin);
+  });
+
+  // Gulf test 2026-11-04, step b, host in Dhaka: the tester put the app in the background
+  // (03:42:20.9), Android stopped its camera (frames frozen 03:42:34-54 on the tester's own
+  // outbound stats; the SFU saw the same; no lane died). The tester's mic wasn't up, so that camera
+  // was all the host received: "no packet" -> resume -> "no new frame" -> a healthy host did a
+  // full rejoin and cut its own audio.
+  test('R1: a lone video with nothing to compare it with is one source, not the path', () {
+    expect(v(100), GravixStallAction.none);
+    tick();
+    expect(v(200), GravixStallAction.none);
+    tick();
+    expect(v(200), GravixStallAction.none, reason: 'the first quiet sample');
+    for (var i = 0; i < 6; i++) {
+      tick();
+      expect(v(200), GravixStallAction.none, reason: 'ICE still watches the path (~7 s)');
+    }
+  });
+
+  test('R1: a muted mic beside the video does not count as a second source', () {
+    expect(v(100), GravixStallAction.none);
+    a(50, eligible: false);
+    tick();
+    a(50, eligible: false);
+    expect(v(200), GravixStallAction.none);
+    tick();
+    a(50, eligible: false);
+    expect(v(200), GravixStallAction.none);
+  });
+
+  test('S4: another camera decoding after a resume: the path and the server work, no rejoin', () {
+    GravixStallAction other(num frames) =>
+        w.sample('TR_v2', video: true, eligible: true, packetsReceived: frames * 10, framesDecoded: frames);
+    expect(v(100, frames: 10), GravixStallAction.none);
+    other(10);
+    w.noteResumed();
+    for (var i = 0; i < 4; i++) {
+      tick();
+      other(20 + i);
+      expect(v(100, frames: 10), GravixStallAction.none, reason: 'only this publisher stopped');
+    }
+  });
+
+  test('S4: every camera dead after a resume still rejoins (field 2026-10-09)', () {
+    GravixStallAction other() =>
+        w.sample('TR_v2', video: true, eligible: true, packetsReceived: 100, framesDecoded: 10);
+    expect(v(100, frames: 10), GravixStallAction.none);
+    other();
+    w.noteResumed();
+    var acted = GravixStallAction.none;
+    for (var i = 0; i < 4 && acted == GravixStallAction.none; i++) {
+      tick();
+      acted = other();
+      if (acted == GravixStallAction.none) acted = v(100, frames: 10);
+    }
+    expect(acted, GravixStallAction.rejoin);
   });
 
   test('switches off', () {

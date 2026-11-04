@@ -387,6 +387,18 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
     }
   }
 
+  /// GRAVIX (2026-11-04, Gulf test): the server thinks this track is delivered, this side lost it:
+  /// unsubscribes, then subscribes a moment later, so the server sends the track anew.
+  @internal
+  void gravixPullAgain({Duration gap = const Duration(milliseconds: 500)}) {
+    if (!_subscriptionAllowed) return;
+    _sendUpdateSubscription(subscribed: false);
+    Timer(gap, () {
+      if (participant.room.isDisposed || !identical(participant.trackPublications[sid], this)) return;
+      if (track == null) _sendUpdateSubscription(subscribed: true);
+    });
+  }
+
   void _sendUpdateSubscription({required bool subscribed}) {
     logger.fine('Sending update subscription... ${sid} ${subscribed}');
     final participantTrack = lk_models.ParticipantTracks(participantSid: participant.sid, trackSids: [sid]);

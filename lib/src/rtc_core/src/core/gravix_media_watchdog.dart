@@ -12,10 +12,20 @@
 //    packet for `stallNoPacketsFor` (~2 s) and no subscribed audio received any
 //    either -> a resume at once instead of waiting ~7 s for ICE. At most once per
 //    `stallMinInterval`, and not again until media flowed once (a source that
-//    just stopped sending is not resumed over and over).
+//    just stopped sending is not resumed over and over). It takes two tracks going
+//    quiet together: one lone video stopping says nothing about the path, and ICE
+//    still watches the path.
 //  - S4 (no video after a resume): inside `noVideoWindow` after a resume, a
 //    subscribed video that should be flowing decoded no new frame for
-//    `noVideoFor` -> a full rejoin. At most once per `noVideoMinInterval`.
+//    `noVideoFor`, and no other one did -> a full rejoin. At most once per
+//    `noVideoMinInterval`.
+//
+// Field 2026-11-04, Gulf test (host in Dhaka, tester in Saudi Arabia): the tester's app went to
+// the background, Android stopped its camera, no mute was signalled. That camera was all the host
+// received, so R1 took it for the path and S4 did a full rejoin of a healthy host, cutting its
+// audio. A publisher stopping is told apart from a dead path by a second source; a publisher
+// stopping is NOT told apart from a dead downtrack on a lone video, so a lone video's rescue is
+// ICE's, as it was before R1.
 //
 // Inputs are the receiver stats the remote tracks already poll every 2 s
 // (VideoReceiverStatsEvent / AudioReceiverStatsEvent): no new poll, no wire cost.
@@ -119,7 +129,7 @@ class GravixVideoStallWatch {
     if (options.noVideoWatchdog && inWindow) {
       final sinceFrame = now.difference(t.framesChangedAt);
       final canRejoin = _lastRejoin == null || now.difference(_lastRejoin!) >= options.noVideoMinInterval;
-      if (sinceFrame >= options.noVideoFor && canRejoin) {
+      if (sinceFrame >= options.noVideoFor && canRejoin && !_otherVideoDecoding(t, now)) {
         _lastRejoin = now;
         _resumedAt = null;
         return GravixStallAction.rejoin;
@@ -138,16 +148,25 @@ class GravixVideoStallWatch {
     return GravixStallAction.none;
   }
 
+  /// Another video decoded a frame inside the window: the path and the server work, only
+  /// this publisher stopped.
+  bool _otherVideoDecoding(_TrackState self, DateTime now) => _tracks.values.any(
+    (t) => t.video && t.eligible && !identical(t, self) && now.difference(t.framesChangedAt) < options.noVideoFor,
+  );
+
   /// Every eligible video stalled for stallNoPacketsFor, and no eligible track
   /// (audio included) received a packet in that time: the path, not one source.
+  /// With a single eligible track there is nothing to tell the two apart.
   bool _pathStalled(DateTime now) {
     var videos = 0;
+    var tracks = 0;
     for (final t in _tracks.values) {
       if (!t.eligible) continue;
       final quiet = now.difference(t.packetsChangedAt) >= options.stallNoPacketsFor;
       if (!quiet) return false;
+      tracks++;
       if (t.video) videos++;
     }
-    return videos > 0;
+    return videos > 0 && tracks > 1;
   }
 }

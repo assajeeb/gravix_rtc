@@ -28,6 +28,7 @@ class GravixRecoveryOptions {
     this.networkWaitProbeInterval = const Duration(seconds: 2),
     this.failoverNeedsEvidence = true,
     this.rejoinAbsentGrace = const Duration(seconds: 5),
+    this.rejoinAbsentMoveGrace = const Duration(seconds: 35),
     this.boundedSignalConnect = true,
     this.signalDialCap = const Duration(seconds: 30),
     this.silentHostFailFast = true,
@@ -87,6 +88,7 @@ class GravixRecoveryOptions {
     networkWaitProbeInterval: null,
     failoverNeedsEvidence: false,
     rejoinAbsentGrace: Duration.zero,
+    rejoinAbsentMoveGrace: Duration.zero,
     boundedSignalConnect: false,
     signalDialCap: null,
     silentHostFailFast: false,
@@ -228,6 +230,13 @@ class GravixRecoveryOptions {
   /// reported left, then joined, milliseconds apart. Duration.zero: reported gone
   /// at once.
   final Duration rejoinAbsentGrace;
+
+  /// [rejoinAbsentGrace] for a rejoin that landed on ANOTHER node (a region move, a failover).
+  /// The room may be new there, and the server's only guaranteed repair of what it told nobody
+  /// is its 30 s relay sweep (`resync_interval`): field 2026-11-04, Gulf test, the host was back
+  /// exactly 30 s after the JoinResponse. So this is longer than the sweep. A kept participant
+  /// whose media arrives needs no more proof and is not dropped at all.
+  final Duration rejoinAbsentMoveGrace;
 
   /// When the route to the server is black-holed while the local network stays
   /// up, a TCP connect hangs until the operating system gives up (from about 30 s
@@ -547,6 +556,7 @@ class GravixRecoveryOptions {
     bool clearNetworkWaitProbeInterval = false,
     bool? failoverNeedsEvidence,
     Duration? rejoinAbsentGrace,
+    Duration? rejoinAbsentMoveGrace,
     bool? boundedSignalConnect,
     Duration? signalDialCap,
     bool clearSignalDialCap = false,
@@ -602,6 +612,7 @@ class GravixRecoveryOptions {
         : networkWaitProbeInterval ?? this.networkWaitProbeInterval,
     failoverNeedsEvidence: failoverNeedsEvidence ?? this.failoverNeedsEvidence,
     rejoinAbsentGrace: rejoinAbsentGrace ?? this.rejoinAbsentGrace,
+    rejoinAbsentMoveGrace: rejoinAbsentMoveGrace ?? this.rejoinAbsentMoveGrace,
     boundedSignalConnect: boundedSignalConnect ?? this.boundedSignalConnect,
     signalDialCap: clearSignalDialCap ? null : signalDialCap ?? this.signalDialCap,
     silentHostFailFast: silentHostFailFast ?? this.silentHostFailFast,

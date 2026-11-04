@@ -2856,6 +2856,8 @@ class GravixRoomService implements GravixAudioHost {
   Future<void> setMicEnabled(bool enabled) {
     _wantedMic = enabled;
     isMicMuted.value = !enabled;
+    // at once: a publish a reconnect interrupted must not go out after this tap
+    localParticipant?.gravixMicWanted = enabled;
     final worker = _micWorker ??= _runMicWorker();
     if (!enabled && _micApplied != true) return Future<void>.value();
     return worker;

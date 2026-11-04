@@ -30,13 +30,19 @@ const fast = GravixRecoveryOptions(
   noVideoMinInterval: Duration(seconds: 10),
 );
 
-lk_models.ParticipantInfo host() => lk_models.ParticipantInfo(
+lk_models.ParticipantInfo host({bool micMuted = false, int version = 0}) => lk_models.ParticipantInfo(
   sid: 'PA_host',
   identity: 'host',
   state: lk_models.ParticipantInfo_State.ACTIVE,
+  version: version,
   tracks: [
     lk_models.TrackInfo(sid: 'TR_cam', type: lk_models.TrackType.VIDEO, source: lk_models.TrackSource.CAMERA),
-    lk_models.TrackInfo(sid: 'TR_mic', type: lk_models.TrackType.AUDIO, source: lk_models.TrackSource.MICROPHONE),
+    lk_models.TrackInfo(
+      sid: 'TR_mic',
+      type: lk_models.TrackType.AUDIO,
+      source: lk_models.TrackSource.MICROPHONE,
+      muted: micMuted,
+    ),
   ],
 );
 
@@ -151,6 +157,23 @@ void main() {
       await settle(200);
     }
     expect(server.dials.length, dials);
+  });
+
+  test('R1 guard: a peer\'s lone camera stopping (field 2026-11-04) never resumes a healthy room', () async {
+    final (r, cam, _) = await watching();
+    room = r;
+    final dials = server.dials.length;
+    // the host's mic is muted: the camera is all that should be flowing
+    server.last.deliver(
+      lk_rtc.SignalResponse(update: lk_rtc.ParticipantUpdate(participants: [host(micMuted: true, version: 2)])),
+    );
+    await settle();
+    videoStats(cam, 100, 10);
+    for (var i = 0; i < 8; i++) {
+      await settle(100);
+      videoStats(cam, 100, 10);
+    }
+    expect(server.dials.length, dials, reason: 'base: a resume, then a full rejoin that cut this host\'s own audio');
   });
 
   test('R1 guard: a muted camera (or a paused stream) never triggers', () async {

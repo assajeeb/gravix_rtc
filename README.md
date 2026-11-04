@@ -160,8 +160,12 @@ without a screen. Details and the per-piece APIs: `doc/FAST_JOIN.md`.
 Some regions carry audio only. You don't need to do anything for this:
 
 - A join goes to the fastest region, without any extra request, so joins are not slower.
-- If the room has video, at join or later, the session moves once to a region that carries
-  video. Remote participants return after the reconnect.
+- If the room has video, at join or later, the session moves once to the nearest region that
+  carries video. Remote participants return after the reconnect, and a mic or camera you asked for
+  during the move is published on the new region.
+- When the video ends the session stays where it is. Rejoining a room with no video goes to the
+  fastest region again; rejoining one that still had video when you left, within 10 minutes, goes
+  straight to a region that carries video.
 
 If you already know the room type, declaring it skips that first landing and its reconnect:
 

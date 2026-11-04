@@ -308,8 +308,17 @@ class _NetworkState {
     this.challenger,
     this.mediaAnchors = const {},
     this.mediaChallengers = const {},
+    this.videoExtra = const [],
+    this.videoExtraAt,
   });
   final List<String> known;
+
+  /// Video regions outside the plan, measured in the background because the fastest region is
+  /// audio-only ([_gravixProbeOtherVideoRegions]): wire `videoExtra` / `videoExtraAtMs`.
+  final List<_RegionRtt> videoExtra;
+  final DateTime? videoExtraAt;
+
+  bool videoExtraFreshAt(DateTime now) => videoExtraAt != null && now.difference(videoExtraAt!) <= ttl;
 
   /// Per-medium anchors (2026-10-21): wire `mediaAnchors: {video: {region, url,
   /// rttMs, atMs}}`, and `mediaChallengers: {video: {region, wins}}` -- the same
@@ -343,6 +352,27 @@ class _NetworkState {
 
   bool freshAt(DateTime now) => now.difference(measuredAt) <= ttl;
 
+  _NetworkState withVideo({
+    required List<_RegionRtt> extra,
+    required DateTime extraAt,
+    required Map<GravixRoomMedia, ({_RegionRtt rtt, DateTime at})> anchors,
+    required Map<GravixRoomMedia, GravixRegionChallenger> challengers,
+  }) => _NetworkState(
+    known: known,
+    cursor: cursor,
+    measuredAt: measuredAt,
+    ttl: ttl,
+    best: best,
+    regions: regions,
+    anchor: anchor,
+    anchorAt: anchorAt,
+    challenger: challenger,
+    mediaAnchors: anchors,
+    mediaChallengers: challengers,
+    videoExtra: extra,
+    videoExtraAt: extraAt,
+  );
+
   /// The anchor, while it is within its life.
   _RegionRtt? liveAnchor(DateTime now) =>
       anchor != null && anchorAt != null && now.difference(anchorAt!) <= kGravixRegionAnchorLife ? anchor : null;
@@ -363,6 +393,10 @@ class _NetworkState {
       },
     if (mediaChallengers.isNotEmpty)
       'mediaChallengers': {for (final e in mediaChallengers.entries) e.key.name: e.value.toJson()},
+    if (videoExtraAt != null) ...{
+      'videoExtra': [for (final r in videoExtra) _rttJson(r)],
+      'videoExtraAtMs': videoExtraAt!.millisecondsSinceEpoch,
+    },
   });
 
   static _NetworkState? decode(String raw) {
@@ -408,6 +442,14 @@ class _NetworkState {
               if (GravixRoomMedia.values.asNameMap()[e.key] != null && GravixRegionChallenger.fromJson(e.value) != null)
                 GravixRoomMedia.values.asNameMap()[e.key]!: GravixRegionChallenger.fromJson(e.value)!,
         },
+        videoExtra: [
+          if (m['videoExtra'] is List)
+            for (final r in m['videoExtra'] as List)
+              if (_rttFrom(r) != null) _rttFrom(r)!,
+        ],
+        videoExtraAt: m['videoExtraAtMs'] is int
+            ? DateTime.fromMillisecondsSinceEpoch(m['videoExtraAtMs'] as int)
+            : null,
       );
     } catch (_) {
       return null;
@@ -828,6 +870,14 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
   // Per-region media (2026-10-21): for each medium some measured region does
   // not take, the same hysteresis over the regions that do, with its own anchor,
   // so joins of that medium do not flip between two close regions either.
+  // The video regions the background probe measured lately stand in for a new measurement
+  // until the ttl, for video only: `best` and the audio pick are about the plan's regions.
+  final extraNow = state != null && state.videoExtraFreshAt(nowAtStart)
+      ? [
+          for (final r in state.videoExtra)
+            if (!measured.any((m) => m.region == r.region)) _extraMeasurement(r),
+        ]
+      : const <GravixRegionMeasurement>[];
   final bestByMedia = <GravixRoomMedia, GravixRegionMeasurement>{};
   final mediaReason = <GravixRoomMedia, GravixRegionSelectReason>{};
   final mediaChallenger = <GravixRoomMedia, GravixRegionChallenger>{};
@@ -837,11 +887,18 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     final takes = [
       for (final m in measured)
         if (gravixRegionAllowsMedia(m.entry, media)) m,
+      if (media == GravixRoomMedia.video)
+        for (final m in extraNow)
+          if (gravixRegionAllowsMedia(m.entry, media)) m,
     ];
-    if (takes.length == measured.length || takes.isEmpty) continue;
+    final audioOnlySeen = takes.length != measured.length + (media == GravixRoomMedia.video ? extraNow.length : 0);
+    if (!audioOnlySeen || takes.isEmpty) continue;
     final mAnchor = state?.liveMediaAnchor(media, nowAtStart);
     final sel = gravixSelectRegion(
-      [for (final m in takes) GravixRegionSample(region: m.region, status: m.state.name, rttMs: m.rttMs)],
+      [
+        for (final m in _sortedRegions(takes))
+          GravixRegionSample(region: m.region, status: m.state.name, rttMs: m.rttMs),
+      ],
       anchor: mAnchor?.region,
       challenger: state?.mediaChallengers[media],
       anchorKnown: mAnchor != null,
@@ -876,7 +933,7 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
 
   final result = GravixRegionMeasurementResult(
     measuredAt: DateTime.now(),
-    regions: List.unmodifiable(measured),
+    regions: List.unmodifiable(_sortedRegions([...measured, ...extraNow])),
     best: best,
     bestSource: bestSource,
     elapsed: elapsed,
@@ -923,6 +980,8 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     challenger: selection != null ? selection.challenger : state?.challenger,
     mediaAnchors: mediaAnchorsNext,
     mediaChallengers: mediaChallengersNext,
+    videoExtra: state?.videoExtra ?? const [],
+    videoExtraAt: state?.videoExtraAt,
   );
   _memoryStates[sKey] = newState;
   try {
@@ -939,7 +998,253 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     // A guess (or nothing) for this network: never over a fresh measured answer.
     _held = best != null ? result : (currentHeld?.networkKey == netKey ? currentHeld : null);
   }
+
+  // Owner, 2026-11-04 (R1): see _gravixProbeOtherVideoRegions. Not awaited: joins never wait for it.
+  final fastestMeasured = measured.isNotEmpty && measured.first.ok ? measured.first : null;
+  if (fastestMeasured != null &&
+      !gravixRegionAllowsMedia(fastestMeasured.entry, GravixRoomMedia.video) &&
+      !newState.videoExtraFreshAt(DateTime.now()) &&
+      !_videoProbing.contains(sKey)) {
+    final others = gravixUnmeasuredVideoRegions(dir, measured: [for (final m in measured) m.region]);
+    if (others.isNotEmpty) {
+      _videoProbing.add(sKey);
+      final probe = _gravixProbeOtherVideoRegions(
+        others: others,
+        sKey: sKey,
+        netKey: netKey,
+        store: store,
+        budget: runBudget,
+        priorAnchor: state?.liveMediaAnchor(GravixRoomMedia.video, nowAtStart),
+        sampler: sampler,
+        samplerFor: samplerFor,
+      ).whenComplete(() => _videoProbing.remove(sKey));
+      _videoProbes.add(probe);
+      unawaited(probe.whenComplete(() => _videoProbes.remove(probe)));
+    }
+  }
   return result;
+}
+
+/// Most regions one background video probe measures.
+const kGravixVideoProbeMax = kGravixMeasureConcurrency;
+
+final _videoProbing = <String>{};
+final _videoProbes = <Future<void>>{};
+
+/// The background video probes still running have ended (tests).
+@visibleForTesting
+Future<void> gravixVideoProbesDone() async {
+  while (_videoProbes.isNotEmpty) {
+    await Future.wait(_videoProbes.toList());
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
+/// [gravixSelectRegion] as the probe calls it (tests).
+@visibleForTesting
+GravixRegionSelection? gravixVideoProbeSelectForTest(List<GravixRegionSample> samples, {String? anchor}) =>
+    gravixSelectRegion(samples, anchor: anchor, anchorKnown: anchor != null);
+
+/// The video regions of [dir] [measured] leaves out, lowest `est_rtt_ms` first, at most
+/// [kGravixVideoProbeMax]. Pure.
+List<GravixRegionUrl> gravixUnmeasuredVideoRegions(GravixRegionDirectory dir, {required List<String> measured}) {
+  final seen = <String>{};
+  final left = [
+    for (final r in dir.regions)
+      if (!measured.contains(r.region) && seen.add(r.region) && gravixRegionAllowsMedia(r, GravixRoomMedia.video)) r,
+  ];
+  // list order breaks ties (a stable sort), and a region with no estimate goes last
+  final order = {for (var i = 0; i < left.length; i++) left[i].region: i};
+  left.sort((a, b) {
+    final x = a.estRttMs ?? double.infinity;
+    final y = b.estRttMs ?? double.infinity;
+    final c = x.compareTo(y);
+    return c != 0 ? c : order[a.region]!.compareTo(order[b.region]!);
+  });
+  return left.take(kGravixVideoProbeMax).toList();
+}
+
+GravixRegionMeasurement _extraMeasurement(_RegionRtt r) => GravixRegionMeasurement(
+  entry: GravixRegionUrl(region: r.region, url: r.url),
+  rttMs: r.rttMs,
+  samplesMs: const [],
+  status: GravixRegionMeasurementStatus.ok,
+  source: GravixRegionCandidateSource.explore,
+);
+
+/// Measured fastest first, then unmeasured, then failed.
+List<GravixRegionMeasurement> _sortedRegions(List<GravixRegionMeasurement> regions) {
+  final sorted = [...regions];
+  sorted.sort((a, b) {
+    if (a.state != b.state) return a.state.index.compareTo(b.state.index);
+    if (!a.ok) return 0;
+    return a.rttMs!.compareTo(b.rttMs!);
+  });
+  return sorted;
+}
+
+/// Owner, 2026-11-04 (R1): when the fastest measured region is audio-only, a shortlist still
+/// only names the video regions that looked near from the server's side. A Saudi user's shortlist
+/// was doh1, blr1, dac1: fra1 was never measured, and "the nearest region with video" was the
+/// nearer of two. This measures the other video regions once per shortlist ttl and network, with
+/// the same sampler, concurrency and total budget as a measurement, after it and never on a join
+/// path, and offers the results to the video choice by the same hysteresis. [priorAnchor] is the
+/// video anchor from before the measurement this follows: one that measurement has just created
+/// has no history a rival should have to beat twice. Never throws.
+Future<void> _gravixProbeOtherVideoRegions({
+  required List<GravixRegionUrl> others,
+  required String sKey,
+  required String netKey,
+  required GravixRegionListStore? store,
+  required Duration budget,
+  required _RegionRtt? priorAnchor,
+  GravixRegionSampler? sampler,
+  GravixRegionSamplerFactory? samplerFor,
+}) async {
+  try {
+    final tracks = [for (final e in others) _Track(e, GravixRegionCandidateSource.explore)];
+    final sw = Stopwatch()..start();
+    final over = Completer<void>();
+    final timer = Timer(budget, () {
+      if (!over.isCompleted) over.complete();
+    });
+    Future<void> one(_Track t) async {
+      final client = sampler == null ? GravixRegionProbeClient() : null;
+      t.client = client;
+      final sample = sampler ?? (samplerFor ?? gravixDefaultRegionSampler)(client!);
+      for (var i = 0; i < kGravixMeasureSamples && !over.isCompleted && sw.elapsed < budget; i++) {
+        Duration? d;
+        try {
+          d = await Future.any<Duration?>([sample(t.entry), over.future.then((_) => null)]);
+        } catch (_) {
+          d = null;
+        }
+        if (d == null) return;
+        t.samples.add(d.inMilliseconds);
+      }
+    }
+
+    await Future.any<void>([Future.wait(tracks.map(one)), over.future]);
+    timer.cancel();
+    for (final t in tracks) {
+      t.client?.close();
+    }
+
+    final state = _memoryStates[sKey];
+    final held = gravixRegionMeasurement();
+    if (state == null || held == null || held.networkKey != netKey) return;
+    final now = DateTime.now();
+    final extra = <_RegionRtt>[
+      for (final t in tracks)
+        if (t.samples.length > 1)
+          (region: t.entry.region, url: t.entry.url, rttMs: t.samples.skip(1).reduce((a, b) => a < b ? a : b)),
+    ];
+    final extraM = [
+      for (final r in extra)
+        if (!held.regions.any((m) => m.region == r.region)) _extraMeasurement(r),
+    ];
+    GravixRegionLog.step(
+      'videoProbe',
+      'measured=${tracks.map((t) => '${t.entry.region}:${t.samples.length > 1 ? extra.firstWhere((r) => r.region == t.entry.region).rttMs : 'none'}').join(',')} '
+          'ms=${sw.elapsedMilliseconds} budget=${budget.inMilliseconds}',
+    );
+    final regions = _sortedRegions([...held.regions, ...extraM]);
+    final takes = [
+      for (final m in regions)
+        if (gravixRegionAllowsMedia(m.entry, GravixRoomMedia.video)) m,
+    ];
+    final media = GravixRoomMedia.video;
+    final sel = gravixSelectRegion(
+      [for (final m in takes) GravixRegionSample(region: m.region, status: m.state.name, rttMs: m.rttMs)],
+      anchor: priorAnchor?.region,
+      challenger: priorAnchor == null ? null : state.mediaChallengers[media],
+      anchorKnown: priorAnchor != null,
+    );
+    final anchors = {...state.mediaAnchors};
+    final challengers = {...state.mediaChallengers};
+    var bestByMedia = held.bestByMedia;
+    var reasons = held.mediaSelectReason;
+    var challenger = held.mediaChallenger;
+    if (sel != null) {
+      final m = takes.firstWhere((t) => t.region == sel.region);
+      final chosen = m.ok
+          ? m
+          : GravixRegionMeasurement(
+              entry: m.entry,
+              rttMs: priorAnchor!.rttMs,
+              samplesMs: m.samplesMs,
+              status: GravixRegionMeasurementStatus.ok,
+              source: GravixRegionCandidateSource.cache,
+            );
+      bestByMedia = {...bestByMedia, media: chosen};
+      reasons = {...reasons, media: sel.reason};
+      challenger = {...challenger};
+      if (sel.challenger != null) {
+        challenger[media] = sel.challenger!;
+        challengers[media] = sel.challenger!;
+      } else {
+        challenger.remove(media);
+        challengers.remove(media);
+      }
+      anchors[media] = (rtt: (region: chosen.region, url: chosen.url, rttMs: chosen.rttMs!), at: now);
+      GravixRegionLog.step(
+        'select',
+        'media=video -> ${chosen.region} rtt=${chosen.rttMs} reason=${sel.reason.name} source=videoProbe'
+            '${priorAnchor == null ? '' : ' anchor=${priorAnchor.region}'}'
+            '${sel.challenger == null ? '' : ' challenger=${sel.challenger!.region}x${sel.challenger!.wins}'}',
+      );
+    }
+    final next = state.withVideo(extra: extra, extraAt: now, anchors: anchors, challengers: challengers);
+    _memoryStates[sKey] = next;
+    try {
+      store?.write(sKey, next.encode());
+    } catch (_) {
+      // the memory copy still serves this process
+    }
+    _held = GravixRegionMeasurementResult(
+      measuredAt: held.measuredAt,
+      regions: List.unmodifiable(regions),
+      best: held.best,
+      bestSource: held.bestSource,
+      error: held.error,
+      elapsed: held.elapsed,
+      mode: held.mode,
+      budget: held.budget,
+      budgetHit: held.budgetHit,
+      earlyExit: held.earlyExit,
+      networkKey: held.networkKey,
+      ttl: held.ttl,
+      selectReason: held.selectReason,
+      challenger: held.challenger,
+      bestByMedia: bestByMedia,
+      mediaSelectReason: reasons,
+      mediaChallenger: challenger,
+    );
+  } catch (e) {
+    GravixRegionLog.step('videoProbe', 'fail reason=${e.runtimeType}');
+  }
+}
+
+/// The region a move for [media] goes to: the choice joins of that medium use, with its
+/// hysteresis, so two near-equal regions don't flip between steps (Gulf test: `select media=video
+/// -> blr1 reason=kept`, then the move -> dac1, 2 ms ahead). Null when nothing is measured for it
+/// or it doesn't take [media] now (it refused lately): the failover order decides then.
+GravixRegionMeasurement? gravixMediaMoveTarget(GravixRoomMedia media, {DateTime? now}) {
+  final m = gravixRegionMeasurement(now: now);
+  final chosen = m?.bestByMedia[media];
+  if (chosen == null || !chosen.ok || !gravixRegionAllowsMedia(chosen.entry, media, now: now)) return null;
+  return chosen;
+}
+
+/// Why [gravixMediaMoveTarget] chose its region, for the log: its RTT, how it was chosen and the
+/// fastest measured region taking [media].
+String gravixMediaMoveWhy(GravixRoomMedia media, {DateTime? now}) {
+  final m = gravixRegionMeasurement(now: now);
+  final chosen = gravixMediaMoveTarget(media, now: now);
+  if (m == null || chosen == null) return 'why=failover-order';
+  final fastest = m.regions.where((r) => r.ok && gravixRegionAllowsMedia(r.entry, media, now: now)).firstOrNull;
+  return 'rtt=${chosen.rttMs} why=${m.mediaSelectReason[media]?.name ?? 'measured'}'
+      '${fastest == null ? '' : ' fastest=${fastest.region} rtt=${fastest.rttMs}'} measured=${m.regions.length}';
 }
 
 /// The measurement as the analytics / connection reports carry it (wire names,
