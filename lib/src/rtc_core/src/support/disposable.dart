@@ -40,15 +40,16 @@ mixin _Disposer {
       _isDisposed = true;
       if (_disposeFuncs.isNotEmpty) {
         logger.finer('[$objectId] running ${_disposeFuncs.length} dispose funcs...');
-        // call dispose funcs in reverse order
-        for (final disposeFunc in _disposeFuncs.reversed) {
+        // call dispose funcs in reverse order. GRAVIX (0.8.4): one by one: a func may add another,
+        // and iterating the list would then throw and skip every func left, a track's stop among them
+        while (_disposeFuncs.isNotEmpty) {
+          final disposeFunc = _disposeFuncs.removeLast();
           try {
             await disposeFunc();
           } catch (e, stack) {
             logger.warning('[$objectId] error during dispose: $e', e, stack);
           }
         }
-        _disposeFuncs.clear();
         logger.finer('[$objectId] dispose complete.');
       }
       return true;

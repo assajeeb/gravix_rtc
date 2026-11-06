@@ -24,29 +24,27 @@ import 'dart:async';
 ///
 /// Equivalent to the Swift SDK's `SerialRunnerActor`.
 class SerialRunner<T> {
-  Future<void>? _pending;
+  Future<void>? _tail;
 
-  /// Whether an operation is currently in progress.
-  bool get isRunning => _pending != null;
+  /// Whether an operation is currently in progress or queued.
+  bool get isRunning => _tail != null;
 
-  /// Runs [block] after any pending operation completes.
+  /// Runs [block] after every earlier call has completed, in call order.
   ///
   /// If no operation is pending, [block] executes immediately.
-  /// If an operation is pending, waits for it to finish first.
   /// Errors from [block] propagate to the caller only, not to
   /// subsequent waiters.
   Future<T> run(Future<T> Function() block) async {
-    while (_pending != null) {
-      await _pending;
-    }
-
-    final completer = Completer<void>();
-    _pending = completer.future;
+    final previous = _tail;
+    final done = Completer<void>();
+    final mine = done.future;
+    _tail = mine;
+    if (previous != null) await previous;
     try {
       return await block();
     } finally {
-      completer.complete();
-      _pending = null;
+      done.complete();
+      if (identical(_tail, mine)) _tail = null;
     }
   }
 }

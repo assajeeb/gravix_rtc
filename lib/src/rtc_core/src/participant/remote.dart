@@ -178,6 +178,9 @@ class RemoteParticipant extends Participant<RemoteTrackPublication> {
       logger.fine('addSubscribedMediaTrack() did receive pub');
     }
 
+    // GRAVIX (0.8.4): the app unsubscribed from this one
+    if (pub.gravixRefusesTrack(mediaTrack)) return;
+
     // Check if track type is supported, throw if not.
     if (![lk_models.TrackType.AUDIO, lk_models.TrackType.VIDEO].contains(pub.kind.toPBType())) {
       throw TrackSubscriptionExceptionEvent(

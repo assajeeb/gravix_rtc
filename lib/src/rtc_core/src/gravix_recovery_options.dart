@@ -23,6 +23,10 @@ class GravixRecoveryOptions {
     this.keepParticipantsOnRejoin = true,
     this.republishStoppedTracksMuted = true,
     this.republishKeepsNewSessionTracks = true,
+    this.republishHonorsOffCalls = true,
+    this.secondMediaMove = true,
+    this.restoreSubscriptionsOnRejoin = true,
+    this.resendTrackSettingsOnRejoin = true,
     this.startBitrateBySetupTime = true,
     this.resumePrimaryDeadline = const Duration(seconds: 3),
     this.leaveAbortsResumeWait = true,
@@ -84,6 +88,10 @@ class GravixRecoveryOptions {
     keepParticipantsOnRejoin: false,
     republishStoppedTracksMuted: false,
     republishKeepsNewSessionTracks: false,
+    republishHonorsOffCalls: false,
+    secondMediaMove: false,
+    restoreSubscriptionsOnRejoin: false,
+    resendTrackSettingsOnRejoin: false,
     startBitrateBySetupTime: false,
     resumePrimaryDeadline: null,
     leaveAbortsResumeWait: false,
@@ -193,6 +201,31 @@ class GravixRecoveryOptions {
   /// SFU doesn't answer the duplicate, and the reconnect waits out the publish deadline and drops
   /// the publication.
   final bool republishKeepsNewSessionTracks;
+
+  /// An off call or an unpublish reaches a track a full rejoin is still republishing: a camera or
+  /// microphone turned off goes out muted (at once, whatever the publish queue is doing), one
+  /// unpublished does not go out. Off: the call finds no publication and does nothing, and the track
+  /// goes out live while the app shows it off.
+  final bool republishHonorsOffCalls;
+
+  /// A session the reconnect left on a region without video may move once more: a room-video move
+  /// inside `Room.gravixRoomVideoMoveWindow` (60 s), a camera or a refusal when it asks next. Two
+  /// moves a session at most, the second only to a region other than the one that failed. Off: one
+  /// move, and the session stays where the reconnect left it. A move with a measured target needing
+  /// no region list isn't covered: `measuredRegionFailover` off restores that.
+  final bool secondMediaMove;
+
+  /// What the app asked of a kept publication (`subscribe()`, `unsubscribe()`) holds on the new
+  /// session of a full rejoin: it is sent again where it differs from `autoSubscribe`, and a track
+  /// the server still delivers against an unsubscribe is silenced and refused again. Off: the new
+  /// session forgets: `autoSubscribe: false` gets no media until the app asks again, and with
+  /// `autoSubscribe: true` everything the app or a low-data policy dropped comes back.
+  final bool restoreSubscriptionsOnRejoin;
+
+  /// A kept publication's settings (`disable()`, `setVideoQuality()`, `setVideoDimensions()`,
+  /// `setVideoFPS()`) are sent again when its track returns on a full rejoin's new session. Off: only
+  /// a track back before the rejoin ends gets them.
+  final bool resendTrackSettingsOnRejoin;
 
   /// Ported from the upstream client SDK 2.13.1: the video start bitrate hint is
   /// one connection-level value written once per publisher connection, capped at
@@ -557,6 +590,10 @@ class GravixRecoveryOptions {
     bool? keepParticipantsOnRejoin,
     bool? republishStoppedTracksMuted,
     bool? republishKeepsNewSessionTracks,
+    bool? republishHonorsOffCalls,
+    bool? secondMediaMove,
+    bool? restoreSubscriptionsOnRejoin,
+    bool? resendTrackSettingsOnRejoin,
     bool? startBitrateBySetupTime,
     Duration? resumePrimaryDeadline,
     bool clearResumePrimaryDeadline = false,
@@ -614,6 +651,10 @@ class GravixRecoveryOptions {
     keepParticipantsOnRejoin: keepParticipantsOnRejoin ?? this.keepParticipantsOnRejoin,
     republishStoppedTracksMuted: republishStoppedTracksMuted ?? this.republishStoppedTracksMuted,
     republishKeepsNewSessionTracks: republishKeepsNewSessionTracks ?? this.republishKeepsNewSessionTracks,
+    republishHonorsOffCalls: republishHonorsOffCalls ?? this.republishHonorsOffCalls,
+    secondMediaMove: secondMediaMove ?? this.secondMediaMove,
+    restoreSubscriptionsOnRejoin: restoreSubscriptionsOnRejoin ?? this.restoreSubscriptionsOnRejoin,
+    resendTrackSettingsOnRejoin: resendTrackSettingsOnRejoin ?? this.resendTrackSettingsOnRejoin,
     startBitrateBySetupTime: startBitrateBySetupTime ?? this.startBitrateBySetupTime,
     resumePrimaryDeadline: clearResumePrimaryDeadline ? null : resumePrimaryDeadline ?? this.resumePrimaryDeadline,
     leaveAbortsResumeWait: leaveAbortsResumeWait ?? this.leaveAbortsResumeWait,

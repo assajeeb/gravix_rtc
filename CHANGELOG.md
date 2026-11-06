@@ -1,5 +1,101 @@
 # Changelog
 
+## 0.8.4 — 2026-11-05
+
+Fixes from a review of 0.8.3. None of these bugs was new in 0.8.3. Room-video moves (0.8.0) make full
+reconnects more frequent, and so make them more likely.
+
+### Fixed: privacy
+- A camera or microphone turned off while a full reconnect is republishing it stays off. Before, the
+  call could find no publication and do nothing, and the track went out live while the app showed it
+  off, for example when a second reconnect or a move interrupted the first. The AddTrack now goes out
+  muted once the off call or `GravixRoomService.setMicEnabled` was made, in any publish-queue order, and
+  the off call doesn't wait for that track's republish, only for an unmute under way, which it follows. A republish no longer sets `gravixMicWanted`.
+- An on call interrupted by a full reconnect, or made while its track is between two sessions, waits
+  for that reconnect to end, and the newest call wins. With no full reconnect under way (a resume, or
+  the attempts ran out) it reports the failure at once. Such a call can return null when the room is
+  lost while its track is held, as it can when a newer off wins. Before, a call could give up after 20 s and report a
+  failure, with the app showing off, and the reconnect then published it live. 0.8.3 has this too. A leave closes every track a reconnect still holds. Stopping a share doesn't wait
+  for another track's publish.
+- `removePublishedTrack` and `setScreenShareEnabled(false)` reach a track being republished. Before, the
+  call only logged "Publication not found" and the track was published anyway.
+- The camera no longer turns on by itself after a failed enable: `gravixCameraWanted` is cleared on every
+  failure (a refused camera a media move will publish again keeps it), for a failed capture, a failed publish, and a camera effect that could not open the camera.
+  It is also cleared when the camera is unpublished.
+- The camera no longer turns on in the next room of a reused `Room`. After a session the server ended,
+  `gravixCameraWanted` carried over, and a room-video move opened the camera in the new room.
+- A capture that ends after the app turned it off, or after the room was left, is closed and not
+  published. Before, a mic turned on and off during a slow capture went out live for a moment, a mic
+  turned on and off during a move went out live for good, and a capture that ended after a leave could
+  stay open, or publish in the next room of the same `Room`.
+
+- After any wait or capture on an on path, the newest call decides. A camera turned off during a beauty
+  effect's `openCamera`, a move or its AddTrack stays off and closes, and overlapping on and off calls on a
+  beauty camera end as the last one asked. `publishVideoTrack` and `publishAudioTrack` no longer overrule a
+  later off: the app's track goes out muted, or mutes when it lands. During the mic swap for room music or
+  RED the newest call holds both ways, a mute and an unmute, and an on waits for the swap. The data saver
+  doesn't reopen a camera the app turned off or unpublished; it still tries a camera lost another way, 3
+  times, then shows it off and reports `cameraLost`. A screen share stopped during a move doesn't go out.
+- A leave closes its captures in every case: one being republished whatever
+  `stopLocalTrackOnUnpublish` says, one restarting, and a mic whose close an error used to skip. A
+  publish landing after a leave doesn't stand, and a service leave doesn't wait behind a slow publish.
+  `isCameraEnabled` is false after `disconnect()`.
+- A closing track no longer lifts a newer track's mute in the audio module.
+- The publish queue runs in call order, and a queued `set...Enabled` call looks again when its turn comes,
+  so two such calls don't publish one source twice. `publishVideoTrack` with the app's own second camera
+  track isn't checked.
+- An unmute restarts a capture an earlier mute closed, whatever its `stopOnMute` says. Before, the app
+  said on with nothing to hear.
+
+### Fixed: after a full reconnect or a move
+- A resume's SyncState no longer unsubscribes a track not delivered yet.
+- `subscribe()` and `unsubscribe()` hold on the new session, on the same publications. With
+  `autoSubscribe: false`, remote audio and video no longer stay gone. With `autoSubscribe: true`, a user
+  muted with `muteRemoteAudio`, and video dropped by the audio-first or audio-only policies, stay off. A
+  track the server delivers anyway is silenced and refused again. A track the remote user publishes
+  again under a new sid starts from `autoSubscribe`, as it did before.
+- A remote muted here whose media still arrives stays in the room when a rejoin's list leaves it out.
+  What the app asked holds on publications kept across the reconnect only: a remote the grace dropped,
+  or a track under a new sid, returns at the `autoSubscribe` default.
+
+- A track whose republish fails closes its capture and fires `LocalTrackRepublishFailedEvent`, and
+  `GravixRoomService` shows it as off and tells a video effect the camera stopped. An app's own track ends
+  there too, as it does on an unpublish: to publish again, the app must create a new track.
+
+### Fixed: room-video and camera moves
+- A move with a measured target no longer needs the region list: a failed fetch of `/settings/regions` used
+  to stop it. The list is asked only when there is no target, so the move no longer uses up an entry of it.
+- A session a reconnect left on a region without video after a move (the move's ICE failed, say) may move
+  once more: at once for the room's video, inside the same 60 s window and never after it, and when a camera
+  or a refusal asks next. Two moves a session at most. The second goes only to a region other than the one
+  that failed: with none, the session stays where it is, with its audio. `GravixRecoveryOptions.secondMediaMove`,
+  on by default and off in `legacy`, restores one move. It doesn't cover the region list above:
+  `measuredRegionFailover` off restores that.
+
+### Known
+- Direct API: `removePublishedTrack` needs a publication's sid, so it can't reach an on still in flight with
+  nothing published yet. To cancel one, call `setCameraEnabled(false)` or `setMicrophoneEnabled(false)`.
+- Direct API: a leave during a `publishAudioTrack` or `publishVideoTrack` call. This release's check drops a
+  publish landing after the leave, tested on fake servers only; a publication and a capture stayed after
+  the leave before it.
+- Opt-in early mic (`earlyMicTrack`): a tap off after the AddTrack went out can't recall it: the track mutes
+  right after. A tap before it sends no live AddTrack.
+
+### Added
+- `GravixRecoveryOptions.republishHonorsOffCalls`, `restoreSubscriptionsOnRejoin` and
+  `resendTrackSettingsOnRejoin`, all on by default and off in `legacy`, restore the 0.8.3 behaviour,
+  except for these, which stay on purpose because they only close things or stop a camera opening by
+  itself:
+  - `gravixCameraWanted` clears after a failed enable, on unpublishing and on leaving, and `gravixMicWanted`
+    on unpublishing; `gravixCameraOptions` and `gravixMicOptions` clear on leaving;
+  - a leave closes the tracks a reconnect holds, a capture that ends after a leave closes, a publish landing
+    after a leave is dropped, and `isCameraEnabled` is false on an effect's off and on `disconnect()`;
+  - `GravixRoomService`: its failed-republish event handling, its stale-call check, the beauty camera's undo and
+    call number, the early mic's close, and the swap's `muteWanted` and publish without `gravixMicWanted`;
+  - the data saver's guard, `gravixPublicationLost`, the engine-mute owner, a closing track leaving a newer mute
+    alone, a restarting capture of a closed track closing, the unmute's capture restart, dispose functions
+    all running, and the publish queue's call order.
+
 ## 0.8.3 — 2026-11-05
 
 Fixes found by testing the automatic room-video move. Three real Gulf test runs of 0.8.2 passed; these

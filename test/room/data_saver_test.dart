@@ -280,6 +280,20 @@ void main() {
   });
 
   group('foreground return', () {
+    test('a camera the app itself unpublished is not reopened', () async {
+      await hostRoom();
+      var reopens = 0;
+      final s = newSaver(
+        reopenCamera: () async {
+          reopens++;
+          return reopen();
+        },
+      );
+      await room!.localParticipant!.removePublishedTrack(cameraPub()!.sid);
+      await ticks(s, 4);
+      expect(reopens, 0);
+    });
+
     test('a camera publication lost in the background is republished on the foreground return', () async {
       await hostRoom();
       var reopens = 0;
@@ -292,7 +306,7 @@ void main() {
       foreground = false;
       // lost while in the background (the 0.4.14 data saver's failed republish,
       // a camera the OS ended, ...); the app still says the camera is on
-      await room!.localParticipant!.removePublishedTrack(cameraPub()!.sid);
+      await room!.localParticipant!.gravixPublicationLost(cameraPub()!.sid);
       await ticks(s, 4);
       expect(reopens, 0, reason: 'not while the app is in the background');
       expect(cameraPub(), isNull);
@@ -319,7 +333,7 @@ void main() {
           return reopen();
         },
       );
-      await room!.localParticipant!.removePublishedTrack(cameraPub()!.sid);
+      await room!.localParticipant!.gravixPublicationLost(cameraPub()!.sid);
       await ticks(s, 1);
       expect(reopens, 1);
       expect(cameraPub(), isNotNull);
@@ -333,10 +347,12 @@ void main() {
         final s = newSaver(
           reopenCamera: () async {
             reopens++;
+            // what the service's failed reopen does: the failed enable clears the flag
+            room!.localParticipant!.gravixCameraWanted = false;
             return false;
           },
         );
-        await room!.localParticipant!.removePublishedTrack(cameraPub()!.sid);
+        await room!.localParticipant!.gravixPublicationLost(cameraPub()!.sid);
         await s.onForeground();
         expect(reopens, 1);
         await ticks(s, 3); // 9 s: rate limited

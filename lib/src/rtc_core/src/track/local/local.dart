@@ -172,7 +172,20 @@ abstract class LocalTrack extends Track {
 
   /// The mute state the server should see (an audio track muted for room
   /// music stays live on the wire, see LocalAudioTrack.mute).
-  bool get wireMuted => muted;
+  bool get wireMuted => muted || gravixMuteComing;
+
+  /// GRAVIX (0.8.4): an off call is muting this track, which takes a few awaits: an AddTrack built
+  /// meanwhile says muted.
+  @internal
+  bool gravixMuteComing = false;
+
+  /// GRAVIX (0.8.4): a leave closed this track: a capture restart under way closes with it.
+  @internal
+  bool gravixClosedByLeave = false;
+
+  /// GRAVIX (0.8.4): this track's mute needs its capture to stay open.
+  @internal
+  bool get gravixMuteKeepsCapture => false;
 
   TrackProcessor? _processor;
 
@@ -208,8 +221,9 @@ abstract class LocalTrack extends Track {
     if (!muted) return false; // already un-muted
     // GRAVIX (2026-10-13): a track published muted without a capture (a muted
     // join microphone, a stopped muted track republished after a rejoin) has a
-    // sender with no track: it needs a capture whatever stopOnMute says
-    final noCapture = !isActive && sender != null && sender!.track == null;
+    // sender with no track: it needs a capture whatever stopOnMute says.
+    // GRAVIX (0.8.4): so does any track closed by an earlier mute with other options
+    final noCapture = !isActive && sender != null;
     if ((!skipStopForTrackMute() && stopOnMute) || noCapture) {
       await restartTrack();
     }
@@ -324,6 +338,15 @@ abstract class LocalTrack extends Track {
     // create new track with options
     final newStream = await LocalTrack.createStream(currentOptions);
     final newTrack = newStream.getTracks().first;
+
+    // GRAVIX (0.8.4): unpublished or left while it opened: this capture is nobody's
+    if (isDisposed || gravixClosedByLeave) {
+      for (final t in newStream.getTracks()) {
+        await t.stop();
+      }
+      await newStream.dispose();
+      throw TrackCreateException('the track was closed while its capture restarted');
+    }
 
     final processor = _processor;
 

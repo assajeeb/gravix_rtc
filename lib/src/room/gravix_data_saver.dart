@@ -490,7 +490,10 @@ class GravixDataSaver {
     final lp = room.localParticipant;
     // not while a rejoin is republishing the tracks: its publications are
     // missing on purpose for a moment
+    // GRAVIX (0.8.4): nor a camera the app's last call turned off. A reopen that failed clears that
+    // flag itself, and goes on counting its tries.
     if (lp == null ||
+        (!lp.gravixCameraWanted && _reopenFailures == 0) ||
         room.connectionState != ConnectionState.connected ||
         room.engine.gravixFullReconnectInProgress ||
         lp.gravixRepublishPending(TrackSource.camera)) {

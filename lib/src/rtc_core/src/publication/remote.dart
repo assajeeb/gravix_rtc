@@ -19,6 +19,7 @@ import 'dart:math';
 import 'package:flutter/widgets.dart';
 
 import 'package:logging/logging.dart' show Level;
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
 
 import '../core/signal_client.dart';
@@ -36,6 +37,7 @@ import '../types/video_dimensions.dart';
 import '../utils.dart';
 import 'track_publication.dart';
 import 'track_settings.dart';
+import '../support/gravix_native_gate.dart'; // GRAVIX
 import '../../../connect/gravix_viewer_fast_start.dart'; // GRAVIX
 
 /// Represents a track publication from a RemoteParticipant. Provides methods to
@@ -116,7 +118,70 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
   void gravixResetStreamState() {
     _streamStateReported = false;
     _streamState = StreamState.paused;
+    if (participant.room.roomOptions.recovery.resendTrackSettingsOnRejoin) {
+      _lastSentTrackSettings = null;
+      _gravixResendSettings = true;
+    }
+    _gravixTrackRefused = false;
   }
+
+  /// GRAVIX (0.8.4): this session delivered a track [gravixRefusesTrack] refused.
+  bool _gravixTrackRefused = false;
+
+  /// Media arrived on this session: the participant is in the room, whatever its lists say.
+  @internal
+  bool get gravixMediaArrived => track != null || _gravixTrackRefused;
+
+  /// GRAVIX (0.8.4): a full rejoin's new session knows none of this publication's settings: its next
+  /// track sends them.
+  bool _gravixResendSettings = false;
+
+  /// GRAVIX (0.8.4): what the app last asked with [subscribe] / [unsubscribe]; null: nothing, the
+  /// session's `autoSubscribe` decides.
+  bool? _gravixSubscribeAsked;
+
+  bool get _gravixKeepsSubscribeAsked => participant.room.roomOptions.recovery.restoreSubscriptionsOnRejoin;
+
+  /// GRAVIX (0.8.4): a new session starts from `autoSubscribe`: it hears what the app asked otherwise.
+  @internal
+  void gravixRestoreSubscription() {
+    final asked = _gravixSubscribeAsked;
+    if (!_gravixKeepsSubscribeAsked || asked == null) return;
+    if (asked == participant.room.connectOptions.autoSubscribe) return;
+    _sendUpdateSubscription(subscribed: asked);
+  }
+
+  /// GRAVIX (0.8.4): a track delivered against the app's unsubscribe (the server hadn't heard yet, or
+  /// a relayed track it didn't know of then). Not adopted, silenced, and refused again: native audio
+  /// plays a receiver with or without a [RemoteTrack].
+  @internal
+  bool gravixRefusesTrack(rtc.MediaStreamTrack mediaTrack) {
+    if (!_gravixKeepsSubscribeAsked || _gravixSubscribeAsked != false) return false;
+    // a write that runs getTransceivers() natively: through the gate, and not if a newer subscribe()
+    // took this track
+    unawaited(() async {
+      await GravixNativeGate.afterRemoteSet(what: 'refuseTrack');
+      if (_gravixSubscribeAsked != false) return;
+      try {
+        mediaTrack.enabled = false;
+      } catch (e) {
+        logger.warning('silencing a refused track: ${e.runtimeType}');
+      }
+    }());
+    _gravixTrackRefused = true;
+    _sendUpdateSubscription(subscribed: false);
+    return true;
+  }
+
+  /// GRAVIX (0.8.4): what a resume's SyncState reports: what the app wants, not what happens to be
+  /// delivered yet.
+  @internal
+  bool get gravixSyncSubscribed => _gravixKeepsSubscribeAsked ? gravixWantsTrack : subscribed;
+
+  /// GRAVIX (0.8.4): whether a pull of a track this side lost may ask for it.
+  @internal
+  bool get gravixWantsTrack =>
+      !_gravixKeepsSubscribeAsked || (_gravixSubscribeAsked ?? participant.room.connectOptions.autoSubscribe);
 
   @internal
   Future<void> updateStreamState(StreamState streamState) async {
@@ -281,6 +346,14 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
         _adaptiveStreamActive = false;
       }
 
+      // GRAVIX (0.8.4): after a rejoin's reset, what the app set; the adaptive path above sends the rest
+      if (newValue != null && _gravixResendSettings) {
+        _gravixResendSettings = false;
+        if (_enabledPreference != TrackEnabledPreference.unset || _userPreference != null || _fps != null) {
+          _emitTrackUpdate();
+        }
+      }
+
       if (newValue != null) {
         // if new Track has been set to this RemoteTrackPublication,
         // update the Track's muted state from the latest info.
@@ -361,6 +434,7 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
   }
 
   Future<void> subscribe() async {
+    _gravixSubscribeAsked = true;
     if (super.subscribed || !_subscriptionAllowed) {
       logger.fine('ignoring subscribe() request...');
       return;
@@ -369,6 +443,7 @@ class RemoteTrackPublication<T extends RemoteTrack> extends TrackPublication<T> 
   }
 
   Future<void> unsubscribe() async {
+    _gravixSubscribeAsked = false;
     if (!super.subscribed || !_subscriptionAllowed) {
       logger.fine('ignoring unsubscribe() request...');
       return;

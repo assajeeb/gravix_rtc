@@ -110,26 +110,28 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     if (GravixEngineMicMute.supported && GravixMusicVoiceMute.appliesTo(this)) {
       final previous = _engineMuteOwner;
       if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
+      _engineMuteOwner = this; // before the wait: no other track may release it meanwhile
       if (await GravixEngineMicMute.engage()) {
         _engineMuted = true;
         _voiceOnlyMuted = true;
-        _engineMuteOwner = this;
         logger.info('mic mute: voice-only (room music playing; the publication stays live)');
         updateMuted(true, shouldSendSignal: false);
         return true;
       }
+      if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
     }
     if (!stopOnMute && GravixEngineMicMute.supported) {
       final previous = _engineMuteOwner;
       if (previous != null && !identical(previous, this)) await previous._leaveEngineMute();
+      _engineMuteOwner = this; // before the wait: no other track may release it meanwhile
       if (await GravixEngineMicMute.engage()) {
         _engineMuted = true;
-        _engineMuteOwner = this;
         // after the PCM is zeroed: a refused cap then only costs uplink
         await _uplinkPause.pause(sender);
         updateMuted(true, shouldSendSignal: true);
         return true;
       }
+      if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
     }
     final did = await super.mute(stopOnMute: stopOnMute);
     if (did) await _uplinkPause.pause(sender);
@@ -177,7 +179,10 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
 
   /// The mute state the server should have: a voice-only mute is not one.
   @override
-  bool get wireMuted => muted && !_voiceOnlyMuted;
+  bool get wireMuted => (muted && !_voiceOnlyMuted) || gravixMuteComing;
+
+  @override
+  bool get gravixMuteKeepsCapture => _engineMuted || _voiceOnlyMuted;
 
   /// Room music started while this track is muted: keeps the voice muted and
   /// puts the track back on the wire (the caller sends the unmute signal).
@@ -259,7 +264,9 @@ class LocalAudioTrack extends LocalTrack with AudioTrack, LocalAudioManagementMi
     await disable();
     _engineMuted = false;
     _voiceOnlyMuted = false;
-    if (identical(_engineMuteOwner, this)) _engineMuteOwner = null;
+    // GRAVIX (0.8.4): only its own: a newer track's mute in the module stays
+    if (!identical(_engineMuteOwner, this)) return;
+    _engineMuteOwner = null;
     await GravixEngineMicMute.release();
   }
 

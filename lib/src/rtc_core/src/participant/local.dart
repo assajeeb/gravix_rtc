@@ -23,6 +23,7 @@ import 'dart:typed_data' show Uint8List;
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:async/async.dart';
+import 'package:collection/collection.dart' show IterableExtension;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:meta/meta.dart';
@@ -69,6 +70,23 @@ import 'participant.dart';
 
 /// Represents the current participant in the room. Instance of [LocalParticipant] is automatically
 /// created after successfully connecting to a [Room] and will be accessible from [Room.localParticipant].
+/// One track's republish (0.8.4).
+class _GravixRepublishRun {
+  _GravixRepublishRun(this.pub);
+  final LocalTrackPublication pub;
+
+  /// Unpublished meanwhile: it goes as soon as it lands.
+  bool dropped = false;
+
+  /// Dropped by a leave: whatever the room's unpublish options, it closes.
+  bool leaving = false;
+
+  /// Its "published" was not sent, so no "unpublished" follows.
+  bool publishedWithheld = false;
+
+  final done = Completer<void>();
+}
+
 class LocalParticipant extends Participant<LocalTrackPublication> {
   // Pending signal request responses (keyed by requestId)
   final Map<int, Completer<void>> _pendingSignalRequests = {};
@@ -204,15 +222,48 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     LocalAudioTrack track, {
     AudioPublishOptions? publishOptions,
   }) async {
-    final isMic = track.source == TrackSource.microphone;
-    if (isMic) gravixMicWanted = true;
+    if (track.source == TrackSource.microphone) gravixMicWanted = true;
+    return _gravixPublishAudio(track, publishOptions, asked: true);
+  }
+
+  /// GRAVIX (0.8.4): a room music / RED swap under way.
+  @internal
+  Future<void>? gravixMicSwap;
+
+  /// GRAVIX (0.8.4): the room music / RED swap's publish: no request of the app's, so it says
+  /// nothing of what the app wants; `gravixRepublishMic` applies that itself.
+  @internal
+  Future<LocalTrackPublication<LocalAudioTrack>> gravixPublishSwappedMic(LocalAudioTrack track, AudioPublishOptions options) =>
+      _gravixPublishAudio(track, options, asked: false);
+
+  /// GRAVIX (0.8.4): the track of a publish the app asked for, after a wait or a capture: the
+  /// newest call decides, so a later off is not overruled. It goes out muted, or mutes on landing.
+  Future<void> _gravixMuteIfTurnedOff(LocalTrack track) async {
+    final source = track.source;
+    if (!_gravixHonorOffCalls || (source != TrackSource.microphone && source != TrackSource.camera)) return;
+    if (_gravixWanted(source)) return;
+    if (!track.muted) {
+      await track.mute(stopOnMute: false);
+    } else {
+      await track.disable(); // muted before it was started: a start leaves it enabled
+    }
+  }
+
+  Future<LocalTrackPublication<LocalAudioTrack>> _gravixPublishAudio(
+    LocalAudioTrack track,
+    AudioPublishOptions? publishOptions, {
+    required bool asked,
+  }) async {
+    final isMic = track.source == TrackSource.microphone && asked;
     final wasActive = track.isActive;
     // GRAVIX (2026-11-04, Gulf test): a session replaced during the publish takes the track along
     for (var tries = 0; ; tries++) {
       try {
-        final result = await _publishRunners
-            .forSource(track.source)
-            .run(() => _publishAudioTrack(track, publishOptions: publishOptions));
+        final result = await _publishRunners.forSource(track.source).run(() async {
+          if (asked) await _gravixMuteIfTurnedOff(track);
+          return _publishAudioTrack(track, publishOptions: publishOptions);
+        });
+        if (asked) await _gravixMuteIfTurnedOff(track);
         return result! as LocalTrackPublication<LocalAudioTrack>;
       } on GravixSessionReplacedException {
         if (tries < _gravixPublishRetries && await room.gravixAfterSessionReplaced() && (!isMic || gravixMicWanted)) {
@@ -301,6 +352,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     final List<rtc.RTCRtpEncoding> encodings = [audioEncoding.toRTCRtpEncoding()];
 
     final shouldStopOnFailure = !track.isActive && !gravixDetached;
+    final leaves = _gravixLeaves;
     try {
       // Start capture before signaling so create-time audio processing failures
       // abort publish without creating a server-side publication.
@@ -390,6 +442,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
       track.lastPublishOptions = publishOptions;
 
+      // GRAVIX (0.8.4): nothing stands after a leave
+      if (leaves != _gravixLeaves) throw TrackPublishException('publish of ${track.source.name}: the room was left');
+      // GRAVIX (0.8.4): its sid is the dead session's, and a republish may be publishing this track
+      if (_gravixHonorOffCalls && room.engine.gravixRestartGen != gravixSessionGen) {
+        throw GravixSessionReplacedException('publish of ${track.source.name}: landed after its session was replaced');
+      }
       final pub = LocalTrackPublication<LocalAudioTrack>(participant: this, info: trackInfo, track: track);
       _gravixPublishedOnSession[pub] = gravixSessionGen;
       // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
@@ -407,10 +465,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       final listener = track.createListener();
       listener.on((TrackEndedEvent event) async {
         logger.fine('TrackEndedEvent: ${event.track}');
-        await removePublishedTrack(pub.sid);
+        await _gravixRemovePublished(pub.sid, notify: true); // no request of the app's: it may still want it
       });
 
-      [events, room.events].emit(LocalTrackPublishedEvent(participant: this, publication: pub));
+      if (!_gravixWithholdPublished(track)) {
+        [events, room.events].emit(LocalTrackPublishedEvent(participant: this, publication: pub));
+      }
 
       return pub;
     } catch (error) {
@@ -432,14 +492,16 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     LocalVideoTrack track, {
     VideoPublishOptions? publishOptions,
   }) async {
-    if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(track.source);
-    final started = Stopwatch()..start();
     final isCamera = track.source == TrackSource.camera;
     if (isCamera) gravixCameraWanted = true;
+    if (_gravixJoinCameraBusy != null) await _gravixAfterJoinCamera(track.source);
+    final started = Stopwatch()..start();
     Future<LocalTrackPublication<LocalVideoTrack>> publish() async {
-      final result = await _publishRunners
-          .forSource(track.source)
-          .run(() => _publishVideoTrack(track, publishOptions: publishOptions));
+      final result = await _publishRunners.forSource(track.source).run(() async {
+        await _gravixMuteIfTurnedOff(track);
+        return _publishVideoTrack(track, publishOptions: publishOptions);
+      });
+      await _gravixMuteIfTurnedOff(track);
       return result! as LocalTrackPublication<LocalVideoTrack>;
     }
 
@@ -477,9 +539,22 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       }
       if (moved) _gravixVideoEnableOk(track.source, started);
       return pub;
+    } catch (_) {
+      if (isCamera) gravixCameraEnableFailed();
+      rethrow;
     } finally {
       if (isCamera) _gravixOwnCameraPublishes--;
     }
+  }
+
+  /// GRAVIX (0.8.4): a camera enable failed, for whatever reason: a later move must not turn it on,
+  /// unless a camera is up anyway or a reconnect still has this one to publish.
+  @internal
+  void gravixCameraEnableFailed() {
+    if (getTrackPublicationBySource(TrackSource.camera) != null) return;
+    if (_gravixInterrupted.contains(TrackSource.camera)) return;
+    _gravixCameraWanted = false;
+    _gravixOffOpen.remove(TrackSource.camera);
   }
 
   /// GRAVIX (2026-11-04): a camera the app captured itself is on its way through
@@ -495,7 +570,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
   /// The call fails, so the camera isn't wanted any more: a later move must not turn it on.
   void _gravixVideoEnableFailed(TrackSource source, Object error, Stopwatch started) {
-    if (source == TrackSource.camera) gravixCameraWanted = false;
+    if (source == TrackSource.camera) gravixCameraEnableFailed();
     final reason = gravixIsMediaNotAllowed(error) ? kGravixMediaNotAllowed : error.runtimeType;
     GravixRegionLog.step(
       'videoEnable',
@@ -597,6 +672,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     // own. The AddTrack wait ends when the join attempt does.
     GravixJoinCameraAttempt? gravixJoin,
   }) async {
+    final leaves = _gravixLeaves;
     if (videoTrackPublications.any((e) => e.track?.mediaStreamTrack.id == track.mediaStreamTrack.id)) {
       throw TrackPublishException('track already exists');
     }
@@ -917,6 +993,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
     if (!gravixDetached) await track.start();
 
+    // GRAVIX (0.8.4): see _publishAudioTrack
+    if (leaves != _gravixLeaves) throw TrackPublishException('publish of ${track.source.name}: the room was left');
+    if (_gravixHonorOffCalls && room.engine.gravixRestartGen != gravixSessionGen) {
+      throw GravixSessionReplacedException('publish of ${track.source.name}: landed after its session was replaced');
+    }
     final pub = LocalTrackPublication<LocalVideoTrack>(participant: this, info: trackInfo, track: track);
     _gravixPublishedOnSession[pub] = gravixSessionGen;
     // GRAVIX (0.7.1): stats from the publisher's connection-wide getStats().
@@ -934,18 +1015,47 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     final listener = track.createListener();
     listener.on((TrackEndedEvent event) async {
       logger.fine('TrackEndedEvent: ${event.track}');
-      await removePublishedTrack(pub.sid);
+      await _gravixRemovePublished(pub.sid, notify: true); // no request of the app's: it may still want it
     });
 
-    [events, room.events].emit(LocalTrackPublishedEvent(participant: this, publication: pub));
+    if (!_gravixWithholdPublished(track)) {
+      [events, room.events].emit(LocalTrackPublishedEvent(participant: this, publication: pub));
+    }
 
     return pub;
   }
 
   Future<void> removePublishedTrack(String trackSid, {bool notify = true}) async {
+    // GRAVIX (0.8.4): the app's request: a later move must not open it again
+    final asked = trackPublications[trackSid] ?? _gravixRepublishPending.firstWhereOrNull((p) => p.sid == trackSid);
+    if (asked?.source == TrackSource.camera) {
+      _gravixCameraWanted = false;
+      _gravixOffOpen.remove(TrackSource.camera);
+    }
+    if (asked?.source == TrackSource.microphone) {
+      _gravixMicWanted = false;
+      _gravixOffOpen.remove(TrackSource.microphone);
+    }
+    await _gravixRemovePublished(trackSid, notify: notify);
+  }
+
+  /// GRAVIX (0.8.4): the server took it, or the capture ended: no request of the app's, which may
+  /// still want it (the data saver reopens such a camera).
+  @internal
+  Future<void> gravixPublicationLost(String trackSid) => _gravixRemovePublished(trackSid, notify: true);
+
+  Future<void> _gravixRemovePublished(String trackSid, {required bool notify}) async {
     logger.finer('Unpublish track sid: $trackSid, notify: $notify');
     final pub = trackPublications.remove(trackSid);
     if (pub == null) {
+      // GRAVIX (0.8.4): between sessions: a full rejoin has it, to publish again
+      if (_gravixHonorOffCalls) {
+        final pending = _gravixRepublishPending.firstWhereOrNull((p) => p.sid == trackSid);
+        if (pending != null) {
+          await _gravixDropPending(pending, notify: notify);
+          return;
+        }
+      }
       logger.warning('Publication not found $trackSid');
       return;
     }
@@ -1038,12 +1148,233 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   /// two back-to-back rejoins).
   final List<LocalTrackPublication> _gravixRepublishPending = [];
 
-  /// GRAVIX (0.4.15): the room is left: nothing is republished any more.
+  /// GRAVIX (0.4.15): the room is left: nothing is republished any more, and (0.8.4) every track a
+  /// reconnect still holds is closed.
   @internal
-  void gravixForgetRepublish() {
+  Future<void> gravixForgetRepublish() async {
+    final held = _gravixRepublishPending.toList();
+    final run = _gravixRepublishing;
     _gravixRepublishPending.clear();
+    _gravixScreenWanted = false;
     _gravixInterrupted.clear();
-    gravixMicWanted = false;
+    _gravixOffOpen.clear();
+    _gravixLeaves++;
+    _gravixMicWanted = false;
+    gravixMicOptions = null;
+    // GRAVIX (0.8.4): this Room's next room must not open the camera of this one
+    _gravixCameraWanted = false;
+    gravixCameraOptions = null;
+    for (final pub in held) {
+      final track = pub.track;
+      final publishing = run != null && identical(run.pub, pub);
+      if (publishing) {
+        run.dropped = true;
+        run.leaving = true;
+      }
+      if (track != null) await _gravixCloseDropped(pub, track, always: true);
+      [events, room.events].emit(LocalTrackUnpublishedEvent(participant: this, publication: pub));
+      if (!publishing) await pub.dispose();
+    }
+  }
+
+  bool get _gravixHonorOffCalls => room.roomOptions.recovery.republishHonorsOffCalls;
+
+  /// GRAVIX (0.8.4): how many times the room was left: a capture that outlived a leave is no one's.
+  int _gravixLeaves = 0;
+
+  /// A capture just opened: closes it and says true if nobody wants it any more. The room was left
+  /// meanwhile (whatever room this Room is in now never asked for it), or the app turned it off.
+  Future<bool> _gravixCaptureUnwanted(LocalTrack track, int leaves) async {
+    final left = leaves != _gravixLeaves || room.gravixIsLeaving;
+    final source = track.source;
+    final off =
+        _gravixHonorOffCalls &&
+        (source == TrackSource.microphone || source == TrackSource.camera || source == TrackSource.screenShareVideo) &&
+        !_gravixWanted(source);
+    if (!left && !off) return false;
+    logger.info('closing a ${source.name} capture nobody wants any more (left=$left)');
+    try {
+      await track.stop();
+      await track.dispose();
+    } catch (e) {
+      logger.warning('closing a capture: ${e.runtimeType}');
+    }
+    return true;
+  }
+
+  void _gravixReportRepublishFailed(LocalTrackPublication pub, Object error) {
+    if (pub.source == TrackSource.camera) gravixCameraEnableFailed();
+    [events, room.events].emit(LocalTrackRepublishFailedEvent(participant: this, publication: pub, error: error));
+  }
+
+  LocalTrackPublication? _gravixPendingFor(TrackSource source) =>
+      _gravixRepublishPending.firstWhereOrNull((p) => p.source == source);
+
+  /// The republish under way, or waiting for the publish queue. An older one superseded by a newer
+  /// rejoin can still be ending.
+  _GravixRepublishRun? _gravixRepublishing;
+
+  /// The app already heard this track is gone: its publish is not reported.
+  bool _gravixWithholdPublished(LocalTrack track) {
+    final run = _gravixRepublishing;
+    if (run == null || !run.dropped || !identical(run.pub.track, track)) return false;
+    run.publishedWithheld = true;
+    return true;
+  }
+
+  /// Mutes running on tracks still to be republished; their publish waits for them.
+  final Map<LocalTrack, Future<void>> _gravixPendingMutes = {};
+
+  /// Unmutes under way, see [_gravixMutePending].
+  final Map<LocalTrack, Future<void>> _gravixUnmuting = {};
+
+  /// Tracks whose capture closes when their republish landed.
+  final Set<LocalTrack> _gravixStopWhenLanded = {};
+
+  /// GRAVIX (0.8.4): an off call for a track between two sessions: there is no publication to find,
+  /// so it acts on the track. The AddTrack reads the mute from here on, whatever the publish queue
+  /// is doing. A publish under way needs its capture, so that one closes when it lands.
+  Future<void> _gravixMutePending(LocalTrackPublication pub, {required bool stopOnMute}) {
+    final track = pub.track;
+    if (track == null) return Future<void>.value();
+    // muted, but an unmute is under way: the newest call wins, so this mute follows it
+    final unmuting = _gravixUnmuting[track];
+    if (track.muted && unmuting == null) return Future<void>.value();
+    final busy = _gravixPendingMutes[track];
+    if (busy != null) return busy;
+    final publishing = identical(_gravixRepublishing?.pub, pub);
+    track.gravixMuteComing = true;
+    final done = () async {
+      try {
+        if (unmuting != null) await unmuting.then<void>((_) {}, onError: (Object _) {});
+        await track.mute(stopOnMute: stopOnMute && !publishing);
+        if (publishing && stopOnMute) _gravixStopWhenLanded.add(track);
+      } catch (e) {
+        // the sender it pauses belongs to the old session; the track must go silent all the same
+        logger.warning('muting a track being republished: ${e.runtimeType}');
+        await track.disable();
+        track.updateMuted(true, shouldSendSignal: false);
+      } finally {
+        track.gravixMuteComing = false;
+        _gravixPendingMutes.remove(track);
+      }
+    }();
+    _gravixPendingMutes[track] = done;
+    return done;
+  }
+
+  /// GRAVIX (0.8.4): an unpublish for a track between two sessions. It never goes out, or, with its
+  /// AddTrack already out, goes as soon as it lands.
+  Future<void> _gravixDropPending(LocalTrackPublication pub, {required bool notify}) async {
+    _gravixRepublishPending.removeWhere((p) => identical(p, pub));
+    final track = pub.track;
+    final run = _gravixRepublishing;
+    if (run != null && identical(run.pub, pub)) {
+      // its publish is under way, and needs the capture: the run closes it
+      run.dropped = true;
+      await _gravixMutePending(pub, stopOnMute: false);
+      if (notify) [events, room.events].emit(LocalTrackUnpublishedEvent(participant: this, publication: pub));
+      return;
+    }
+    if (track != null) await _gravixCloseDropped(pub, track);
+    if (notify) [events, room.events].emit(LocalTrackUnpublishedEvent(participant: this, publication: pub));
+    await pub.dispose();
+  }
+
+  /// A track dropped between two sessions that has no publication to remove: its capture, then the
+  /// screen capture's service, in that order (stopping the service ends the projection).
+  Future<void> _gravixCloseDropped(LocalTrackPublication pub, LocalTrack track, {bool always = false}) async {
+    if (always) track.gravixClosedByLeave = true;
+    if (always || room.roomOptions.stopLocalTrackOnUnpublish) await track.stop();
+    await track.onUnpublish();
+    if (track.processor != null) {
+      await track.processor?.onUnpublish();
+      await track.stopProcessor();
+    }
+    if (pub.source == TrackSource.screenShareVideo && lkPlatformIs(PlatformType.android)) {
+      await AndroidScreenCapture.release();
+    }
+  }
+
+  /// GRAVIX (0.8.4): an on call for a [source] track between two sessions waits for the reconnect to
+  /// end. False: the room was left.
+  @internal
+  Future<bool> gravixAfterHeldTrack(TrackSource source) async {
+    if (!_gravixHonorOffCalls || _gravixPendingFor(source) == null) return true;
+    return room.gravixAfterSessionReplaced(untilItEnds: true);
+  }
+
+  /// The room service's camera effect turns off a camera a full rejoin still holds.
+  @internal
+  Future<void> gravixDropPendingRepublish(TrackSource source) async {
+    if (!_gravixHonorOffCalls) return;
+    final pending = _gravixPendingFor(source);
+    if (pending != null) await _gravixDropPending(pending, notify: true);
+  }
+
+  /// One track's republish: the publish queue, then the mute state as it is by then.
+  Future<void> _gravixRepublishOne(LocalTrackPublication pub, LocalTrack track, int restartGen) async {
+    final detachStopped = room.roomOptions.recovery.republishStoppedTracksMuted;
+    final run = _gravixRepublishing = _GravixRepublishRun(pub);
+    Future<void> closeIfAsked() async {
+      final muting = _gravixPendingMutes[track];
+      if (muting != null) await muting;
+      // an engine or voice-only mute lives on its capture: its unmute restarts nothing
+      if (_gravixStopWhenLanded.remove(track) && track.muted && !track.gravixMuteKeepsCapture) await track.stop();
+    }
+
+    try {
+      final landed = await _publishRunners.forSource(track.source).run(() async {
+        if (run.dropped) return null;
+        // queued behind another publish while a newer rejoin began: that one republishes this track
+        if (room.engine.gravixRestartGen != restartGen) {
+          throw GravixSessionReplacedException('republish of ${track.source.name}: its session was replaced in the queue');
+        }
+        final muting = _gravixPendingMutes[track];
+        if (muting != null) await muting;
+        // a full reconnect replaced the peer connection, so any simulcast
+        // codec senders the track still holds belong to the old one
+        if (track is LocalVideoTrack) track.clearSimulcastState();
+        final detached = detachStopped && track.muted && !track.isActive;
+        if (detached) logger.info('republishing the stopped muted ${track.source} without a capture');
+        return track is LocalAudioTrack
+            ? _publishAudioTrack(track, gravixDetached: detached)
+            : _publishVideoTrack(track as LocalVideoTrack, gravixDetached: detached);
+      });
+      final muting = _gravixPendingMutes[track];
+      if (muting != null) await muting;
+      if (landed == null) {
+        if (run.dropped) {
+          await _gravixCloseDropped(pub, track, always: run.leaving);
+          await pub.dispose();
+        }
+        return;
+      }
+      if (run.dropped) {
+        // a "published" that went out gets its "unpublished". Not the app's request: that was
+        // made already, and a newer one may have followed it.
+        await _gravixRemovePublished(landed.sid, notify: !run.publishedWithheld);
+        if (run.leaving) await track.stop();
+        return;
+      }
+      // muted after its AddTrack went out: the server is told under the new sid
+      final info = landed.latestInfo;
+      if (info != null && info.muted != track.wireMuted) {
+        room.engine.signalClient.sendMuteTrack(landed.sid, track.wireMuted);
+      }
+      if (info != null && info.muted != track.muted) landed.updateFromInfo(info.deepCopy()..muted = track.muted);
+      await closeIfAsked();
+    } catch (_) {
+      // a session replaced too: the next republish goes out without a capture
+      await closeIfAsked();
+      if (!run.dropped) rethrow;
+      // the app already heard it is gone
+      await _gravixCloseDropped(pub, track, always: run.leaving);
+      await pub.dispose();
+    } finally {
+      if (identical(_gravixRepublishing, run)) _gravixRepublishing = null;
+      run.done.complete();
+    }
   }
 
   /// GRAVIX (2026-10-11): a rejoin still has to republish a [source] track. Its
@@ -1065,8 +1396,15 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         onThisSession[pub.sid] = pub;
         continue;
       }
-      if (pub.track == null || pubs.any((p) => identical(p.track, pub.track))) continue;
-      pubs.add(pub);
+      if (pub.track == null) continue;
+      final same = pubs.indexWhere((p) => identical(p.track, pub.track));
+      if (same < 0) {
+        pubs.add(pub);
+      } else if (_gravixHonorOffCalls) {
+        // a superseded republish landed it again and is still ending: the newest sid is the one the
+        // app can name
+        pubs[same] = pub;
+      }
     }
     // GRAVIX (2026-11-04, simulator, 3 of 12 joins into a room with video): a publish that passed
     // its "move under way?" check before the move can reach its AddTrack after the new session's
@@ -1079,6 +1417,13 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       ..addAll(pubs);
     trackPublications.clear();
     trackPublications.addAll(onThisSession);
+    // GRAVIX (0.8.4): turned off just before this, its off call not through yet
+    if (_gravixHonorOffCalls) {
+      for (final pub in pubs) {
+        if (!_gravixOffOpen.contains(pub.source)) continue;
+        unawaited(_gravixMutePending(pub, stopOnMute: _gravixDefaultStopOnMute(pub.source)));
+      }
+    }
     final detachStopped = room.roomOptions.recovery.republishStoppedTracksMuted;
     for (LocalTrackPublication pub in pubs) {
       if (superseded()) {
@@ -1087,6 +1432,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         return;
       }
       final track = pub.track;
+      // GRAVIX (0.8.4): unpublished while it waited
+      if (_gravixHonorOffCalls && !_gravixRepublishPending.any((p) => identical(p, pub))) continue;
       // GRAVIX (0.4.15, field 2026-10-09 03:50:13.919): a track muted with
       // stopOnMute (stopAudioCaptureOnMute, the default) has no native track any
       // more; handing it to addTransceiver threw "track is null" out of the
@@ -1096,7 +1443,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       // microphone is not reopened while muted.
       final detached = detachStopped && track != null && track.muted && !track.isActive;
       try {
-        if (track is LocalAudioTrack) {
+        if (_gravixHonorOffCalls && track != null) {
+          // not through publishAudioTrack: a republish is no request of the app's, so it says nothing
+          // of what the app wants. A replaced session is the next rejoin's, below.
+          await _gravixRepublishOne(pub, track, restartGen);
+        } else if (track is LocalAudioTrack) {
           if (detached) {
             logger.info('republishing the stopped muted ${track.source} without a capture');
             await _publishRunners.forSource(track.source).run(() => _publishAudioTrack(track, gravixDetached: true));
@@ -1116,18 +1467,27 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
             await _publishRunners.forSource(track.source).run(() => _publishVideoTrack(track));
           }
         }
-        _gravixRepublishPending.remove(pub);
+        _gravixRepublishPending.removeWhere((p) => identical(p, pub));
       } catch (error) {
         if (error is GravixSessionReplacedException || superseded()) {
           // GRAVIX (0.4.15, F4): not a failure: the next session republishes it
           logger.info('republishing ${pub.source}: the session was replaced; the next rejoin republishes it');
           return;
         }
-        _gravixRepublishPending.remove(pub);
+        _gravixRepublishPending.removeWhere((p) => identical(p, pub));
         // GRAVIX (0.4.15): one track that cannot be republished must not abort the
         // rejoin (the other tracks, RoomReconnectedEvent): report it instead.
         logger.severe('republishing ${pub.source} after the rejoin failed: $error');
-        [events, room.events].emit(LocalTrackRepublishFailedEvent(participant: this, publication: pub, error: error));
+        if (_gravixHonorOffCalls) {
+          // nothing publishes it now: no capture stays open behind a track the app hears is gone
+          await track?.stop();
+          if (pub.source == TrackSource.screenShareVideo && lkPlatformIs(PlatformType.android)) {
+            await AndroidScreenCapture.release();
+          }
+          _gravixReportRepublishFailed(pub, error);
+        } else {
+          [events, room.events].emit(LocalTrackRepublishFailedEvent(participant: this, publication: pub, error: error));
+        }
       }
     }
   }
@@ -1274,7 +1634,49 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   /// This is the recommended method to publish tracks.
   /// GRAVIX (2026-10-21): the camera's last setCameraEnabled / setSourceEnabled
   /// request (true = on), whether or not its publish succeeded.
-  bool gravixCameraWanted = false;
+  bool get gravixCameraWanted => _gravixCameraWanted;
+  set gravixCameraWanted(bool wanted) {
+    _gravixCameraWanted = wanted;
+    _gravixNoteWanted(TrackSource.camera, wanted);
+  }
+
+  bool _gravixCameraWanted = false;
+
+  /// GRAVIX (0.8.4): the app's last screen share request: nothing else reads it.
+  bool _gravixScreenWanted = false;
+
+  /// GRAVIX (0.8.4): how many requests each source has had: the newest call decides.
+  final Map<TrackSource, int> _gravixAsks = {};
+
+  int _gravixNoteAsk(TrackSource source) => _gravixAsks[source] = (_gravixAsks[source] ?? 0) + 1;
+
+  /// How many requests [source] has had.
+  @internal
+  int gravixAskCount(TrackSource source) => _gravixAsks[source] ?? 0;
+
+  /// GRAVIX (0.8.4): sources turned off whose off call has not been through yet. Not "not wanted",
+  /// which is also the state of a join's microphone nobody asked for through these flags, or of a
+  /// track unmuted on its publication.
+  final Set<TrackSource> _gravixOffOpen = {};
+
+  bool _gravixDefaultStopOnMute(TrackSource source) => switch (source) {
+    TrackSource.camera => room.roomOptions.defaultCameraCaptureOptions.stopCameraCaptureOnMute,
+    TrackSource.microphone => room.roomOptions.defaultAudioCaptureOptions.stopAudioCaptureOnMute,
+    _ => true,
+  };
+
+  /// The app's request, set before any queue: a track between two sessions hears of it at once.
+  void _gravixNoteWanted(TrackSource source, bool wanted) {
+    _gravixNoteAsk(source);
+    if (wanted) {
+      _gravixOffOpen.remove(source);
+      return;
+    }
+    _gravixOffOpen.add(source);
+    if (!_gravixHonorOffCalls) return;
+    final pending = _gravixPendingFor(source);
+    if (pending != null) unawaited(_gravixMutePending(pending, stopOnMute: _gravixDefaultStopOnMute(source)));
+  }
 
   /// GRAVIX (2026-11-04): the capture options of the app's last camera request: a media
   /// move's republish opens the same camera.
@@ -1283,7 +1685,13 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
   /// GRAVIX (2026-11-04, Gulf test): the same for the microphone. A publish a full reconnect
   /// interrupts goes out on the new session unless this says the app changed its mind.
-  bool gravixMicWanted = false;
+  bool get gravixMicWanted => _gravixMicWanted;
+  set gravixMicWanted(bool wanted) {
+    _gravixMicWanted = wanted;
+    _gravixNoteWanted(TrackSource.microphone, wanted);
+  }
+
+  bool _gravixMicWanted = false;
 
   /// The capture options of the app's last microphone request.
   @internal
@@ -1305,6 +1713,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
   bool _gravixWanted(TrackSource source) => switch (source) {
     TrackSource.microphone => gravixMicWanted,
     TrackSource.camera => gravixCameraWanted,
+    TrackSource.screenShareVideo => _gravixScreenWanted,
     _ => false,
   };
 
@@ -1323,7 +1732,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         GravixRegionLog.step('mediaRepublish', '$name skip reason=not-wanted');
         continue;
       }
-      if (getTrackPublicationBySource(source) != null) continue;
+      if (getTrackPublicationBySource(source) != null || _gravixPendingFor(source) != null) continue;
       GravixRegionLog.step('mediaRepublish', '$name start region=${room.connectedRegion ?? '?'} reason=interrupted');
       final gen = room.engine.gravixRestartGen;
       try {
@@ -1340,6 +1749,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           _gravixInterrupted.add(source); // the next session's
         } else {
           logger.severe('publishing $name after the rejoin failed: $e');
+          // a refused one is the media move's to publish again
+          if (source == TrackSource.camera && !gravixIsMediaNotAllowed(e)) gravixCameraEnableFailed();
         }
       }
     }
@@ -1357,12 +1768,74 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     // GRAVIX (2026-10-21): what the app asked for last, so a region move after a
     // media refusal can publish the camera again (Room.gravixFailoverForMediaRefusal)
     if (source == TrackSource.camera) {
-      gravixCameraWanted = enabled;
+      _gravixCameraWanted = enabled;
       if (enabled) gravixCameraOptions = cameraCaptureOptions ?? gravixCameraOptions;
     }
     if (source == TrackSource.microphone) {
-      gravixMicWanted = enabled;
+      _gravixMicWanted = enabled;
       if (enabled) gravixMicOptions = audioCaptureOptions ?? gravixMicOptions;
+    }
+    if (source == TrackSource.screenShareVideo) _gravixScreenWanted = enabled;
+    final ask = _gravixNoteAsk(source);
+    if (enabled) {
+      _gravixOffOpen.remove(source);
+    } else {
+      _gravixOffOpen.add(source);
+    }
+    try {
+      return await _gravixSetSourceEnabled(
+        source,
+        enabled,
+        captureScreenAudio: captureScreenAudio,
+        audioCaptureOptions: audioCaptureOptions,
+        cameraCaptureOptions: cameraCaptureOptions,
+        screenShareCaptureOptions: screenShareCaptureOptions,
+      );
+    } finally {
+      // only while it is the newest call: a newer one may have opened it again
+      if (!enabled && gravixAskCount(source) == ask) _gravixOffOpen.remove(source);
+    }
+  }
+
+  Future<LocalTrackPublication?> _gravixSetSourceEnabled(
+    TrackSource source,
+    bool enabled, {
+    bool? captureScreenAudio,
+    AudioCaptureOptions? audioCaptureOptions,
+    CameraCaptureOptions? cameraCaptureOptions,
+    ScreenShareCaptureOptions? screenShareCaptureOptions,
+  }) async {
+    // GRAVIX (0.8.4): a mic swap holds the microphone for a moment: its result is what this call finds
+    final swap = gravixMicSwap;
+    if (enabled && source == TrackSource.microphone && _gravixHonorOffCalls && swap != null) await swap;
+    // GRAVIX (0.8.4): a track between two sessions: its publication isn't there to be found
+    final unpublishing = _gravixRepublishing;
+    if (enabled && _gravixHonorOffCalls && unpublishing != null && unpublishing.dropped && unpublishing.pub.source == source) {
+      await unpublishing.done.future; // its removal comes first: this call's camera is a new one
+    }
+    if (_gravixHonorOffCalls && _gravixPendingFor(source) != null) {
+      if (enabled) {
+        // an on call waits for the reconnect, however long, then the normal path below finds the
+        // track; the newest call wins, and nothing opens beside it
+        if (!await gravixAfterHeldTrack(source)) return null;
+      } else {
+        final pending = _gravixPendingFor(source)!;
+        await _gravixOffForPending(source, pending, audioCaptureOptions, cameraCaptureOptions);
+        return null;
+      }
+    }
+    if (enabled && _gravixHonorOffCalls && (source == TrackSource.microphone || source == TrackSource.camera) && !_gravixWanted(source)) {
+      return null; // turned off again while it waited: that call has the last word
+    }
+    // GRAVIX (0.8.4): stopping a share doesn't wait for another track's publish, while it goes on
+    if (!enabled && _gravixHonorOffCalls && source == TrackSource.screenShareVideo) {
+      final share = getTrackPublicationBySource(source);
+      if (share != null) {
+        await removePublishedTrack(share.sid);
+        final screenAudio = getTrackPublicationBySource(TrackSource.screenShareAudio);
+        if (screenAudio != null) await removePublishedTrack(screenAudio.sid);
+        return share;
+      }
     }
     final isVideo = source == TrackSource.camera || source == TrackSource.screenShareVideo;
     final started = Stopwatch()..start();
@@ -1380,8 +1853,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         }
         // turned off while it moved
         if (source == TrackSource.camera && !gravixCameraWanted) return null;
+        if (source == TrackSource.screenShareVideo && _gravixHonorOffCalls && !_gravixScreenWanted) return null;
       } else if (source == TrackSource.microphone) {
         await room.gravixAfterMediaMove();
+        // turned off while it waited (GRAVIX 0.8.4, as the camera above)
+        if (_gravixHonorOffCalls && !_gravixMicWanted) return null;
       }
     }
     final gen = room.engine.gravixRestartGen;
@@ -1402,7 +1878,9 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
       final canResume = source == TrackSource.microphone || source == TrackSource.camera;
       if (enabled && canResume && !gravixIsMediaNotAllowed(e) && _gravixSessionWasReplaced(e, gen)) {
         _gravixInterrupted.add(source);
-        final back = await room.gravixAfterSessionReplaced();
+        // until a full reconnect ends, however long: a call that gave up here would report a failure
+        // while the reconnect goes on to publish it live
+        final back = await room.gravixAfterSessionReplaced(untilItEnds: _gravixHonorOffCalls);
         if (!_gravixWanted(source)) return null; // turned off meanwhile: that call has the last word
         // came too late for the reconnect's own round
         if (back) await gravixPublishInterrupted();
@@ -1411,6 +1889,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           if (isVideo) _gravixVideoEnableOk(source, started);
           return publication;
         }
+        if (_gravixHonorOffCalls) _gravixInterrupted.remove(source); // this call reports a failure: nothing may follow it
+        if (source == TrackSource.camera) gravixCameraEnableFailed();
         rethrow;
       }
       // GRAVIX (2026-11-04): the server refused the camera, or a media move ended its publish.
@@ -1420,7 +1900,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           enabled &&
           source == TrackSource.camera &&
           (gravixIsMediaNotAllowed(e) || (e is GravixSessionReplacedException && room.gravixMediaMoveUnderWay));
-      if (!mediaLoss) rethrow;
+      if (!mediaLoss) {
+        if (enabled && source == TrackSource.camera) gravixCameraEnableFailed();
+        rethrow;
+      }
       await room.gravixAfterRefusedPublish(e);
       final publication = getTrackPublicationBySource(source);
       if (publication != null) {
@@ -1440,12 +1923,30 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     CameraCaptureOptions? cameraCaptureOptions,
     ScreenShareCaptureOptions? screenShareCaptureOptions,
   }) {
+    final leaves = _gravixLeaves;
+    var held = false;
     return _publishRunners.forSource(source).run(() async {
       if (TrackSource.screenShareVideo == source && lkPlatformIsWebMobile()) {
         throw TrackCreateException('Screen sharing is not supported on mobile devices');
       }
 
       logger.fine('setSourceEnabled(source: $source, enabled: $enabled)');
+
+      // GRAVIX (0.8.4): queued meanwhile, so look again: the newest call decides, and a reconnect
+      // may have taken the publication. On a track between two sessions an on opens nothing beside it.
+      if (_gravixHonorOffCalls) {
+        final pending = _gravixPendingFor(source);
+        if (pending != null) {
+          if (enabled) {
+            held = true;
+          } else {
+            await _gravixOffForPending(source, pending, audioCaptureOptions, cameraCaptureOptions);
+          }
+          return null;
+        }
+        final tracked = source == TrackSource.microphone || source == TrackSource.camera || source == TrackSource.screenShareVideo;
+        if (tracked && _gravixWanted(source) != enabled) return getTrackPublicationBySource(source);
+      }
 
       final publication = getTrackPublicationBySource(source);
       if (publication != null) {
@@ -1455,7 +1956,14 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           _ => true,
         };
         if (enabled) {
-          await publication.unmute(stopOnMute: stopOnMute);
+          final unmuting = publication.unmute(stopOnMute: stopOnMute);
+          final track = publication.track;
+          if (track != null) _gravixUnmuting[track] = unmuting;
+          try {
+            await unmuting;
+          } finally {
+            if (track != null) _gravixUnmuting.remove(track);
+          }
         } else {
           if (source == TrackSource.screenShareVideo) {
             await removePublishedTrack(publication.sid);
@@ -1481,10 +1989,12 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
             );
           }
           final track = await LocalVideoTrack.createCameraTrack(captureOptions);
+          if (await _gravixCaptureUnwanted(track, leaves)) return null;
           return await _gravixPublishCapture(track);
         } else if (source == TrackSource.microphone) {
           final AudioCaptureOptions captureOptions = audioCaptureOptions ?? room.roomOptions.defaultAudioCaptureOptions;
           final track = await LocalAudioTrack.create(captureOptions);
+          if (await _gravixCaptureUnwanted(track, leaves)) return null;
           try {
             return await _publishAudioTrack(track);
           } catch (_) {
@@ -1546,6 +2056,10 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
               return publication;
             }
             final track = await LocalVideoTrack.createScreenShareTrack(captureOptions);
+            if (await _gravixCaptureUnwanted(track, leaves)) {
+              if (androidCapture) await AndroidScreenCapture.release();
+              return null;
+            }
             return await _gravixPublishCapture(track);
           } catch (_) {
             if (androidCapture) await AndroidScreenCapture.release();
@@ -1554,7 +2068,58 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         }
       }
       return null;
+    }).then((publication) async {
+      if (!held) return publication;
+      // after the queue: the reconnect's republish needs it
+      if (!await gravixAfterHeldTrack(source)) return null;
+      if (!_gravixWanted(source)) return null;
+      return _gravixSetSourceEnabledNow(
+        source,
+        enabled,
+        captureScreenAudio: captureScreenAudio,
+        audioCaptureOptions: audioCaptureOptions,
+        cameraCaptureOptions: cameraCaptureOptions,
+        screenShareCaptureOptions: screenShareCaptureOptions,
+      );
     });
+  }
+
+  /// An off for a track between two sessions: a share goes, a mic or camera goes out muted.
+  Future<void> _gravixOffForPending(
+    TrackSource source,
+    LocalTrackPublication pending,
+    AudioCaptureOptions? audioCaptureOptions,
+    CameraCaptureOptions? cameraCaptureOptions,
+  ) async {
+    if (source == TrackSource.screenShareVideo) {
+      await _gravixDropPending(pending, notify: true);
+      final screenAudio = _gravixPendingFor(TrackSource.screenShareAudio);
+      if (screenAudio != null) await _gravixDropPending(screenAudio, notify: true);
+      return;
+    }
+    await _gravixMutePending(
+      pending,
+      stopOnMute: switch (source) {
+        TrackSource.camera => cameraCaptureOptions?.stopCameraCaptureOnMute ?? true,
+        TrackSource.microphone => audioCaptureOptions?.stopAudioCaptureOnMute ?? true,
+        _ => true,
+      },
+    );
+  }
+
+  /// GRAVIX (0.8.4): the room service's leave: mic and camera off now, without the publish queue a
+  /// slow publish may be holding. Never throws.
+  @internal
+  Future<void> gravixAllOffForLeave() async {
+    gravixMicWanted = false;
+    gravixCameraWanted = false;
+    for (final source in [TrackSource.microphone, TrackSource.camera]) {
+      try {
+        await getTrackPublicationBySource(source)?.mute();
+      } catch (e) {
+        logger.warning('mute for the leave: ${e.runtimeType}');
+      }
+    }
   }
 
   bool _allParticipantsAllowed = true;

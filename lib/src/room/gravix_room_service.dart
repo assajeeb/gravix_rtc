@@ -2321,6 +2321,17 @@ class GravixRoomService implements GravixAudioHost {
       // identity callbacks report only the real changes: onUserOffline for who
       // left during the outage, onUserJoined for who joined, nothing for the rest
       // (0.4.6; before, everyone got onUserOffline and nobody onUserJoined).
+      // GRAVIX (0.8.4): a track a reconnect could not bring back: the app shows the truth
+      ..on<LocalTrackRepublishFailedEvent>((e) {
+        if (_disposed) return;
+        if (e.publication.source == TrackSource.microphone) {
+          _micApplied = false;
+          isMicMuted.value = true;
+        } else if (e.publication.source == TrackSource.camera) {
+          isCameraEnabled.value = false;
+          unawaited(_effect.onCameraStopped());
+        }
+      })
       ..on<RoomReconnectingEvent>((_) {
         debugPrint('Gravix reconnecting…');
         _restartDropped ??= <String>{};
@@ -2937,6 +2948,13 @@ class GravixRoomService implements GravixAudioHost {
         }
         if (track == null) {
           await local.setMicrophoneEnabled(enabled);
+        } else if (enabled && _wantedMic == false) {
+          // GRAVIX (0.8.4): tapped off while the capture opened: the newest call decides
+          await track.stop();
+          await track.dispose();
+          // turned on again during the close: that call decides, and the capture is gone
+          if (_wantedMic == true) await _setMicEnabledNow(true);
+          return;
         } else if (enabled) {
           await local.publishAudioTrack(track);
         } else {
@@ -3015,6 +3033,8 @@ class GravixRoomService implements GravixAudioHost {
       );
       // turned off while the session moved: that call has the last word
       if (enabled && local != null && published == null) return false;
+      // GRAVIX (0.8.4): a newer call came while this one waited: that one has the last word
+      if (local != null && local.gravixCameraWanted != enabled) return false;
       // before the facing, whose write may wait 5 s for an answer: the camera is up now
       isCameraEnabled.value = enabled;
       await _publishFacing();
@@ -3043,12 +3063,42 @@ class GravixRoomService implements GravixAudioHost {
     final owner = _effect.cameraOwner;
     final local = localParticipant;
     if (owner == null || local == null) return false;
+    // GRAVIX (0.8.4): one call number for this path: the newest call decides, and a stale one does
+    // nothing further. An on waits for the calls before it, so no two touch the camera at once.
+    final call = ++_ownedCameraCall;
+    if (!enabled) _ownedCameraOffs++;
+    final offs = _ownedCameraOffs;
+    if (enabled) local.gravixCameraWanted = true;
+    final busy = _ownedCameraBusy;
+    final done = Completer<void>();
+    _ownedCameraBusy = busy == null ? done.future : Future.wait([busy, done.future]).then((_) {});
+    try {
+      if (enabled && busy != null) {
+        await busy;
+        if (call != _ownedCameraCall) return true;
+      }
+      return await _setOwnedCameraEnabledNow(enabled, owner, local, call, offs);
+    } finally {
+      done.complete();
+    }
+  }
+
+  int _ownedCameraCall = 0;
+  int _ownedCameraOffs = 0;
+  Future<void>? _ownedCameraBusy;
+
+  Future<bool> _setOwnedCameraEnabledNow(bool enabled, GravixCameraEffect owner, LocalParticipant local, int call, int offs) async {
+    // GRAVIX (0.8.4): a camera between two sessions: its publication comes back, no second one opens
+    if (enabled && local.gravixRepublishPending(TrackSource.camera)) {
+      final back = await local.gravixAfterHeldTrack(TrackSource.camera);
+      if (!back || offs != _ownedCameraOffs) return true; // left, or turned off again: that call has the last word
+    }
     final pub = local.getTrackPublicationBySource(TrackSource.camera);
     final ownsTrack = pub?.track is LocalVideoTrack && _effect.target?.trackId == pub!.track!.mediaStreamTrack.id;
     if (!enabled && pub != null && !ownsTrack) return false; // a normal-camera track: the normal path turns it off
     if (enabled && !ownsTrack && !await owner.canOwnCamera()) return false;
     try {
-      local.gravixCameraWanted = enabled;
+      if (!enabled) local.gravixCameraWanted = false;
       if (enabled) {
         if (ownsTrack) return true;
         final track = await owner.openCamera(
@@ -3059,22 +3109,52 @@ class GravixRoomService implements GravixAudioHost {
             stopCameraCaptureOnMute: false,
           ),
         );
+        // GRAVIX (0.8.4): after every wait the newest call decides: an off during it closes this camera
+        bool turnedOff() => offs != _ownedCameraOffs;
+        Future<void> undoIfTurnedOff() async {
+          if (!turnedOff()) return;
+          final up = local.getTrackPublicationBySource(TrackSource.camera);
+          if (up != null && identical(up.track, track)) await local.removePublishedTrack(up.sid);
+          await _effect.onCameraStopped();
+          await owner.detach();
+          if (!local.gravixCameraWanted) isCameraEnabled.value = false;
+        }
+
+        if (turnedOff()) {
+          await undoIfTurnedOff();
+          return true;
+        }
         try {
           await local.publishVideoTrack(track);
         } catch (_) {
           await owner.detach();
           rethrow;
         }
+        if (turnedOff()) {
+          await undoIfTurnedOff();
+          return true;
+        }
         await _publishFacing();
+        if (turnedOff()) {
+          await undoIfTurnedOff();
+          return true;
+        }
         isCameraEnabled.value = true;
         await _effect.onCameraTrack(GravixVideoEffectTarget.fromTrack(track));
+        await undoIfTurnedOff();
       } else {
+        // GRAVIX (0.8.4): off from here on, whatever the effect's close takes
+        isCameraEnabled.value = false;
         if (pub?.sid != null) await local.removePublishedTrack(pub!.sid);
+        // GRAVIX (0.8.4): a full rejoin may hold the camera to publish again
+        await local.gravixDropPendingRepublish(TrackSource.camera);
         await _effect.onCameraStopped();
         isCameraEnabled.value = false;
       }
     } catch (e) {
       debugPrint('Error setCameraEnabled($enabled) via "${owner.name}": $e');
+      // GRAVIX (0.8.4): a later move must not open it; a newer call answers for itself
+      if (enabled && call == _ownedCameraCall) local.gravixCameraEnableFailed();
     }
     return true;
   }
@@ -3331,8 +3411,12 @@ class GravixRoomService implements GravixAudioHost {
       final local = _room?.localParticipant;
       if (local != null) {
         // Disable mic first — stops the encoder and releases audio focus
-        await local.setMicrophoneEnabled(false);
-        await local.setCameraEnabled(false);
+        if (local.room.roomOptions.recovery.republishHonorsOffCalls) {
+          await local.gravixAllOffForLeave(); // GRAVIX (0.8.4): not behind a slow publish
+        } else {
+          await local.setMicrophoneEnabled(false);
+          await local.setCameraEnabled(false);
+        }
         await local.unpublishAllTracks(notify: true);
       }
       await _room?.disconnect();
@@ -3348,6 +3432,7 @@ class GravixRoomService implements GravixAudioHost {
       if (!_disposed) {
         lowDataActive.value = false;
         isConnected.value = false;
+        isCameraEnabled.value = false; // GRAVIX (0.8.4)
         activeSpeakers.value = <String>{};
         remoteFacing.value = <String, String>{};
       }
