@@ -24,7 +24,8 @@ import '../../logger.dart';
 import '../../options.dart';
 import '../http_client/io.dart';
 import '../websocket.dart';
-import 'standby_types.dart' show GravixStandbyDial, GravixStandbyTaken, kGravixStandbyUpgradeTimeout;
+import 'standby_types.dart'
+    show GravixStandbyDial, GravixStandbyTaken, kGravixStandbyRedialMaxConnects, kGravixStandbyUpgradeTimeout;
 
 Future<GravixRtcWebSocketIO> lkWebSocketConnect(
   Uri uri, {
@@ -365,7 +366,8 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
   /// it answered late, its WebSocket (a second server session) would have been
   /// left open with nobody reading it.
   ///
-  /// Now: the upgrade over the warm connection gets [bound] (3 x RTT, 0.5-1.5 s,
+  /// Now: the upgrade over the warm connection gets [bound] (3 x RTT, floored at
+  /// 0.4 s in the signal isolate / 0.5 s, 0.8 s under 30 ms RTT, capped at 1.5 s;
   /// standby_types.dart). Past it a fresh dial starts, and the two race -- but not
   /// to the server: the fresh connection's TCP + TLS run while the warm upgrade may
   /// still answer, and the moment the fresh socket is connected (before its upgrade
@@ -376,7 +378,21 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
   ///    signal connection drop, and nothing more of it can arrive after the fresh
   ///    join), then the fresh upgrade is written.
   /// So the server never gets the fresh join and then a late warm one (which would
-  /// replace the session the client keeps, as DUPLICATE_IDENTITY). A warm upgrade
+  /// replace the session the client keeps, as DUPLICATE_IDENTITY).
+  ///
+  /// GRAVIX (2026-11-08, field: Redmi on Wi-Fi, 28 ms to dac1, wsOpen 5.9 s after
+  /// wsConnecting, stalled_redialed): the fresh dial's connection is hedged on
+  /// its own, a parallel socket every [bound] (up to
+  /// [kGravixStandbyRedialMaxConnects]). Up to 0.8.4 it inherited the join's
+  /// hedge (a parallel socket only every Timeouts.connection, 10 s) and, being
+  /// hedged, had no connect timeout: one socket whose SYN was lost waited for
+  /// the OS's retransmissions (1 s, 3 s, 7 s) -- on the very path that had just
+  /// lost the standby's answer. Still one join on the server: the hedge hands
+  /// the client ONE socket (the first up; every other one is cancelled or
+  /// destroyed unwritten), and that socket's gate below decides the race.
+  /// Timeline (`standby`): `freshUpMs` (that socket up, from the start of the
+  /// upgrade over the standby connection), `freshConnects` (sockets started).
+  /// A warm upgrade
   /// that still completes after it was abandoned (its 101 already on the way) is
   /// closed at once. Returns null when the warm connection failed outright (the
   /// caller dials cold); rethrows the server's own answer (401/403/404...).
@@ -414,16 +430,22 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
       ),
     );
 
+    // the fresh dial (after the bound): sockets it started, when its socket was up
+    var freshConnects = 0;
+    int? freshUpMs;
+
     GravixRtcWebSocketIO? warmResult(String path) {
       final ws = warmWs;
       if (ws == null) return null;
       logger.fine('[WebSocketIO] Connected (standby connection, $path)');
+      final raced = path != 'standby';
       return GravixRtcWebSocketIO._(ws, options)
         ..gravixDial = GravixStandbyDial(
           path,
           boundMs: bound.inMilliseconds,
-          stalledAfterMs: path == 'standby' ? null : bound.inMilliseconds,
+          stalledAfterMs: raced ? bound.inMilliseconds : null,
           totalMs: watch.elapsedMilliseconds,
+          freshConnects: raced ? freshConnects : null,
         );
     }
 
@@ -450,22 +472,23 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
     logger.warning('[WebSocketIO] standby upgrade stalled after ${bound.inMilliseconds} ms, racing a fresh dial');
     final freshClient = createSdkIoHttpClient(
       networkOptions,
+      onConnect: () => freshConnects++,
       beforeUse: () {
         abort?.markConnected();
         if (warmWs != null) throw StateError('standby upgrade answered first');
         abandoned = true;
+        freshUpMs = watch.elapsedMilliseconds;
         // closes the warm connection's socket: its pending upgrade fails at once
         try {
           warmClient.close(force: true);
         } catch (_) {}
       },
-      hedge: abort?.hedge,
+      // (GRAVIX 2026-11-08: its own hedge, see above; not the join's 10 s one)
+      hedge: GravixConnectHedge(bound, maxConnects: kGravixStandbyRedialMaxConnects),
     );
-    if (abort != null) {
-      // GRAVIX (2026-10-11): the fresh dial ends at the dial's bound as well
-      if (abort.hedge == null) freshClient.connectionTimeout = abort.bound;
-      abort.track(freshClient);
-    }
+    // GRAVIX (2026-10-11): the fresh dial ends at the dial's bound as well (the
+    // hedge has no end of its own: the bound closes the client, which cancels it)
+    abort?.track(freshClient);
     final fresh = io.WebSocket.connect(uri.toString(), headers: headers, customClient: freshClient);
     final freshSettled = Completer<void>();
     io.WebSocket? freshWs;
@@ -507,6 +530,8 @@ class GravixRtcWebSocketIO extends GravixRtcWebSocket {
               boundMs: bound.inMilliseconds,
               stalledAfterMs: bound.inMilliseconds,
               totalMs: watch.elapsedMilliseconds,
+              freshUpMs: freshUpMs,
+              freshConnects: freshConnects,
             );
         }
         if (freshSettled.isCompleted && freshError != null) {

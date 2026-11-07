@@ -70,9 +70,14 @@ import 'gravix_room_refused.dart';
 /// What a join dials.
 @immutable
 class GravixJoinTarget {
-  const GravixJoinTarget({required this.url, required this.token});
+  const GravixJoinTarget({required this.url, required this.token, this.homeRegion});
   final String url;
   final String token;
+
+  /// 0.9.0: the room's home region the token named (viewers), if any: the Room's
+  /// latency move keeps a viewer whose home is close to the better region
+  /// (Room.gravixHomeRegion).
+  final String? homeRegion;
 
   @override
   String toString() => 'GravixJoinTarget($url)'; // never the token
@@ -708,6 +713,7 @@ class GravixPrejoin {
     final Room room;
     try {
       room = _room = _createRoom();
+      room.gravixHomeRegion = t.homeRegion;
     } catch (e) {
       _error = e;
       mark(GravixJoinEventKind.connectFailed, e.runtimeType.toString(), 'createRoom threw ${e.runtimeType}');
@@ -799,7 +805,8 @@ class GravixPrejoin {
       if (path == 'redial' || path == 'standby_late') {
         _log(
           'standbyRaceWon=${path == 'redial' ? 'fresh' : 'standby'}',
-          'stalledAfter=${ms('stalledAfterMs')} dial=${ms('dialMs')}',
+          'stalledAfter=${ms('stalledAfterMs')} freshUp=${ms('freshUpMs')} '
+              'connects=${sb['freshConnects'] ?? '-'} dial=${ms('dialMs')}',
         );
       }
       final stale = switch ((outcome, path, sb['reused'])) {

@@ -32,7 +32,7 @@ abstract final class GravixStandby {
   /// throws. Also reads the device info the join's URL carries, so the tap does
   /// not. [rttMs]: the round trip to that host if the app knows it (its region
   /// probe); the join's upgrade over the standby connection gets 3 x RTT
-  /// (0.5-1.5 s; 1.5 s unknown) before a fresh dial races it.
+  /// (0.4-1.5 s; 0.8 s under 30 ms; 1.5 s unknown) before a fresh dial races it.
   static Future<bool> open(String url, String token, {int? rttMs}) async {
     // 2026-10-12: nothing is opened to a retired Gravix host (false, as for any
     // standby that could not open; the join itself throws RetiredServerException).
@@ -50,9 +50,11 @@ abstract final class GravixStandby {
   }
 
   /// The shortest wait for the join's upgrade over a standby connection when
-  /// the app passed an [open] `rttMs` below 30 ms. Default 1.5 s since 0.7.2
-  /// (field 2026-10-27: 0 stalled_redialed in 30 joins, 2 in 14 with the old
-  /// 0.4 s); null = the old floor (0.4 s in the signal isolate, else 0.5 s).
+  /// the app passed an [open] `rttMs` below 30 ms. Default 0.8 s since 0.9.0
+  /// (1.5 s in 0.7.2-0.8.x: field 2026-10-27, 0 stalled_redialed in 30 joins, 2
+  /// in 14 with the old 0.4 s; field 2026-11-08, a standby that really stalled
+  /// paid all 1.5 s before its fresh dial started); null = the old floor (0.4 s
+  /// in the signal isolate, else 0.5 s).
   ///
   /// On such a path 3 x RTT is ~20 ms and the wait is the 0.5 s floor, which is
   /// about the APP, not the network: on a real Android phone 6 ms from its SFU,
@@ -60,7 +62,7 @@ abstract final class GravixStandby {
   /// join dialled again (timeline `standby.outcome: stalled_redialed`) and paid
   /// +1.4 s. A floor of e.g. 1 s lets such a late reply win. The cost: when the
   /// standby connection is really dead (a network change since it was opened),
-  /// the fresh dial starts that much later. Higher RTTs keep 3 x RTT (0.5-1.5 s).
+  /// the fresh dial starts that much later. Higher RTTs keep 3 x RTT (0.4-1.5 s).
   static Duration? get lowRttUpgradeFloor => gravixStandbyLowRttUpgradeFloor;
   static set lowRttUpgradeFloor(Duration? floor) => gravixStandbyLowRttUpgradeFloor = floor;
 

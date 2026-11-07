@@ -48,6 +48,7 @@ class GravixRecoveryOptions {
     this.resumePeerRestartWait = const Duration(seconds: 3),
     this.lastGoodRegionList = true,
     this.mediaRefusalFailover = true,
+    this.latencyRegionMove = true,
     this.restartAbortsOnSignalLoss = true,
     this.uplinkFeedbackStallFor = const Duration(seconds: 5),
     this.deferNegotiateDuringResume = true,
@@ -110,6 +111,7 @@ class GravixRecoveryOptions {
     resumePeerRestartWait: Duration.zero,
     lastGoodRegionList: false,
     mediaRefusalFailover: false,
+    latencyRegionMove: false,
     restartAbortsOnSignalLoss: false,
     uplinkFeedbackStallFor: Duration.zero,
     deferNegotiateDuringResume: false,
@@ -459,6 +461,19 @@ class GravixRecoveryOptions {
   /// refusal reaches the app as before.
   final bool mediaRefusalFailover;
 
+  /// GRAVIX (0.9.0, 2026-11-08): a LISTENER (the local participant publishes no
+  /// track) moves once per session, by a full reconnect, to the region the
+  /// start-up measurement now holds for this network, when that region is not
+  /// the connected one, takes the session's media, is at least max(50 ms, 30 %)
+  /// faster (kGravixLatencyMoveMinGain / kGravixLatencyMoveMinGainRatio), and
+  /// the room's home region is not within the home margin of it. Field, Tuki: a
+  /// Doha viewer joined a dac1 room on dac1 (~320 ms) while doh1 measured ~20 ms.
+  /// A publisher never moves this way (an audible cut for everyone); a media move
+  /// under way, a reconnect, or an earlier media move of the session wins. Log
+  /// lines `[GravixRegion] latencyMove ...`. Off: a session stays where it joined
+  /// (the 0.8.4 behaviour).
+  final bool latencyRegionMove;
+
   /// On a flapping network (Wi-Fi going off and on every few seconds) a full
   /// reconnect that lost its own signal socket kept waiting anyway -- 10 s for
   /// the primary connection, or for the publisher once ICE had brought the
@@ -620,6 +635,7 @@ class GravixRecoveryOptions {
     Duration? resumePeerRestartWait,
     bool? lastGoodRegionList,
     bool? mediaRefusalFailover,
+    bool? latencyRegionMove,
     bool? restartAbortsOnSignalLoss,
     Duration? uplinkFeedbackStallFor,
     bool? deferNegotiateDuringResume,
@@ -680,6 +696,7 @@ class GravixRecoveryOptions {
     resumePeerRestartWait: resumePeerRestartWait ?? this.resumePeerRestartWait,
     lastGoodRegionList: lastGoodRegionList ?? this.lastGoodRegionList,
     mediaRefusalFailover: mediaRefusalFailover ?? this.mediaRefusalFailover,
+    latencyRegionMove: latencyRegionMove ?? this.latencyRegionMove,
     restartAbortsOnSignalLoss: restartAbortsOnSignalLoss ?? this.restartAbortsOnSignalLoss,
     uplinkFeedbackStallFor: uplinkFeedbackStallFor ?? this.uplinkFeedbackStallFor,
     deferNegotiateDuringResume: deferNegotiateDuringResume ?? this.deferNegotiateDuringResume,

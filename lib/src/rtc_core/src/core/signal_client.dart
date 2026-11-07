@@ -415,6 +415,11 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
             'boundMs': dial?.boundMs ?? taken.upgradeBound?.inMilliseconds,
             'stalledAfterMs': dial?.stalledAfterMs,
             'dialMs': dial?.totalMs,
+            // (0.9.0, after a race) the fresh dial's socket up, from the start of
+            // the standby upgrade (redial only), and the sockets it started (> 1:
+            // its first one was not up within a bound; websocket/io.dart)
+            'freshUpMs': dial?.freshUpMs,
+            'freshConnects': dial?.freshConnects,
             // false: the warm connection was gone and the upgrade opened a new one
             // (only meaningful when the upgrade went over it: a redial or a cold
             // dial after an error never touches the standby client's counter)

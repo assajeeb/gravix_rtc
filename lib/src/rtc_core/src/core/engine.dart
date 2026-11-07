@@ -2602,7 +2602,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     final gravixMoveTo = _gravixRestartUrl;
     _gravixRestartUrl = null;
     if (regionUrl == null && gravixMoveTo != null) {
-      logger.info('full reconnect: media move to $gravixMoveTo');
+      logger.info('full reconnect: move to $gravixMoveTo (media or latency move)');
       regionUrl = gravixMoveTo;
     }
     if (_isClosed) {

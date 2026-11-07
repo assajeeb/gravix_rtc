@@ -4,6 +4,8 @@
 // a token minted by the app's own backend carries no region list, and the join
 // still goes to the measured nearest region -- with no probe on the join path.
 
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gravix_rtc/gravix_rtc.dart';
@@ -91,5 +93,98 @@ void main() {
     expect(await service(audio).connect(url: doh.url, token: 'opaque', media: GravixRoomMedia.audio), isTrue);
     expect(audio, [doh.url]);
     expect(probes, isEmpty);
+  });
+
+  // 0.9.0 (2026-11-08), field, Tuki: a Doha viewer of a dac1 room joined dac1 (~320 ms): the
+  // start-up run that would have said doh1 (~20 ms) was still in flight.
+  group('0.9.0: the connect waits for the start-up measurement', () {
+    const doh = GravixRegionUrl(region: 'doh1', url: 'wss://rtc-doh1.example.com');
+    const dac = GravixRegionUrl(region: 'dac1', url: 'wss://rtc-dac1.example.com');
+    GravixRegionMeasurementHandle? handle;
+    tearDown(() => handle?.stop());
+
+    GravixRegionMeasurementHandle start(Completer<void> gate) => handle = gravixStartRegionMeasurement(
+      regionsUrl: 'https://gw.example.com/v1/regions',
+      fetchDirectory: (_) async => GravixRegionDirectory.fromJson({
+        'regions': [
+          {'region': 'doh1', 'url': doh.url, 'est_rtt_ms': 20},
+          {'region': 'dac1', 'url': dac.url, 'est_rtt_ms': 320},
+        ],
+        'shortlist': ['doh1', 'dac1'],
+      }),
+      sampler: (r) async {
+        await gate.future;
+        return Duration(milliseconds: r.region == 'doh1' ? 20 : 320);
+      },
+      store: GravixMemoryRegionListStore(),
+      watchNetwork: false,
+      refresh: Duration.zero,
+      budget: const Duration(seconds: 5),
+      networkType: () async => 'wifi',
+      networkKey: () async => 'wifi',
+    );
+
+    GravixRoomService waiting(List<String> connected, Duration wait) => GravixRoomService(
+      regionProber: GravixRegionProber(probe: (url) async => probes.add(url)),
+      regionDecisionCache: GravixRegionDecisionCache(),
+      connectRoom: (room, url, token) async => connected.add(url),
+      regionWait: wait,
+    );
+
+    test('a run in flight is waited for: the viewer joins doh1, not its home dac1', () async {
+      final gate = Completer<void>();
+      start(gate);
+      Timer(const Duration(milliseconds: 100), gate.complete);
+      final connected = <String>[];
+      expect(
+        await waiting(connected, const Duration(seconds: 2)).connect(url: dac.url, token: 'opaque', homeRegion: 'dac1'),
+        isTrue,
+      );
+      expect(connected, [doh.url]);
+    });
+
+    test('past the bound: the est_rtt_ms fallback dials doh1', () async {
+      final gate = Completer<void>();
+      start(gate);
+      final connected = <String>[];
+      expect(
+        await waiting(
+          connected,
+          const Duration(milliseconds: 150),
+        ).connect(url: dac.url, token: 'opaque', homeRegion: 'dac1'),
+        isTrue,
+      );
+      expect(connected, [doh.url]);
+      gate.complete();
+    });
+
+    test('a fresh measurement that never probed the home region (not in the shortlist): the measured best', () async {
+      await gravixMeasureRegions(
+        regionsUrl: 'https://gw.example.com/v1/regions',
+        fetchDirectory: (_) async => const GravixRegionDirectory(regions: [doh, dac], shortlist: ['doh1']),
+        sampler: (r) async => const Duration(milliseconds: 20),
+        store: GravixMemoryRegionListStore(),
+        networkType: () async => 'wifi',
+      );
+      expect(gravixRegionMeasurement()?.regions.map((r) => r.region), ['doh1']);
+      final viewer = <String>[];
+      expect(await waiting(viewer, Duration.zero).connect(url: dac.url, token: 'opaque', homeRegion: 'dac1'), isTrue);
+      expect(viewer, [doh.url]);
+      final host = <String>[];
+      expect(await waiting(host, Duration.zero).connect(url: dac.url, token: 'opaque'), isTrue);
+      expect(host, [dac.url], reason: 'a host keeps its own url');
+    });
+
+    test('a host (no home region) keeps its url with nothing measured', () async {
+      final gate = Completer<void>();
+      start(gate);
+      final connected = <String>[];
+      expect(
+        await waiting(connected, const Duration(milliseconds: 150)).connect(url: dac.url, token: 'opaque'),
+        isTrue,
+      );
+      expect(connected, [dac.url]);
+      gate.complete();
+    });
   });
 }

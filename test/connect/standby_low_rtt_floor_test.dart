@@ -15,9 +15,10 @@ void main() {
     gravixStandbyInSignalIsolate = false;
   });
 
-  test('default (0.7.2): an RTT under 30 ms waits 1.5 s', () {
-    expect(GravixStandby.lowRttUpgradeFloor, const Duration(milliseconds: 1500));
-    expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 1500));
+  // 0.9.0 (field 2026-11-08): 0.8 s; 1.5 s in 0.7.2-0.8.x (standby_hedge_test.dart)
+  test('default (0.9.0): an RTT under 30 ms waits 0.8 s', () {
+    expect(GravixStandby.lowRttUpgradeFloor, const Duration(milliseconds: 800));
+    expect(gravixStandbyUpgradeBound(6), const Duration(milliseconds: 800));
     expect(gravixStandbyUpgradeBound(30), const Duration(milliseconds: 500));
   });
 

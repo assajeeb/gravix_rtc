@@ -87,6 +87,55 @@ void main() {
     }
   });
 
+  group('shared fixture: est_rtt_ms fallback of a join with nothing measured', () {
+    for (final c in [for (final c in _fixture['estFallback'] as List) Map<String, dynamic>.from(c as Map)]) {
+      test(c['name'] as String, () {
+        final out = gravixEstFallbackPick(
+          [
+            for (final r in c['regions'] as List)
+              GravixEstRegion(
+                region: r['region'] as String,
+                estRttMs: (r['est_rtt_ms'] as num?)?.toDouble(),
+                allowsMedia: r['allows_media'] as bool? ?? true,
+              ),
+          ],
+          homeRegion: c['home'] as String,
+          shortlist: [for (final s in c['shortlist'] as List) s as String],
+        );
+        final ex = c['expect'] as Map?;
+        if (ex == null) {
+          expect(out, isNull);
+          return;
+        }
+        expect(out?.region, ex['region']);
+        expect(out?.reason.wire, ex['reason']);
+      });
+    }
+  });
+
+  group('shared fixture: in-session latency move decision', () {
+    for (final c in [for (final c in _fixture['latencyMove'] as List) Map<String, dynamic>.from(c as Map)]) {
+      test(c['name'] as String, () {
+        final out = gravixLatencyMoveDecision(
+          enabled: c['enabled'] as bool,
+          moved: c['moved'] as bool,
+          busy: c['busy'] as bool,
+          publishing: c['publishing'] as bool,
+          connectedRegion: c['connected'] as String?,
+          connectedRttMs: c['connected_rtt_ms'] as int?,
+          connectedEstMs: c['connected_est_ms'] as int?,
+          targetRegion: c['target'] as String?,
+          targetRttMs: c['target_rtt_ms'] as int?,
+          targetAllowsMedia: c['target_allows_media'] as bool,
+          homeRegion: c['home'] as String?,
+          homeRttMs: c['home_rtt_ms'] as int?,
+        );
+        expect(out.wire, c['expect']);
+        expect(out.moves, c['expect'] == 'move');
+      });
+    }
+  });
+
   group('hysteresis across measurements', () {
     test('BD field case: sgp1/blr1 noise never moves the user (6 runs)', () async {
       final first = await measure({'sgp1': 60, 'blr1': 56, 'fra1': 186});

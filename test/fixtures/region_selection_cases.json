@@ -1,5 +1,5 @@
 {
- "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: region selection with hysteresis (gravixSelectRegion / selectRegion) and the home-region margin. Edit both copies together. 2026-10-05.",
+ "_comment": "Shared by the JS (test/fixtures) and Flutter (test/fixtures) SDK tests: region selection with hysteresis (gravixSelectRegion / selectRegion), the home-region margin, the join's est_rtt_ms fallback (gravixEstFallbackPick, 2026-11-08) and the in-session latency move decision (gravixLatencyMoveDecision, 2026-11-08). Edit both copies together. 2026-10-05.",
  "select": [
   {
    "name": "no anchor: the fastest",
@@ -407,6 +407,443 @@
    "homeMs": 40,
    "fastestMs": 40,
    "expect": true
+  }
+ ],
+ "estFallback": [
+  {
+   "name": "field 2026-11-08 Doha viewer, home dac1 est 320 vs doh1 est 20: doh1",
+   "home": "dac1",
+   "regions": [
+    {
+     "region": "doh1",
+     "est_rtt_ms": 20
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 150
+    },
+    {
+     "region": "dac1",
+     "est_rtt_ms": 320
+    }
+   ],
+   "shortlist": [
+    "doh1",
+    "blr1",
+    "dac1"
+   ],
+   "expect": {
+    "region": "doh1",
+    "reason": "est"
+   }
+  },
+  {
+   "name": "home within the home margin of the best estimate: home",
+   "home": "blr1",
+   "regions": [
+    {
+     "region": "sgp1",
+     "est_rtt_ms": 56
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 75
+    }
+   ],
+   "shortlist": [],
+   "expect": {
+    "region": "blr1",
+    "reason": "home"
+   }
+  },
+  {
+   "name": "home is the best estimate: home",
+   "home": "sgp1",
+   "regions": [
+    {
+     "region": "sgp1",
+     "est_rtt_ms": 40
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 90
+    }
+   ],
+   "shortlist": [],
+   "expect": {
+    "region": "sgp1",
+    "reason": "home"
+   }
+  },
+  {
+   "name": "shortlist order first: the first shortlist region with an estimate is the best",
+   "home": "fra1",
+   "regions": [
+    {
+     "region": "fra1",
+     "est_rtt_ms": 200
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 60
+    },
+    {
+     "region": "sgp1",
+     "est_rtt_ms": 50
+    }
+   ],
+   "shortlist": [
+    "blr1",
+    "sgp1"
+   ],
+   "expect": {
+    "region": "blr1",
+    "reason": "est"
+   }
+  },
+  {
+   "name": "no shortlist: the lowest estimate",
+   "home": "fra1",
+   "regions": [
+    {
+     "region": "fra1",
+     "est_rtt_ms": 200
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 60
+    },
+    {
+     "region": "sgp1",
+     "est_rtt_ms": 50
+    }
+   ],
+   "shortlist": [],
+   "expect": {
+    "region": "sgp1",
+    "reason": "est"
+   }
+  },
+  {
+   "name": "media filter: an audio-only best is skipped for a video join",
+   "home": "dac1",
+   "regions": [
+    {
+     "region": "doh1",
+     "est_rtt_ms": 20,
+     "allows_media": false
+    },
+    {
+     "region": "blr1",
+     "est_rtt_ms": 150
+    },
+    {
+     "region": "dac1",
+     "est_rtt_ms": 320
+    }
+   ],
+   "shortlist": [
+    "doh1",
+    "blr1",
+    "dac1"
+   ],
+   "expect": {
+    "region": "blr1",
+    "reason": "est"
+   }
+  },
+  {
+   "name": "home has no estimate: nothing (the token url)",
+   "home": "dac1",
+   "regions": [
+    {
+     "region": "doh1",
+     "est_rtt_ms": 20
+    },
+    {
+     "region": "dac1",
+     "est_rtt_ms": null
+    }
+   ],
+   "shortlist": [],
+   "expect": null
+  },
+  {
+   "name": "home not in the directory: nothing (the token url)",
+   "home": "nyc1",
+   "regions": [
+    {
+     "region": "doh1",
+     "est_rtt_ms": 20
+    },
+    {
+     "region": "dac1",
+     "est_rtt_ms": 320
+    }
+   ],
+   "shortlist": [],
+   "expect": null
+  },
+  {
+   "name": "home does not allow the media: nothing (the pick's media fallback decides)",
+   "home": "doh1",
+   "regions": [
+    {
+     "region": "doh1",
+     "est_rtt_ms": 20,
+     "allows_media": false
+    },
+    {
+     "region": "dac1",
+     "est_rtt_ms": 320
+    }
+   ],
+   "shortlist": [],
+   "expect": null
+  }
+ ],
+ "latencyMove": [
+  {
+   "name": "field 2026-11-08 Doha listener on dac1 (320 ms), doh1 held at 20 ms: move",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": "dac1",
+   "home_rtt_ms": 320,
+   "expect": "move"
+  },
+  {
+   "name": "a publisher stays (a move mid-speech cuts everyone)",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": true,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "publishing"
+  },
+  {
+   "name": "the option is off",
+   "enabled": false,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "option-off"
+  },
+  {
+   "name": "one latency move per session",
+   "enabled": true,
+   "moved": true,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "already-moved"
+  },
+  {
+   "name": "a media move or a reconnect is under way",
+   "enabled": true,
+   "moved": false,
+   "busy": true,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "busy"
+  },
+  {
+   "name": "nothing measured",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": null,
+   "target_rtt_ms": null,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "no-measurement"
+  },
+  {
+   "name": "already on the held region",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "dac1",
+   "target_rtt_ms": 320,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "same-region"
+  },
+  {
+   "name": "the held region does not take the session's media",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": 320,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": false,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "target-media"
+  },
+  {
+   "name": "the connected region was not measured",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": null,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "connected-unmeasured"
+  },
+  {
+   "name": "home within the home margin of the held region: stays home",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "blr1",
+   "connected_rtt_ms": 75,
+   "target": "sgp1",
+   "target_rtt_ms": 56,
+   "target_allows_media": true,
+   "home": "blr1",
+   "home_rtt_ms": 75,
+   "expect": "home"
+  },
+  {
+   "name": "gain under the 50 ms floor",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "blr1",
+   "connected_rtt_ms": 120,
+   "target": "sgp1",
+   "target_rtt_ms": 75,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "small-gain"
+  },
+  {
+   "name": "gain at the 50 ms floor: move",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "blr1",
+   "connected_rtt_ms": 120,
+   "target": "sgp1",
+   "target_rtt_ms": 70,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "move"
+  },
+  {
+   "name": "gain under 30 % of a slow connected region",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "fra1",
+   "connected_rtt_ms": 400,
+   "target": "sgp1",
+   "target_rtt_ms": 290,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "small-gain"
+  },
+  {
+   "name": "gain at 30 % of a slow connected region: move",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "fra1",
+   "connected_rtt_ms": 400,
+   "target": "sgp1",
+   "target_rtt_ms": 280,
+   "target_allows_media": true,
+   "home": null,
+   "home_rtt_ms": null,
+   "expect": "move"
+  },
+  {
+   "name": "the connected region not measured, its est_rtt_ms stands in: move",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": null,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": "dac1",
+   "home_rtt_ms": null,
+   "connected_est_ms": 320,
+   "expect": "move"
+  },
+  {
+   "name": "the connected region not measured, its estimate within the gain floor: small-gain",
+   "enabled": true,
+   "moved": false,
+   "busy": false,
+   "publishing": false,
+   "connected": "dac1",
+   "connected_rtt_ms": null,
+   "target": "doh1",
+   "target_rtt_ms": 20,
+   "target_allows_media": true,
+   "home": "dac1",
+   "home_rtt_ms": null,
+   "connected_est_ms": 60,
+   "expect": "small-gain"
   }
  ]
 }

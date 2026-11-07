@@ -44,6 +44,7 @@ export 'src/connect/gravix_join_timeline.dart';
 export 'src/connect/gravix_join_timeline_log.dart';
 export 'src/connect/gravix_prewarm.dart';
 export 'src/connect/gravix_region_cache.dart';
+export 'src/connect/gravix_region_join_wait.dart';
 export 'src/connect/gravix_region_media.dart' hide gravixClearRegionMedia;
 export 'src/connect/gravix_region_probe_client.dart';
 export 'src/connect/gravix_region_prober.dart';

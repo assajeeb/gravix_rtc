@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.9.0 — 2026-11-08
+
+Joins wait for the region measurement, and a listener may be reconnected mid-call to a
+clearly faster region. Field, Tuki app: a viewer in Doha joining a room whose home is dac1
+(Dhaka) landed on dac1 at ~320 ms instead of doh1 (~20 ms). The app had started
+`gravixStartRegionMeasurement`, but the join did not wait for that run, and with nothing
+measured the token's url (the home region) stayed for the whole call.
+
+### Changed: behaviour
+- **Join wait.** A join (`GravixJoin` prepare / switch / warm, and `GravixRoomService.connect`)
+  with nothing fresh measured for the network waits for the measurement run in flight, or
+  starts one when the answer is stale or failed, at most `kGravixJoinMeasureWait` (800 ms). A
+  run that ended under `kGravixRegionRefreshMinAge` (30 s) ago is not started again by a join.
+  With no measurement started by the app there is no wait, as before. The wait never throws or
+  fails a join. Hosts wait too. `regionWait:` on `GravixJoin` / `GravixRoomService` sets the
+  bound (`Duration.zero` = no wait).
+- **Estimate fallback.** Still nothing measured after the wait, a viewer (the token names the
+  room's home region) joins by the console's `est_rtt_ms` from the last `/v1/regions` answer:
+  the home region when it is within max(25 ms, 30 %) of the best estimate (the first shortlist
+  region with an estimate, else the lowest), else that region, filtered by the join's media.
+  Only for a token url of the fleet; no estimates = the token url, as before. New
+  `GravixJoinUrlSource.est`; an open standby elsewhere does not override an `est` pick (as for
+  `home`). A repeat launch has the stored directory before its fetch answers.
+- **Latency move** (`GravixRecoveryOptions.latencyRegionMove`, default on). When a measurement
+  run finishes while a Room is connected, and the region it holds for this network (after the
+  confirm hysteresis) is not the connected one, a LISTENER moves once per session, by a full
+  reconnect, when: the gain is at least max(50 ms, 30 %) (`kGravixLatencyMoveMinGain`,
+  `kGravixLatencyMoveMinGainRatio`), the region takes the session's media, and the room's home
+  region is not within the home margin of it. Never when the local participant publishes a
+  track (a move mid-speech cuts everyone: `stay reason=publishing`), during a media move or a
+  reconnect, or after a media move of the session. `GravixRecoveryOptions.legacy` turns it off.
+- **Refresh after an unmeasured join.** A join that landed on a url no fresh measurement chose
+  (token, estimate) starts a measurement refresh when the last run is at least 30 s old, so the
+  latency move can act after the confirm delay (~20 s) instead of the next 5-minute refresh. A
+  latency move that landed refreshes too, so the anchor records the region from the new
+  connection.
+- **Home region outside the shortlist.** A viewer whose token url is a fleet region the
+  measurement never probed (the console's shortlist from Doha may not list dac1) joins the
+  measured best (measured regions plus the directory are the candidates; an unmeasured home
+  counts as none). A host keeps its url. The latency move uses the connected (and home)
+  region's `est_rtt_ms` when it was not measured (`rtt=320est` in the log).
+
+### Added
+- `gravixJoinUrlAsync` (the sync `gravixJoinUrl` stays a lookup), `gravixAwaitRegionForJoin`,
+  `gravixEstJoinRegion`, `gravixRefreshAfterJoin`, `gravixActiveRegionMeasurement`,
+  `gravixRegionMeasurementRuns`, `GravixRegionMeasurementHandle.inFlight` / `lastRunEndedAt`,
+  `Room.gravixHomeRegion`, `GravixJoinTarget.homeRegion`.
+- Pure rules `gravixEstFallbackPick` and `gravixLatencyMoveDecision`, with shared fixture cases
+  (`estFallback`, `latencyMove` in `test/fixtures/region_selection_cases.json`) for the React and
+  Android SDKs.
+- Log lines: `[GravixRegion] pick join -> <region> source=<measured|home|token|est|...>
+  cause=<fresh|no-measurement|stale|failed|no-handle> [waited=Nms] [est-fallback(...)]`,
+  `[GravixRegion] latencyMove from=<r> rtt=<ms> to=<r> rtt=<ms> gain=<ms> need=<ms> ... ->
+  <r> outcome=started|landed|landed-elsewhere|failed` or `... stay reason=<why>`, and
+  `[GravixRegion] refresh cause=join-source=<source>|latency-move`.
+
+### Fixed: a stalled standby cost ~6 s on a join
+Field, Tuki app (Redmi on Wi-Fi in Dhaka, dac1 at 28 ms): `standby=stalled_redialed`, wsOpen at +6.3 s.
+- A standby upgrade that gets no answer now starts its fresh socket after max(3 x RTT, 0.8 s)
+  (`kGravixStandbyHedgeFloor`) instead of 1.5 s at RTTs under 30 ms.
+- The fresh connection is hedged on its own (a parallel socket every bound, up to
+  `kGravixStandbyRedialMaxConnects` = 3) instead of inheriting the join's 10 s hedge, so a lost
+  SYN no longer costs seconds of OS retransmits. Still only one join reaches the server.
+- New timeline fields `standby.freshUpMs` / `standby.freshConnects`; log line
+  `standbyRaceWon=fresh stalledAfter= freshUp= connects= dial=`. `GravixStandby.lowRttUpgradeFloor`
+  still overrides the floor (default 0.8 s, was 1.5 s).
+
 ## 0.8.4 — 2026-11-05
 
 Fixes from a review of 0.8.3. None of these bugs was new in 0.8.3. Room-video moves (0.8.0) make full

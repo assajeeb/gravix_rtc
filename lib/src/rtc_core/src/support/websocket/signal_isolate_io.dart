@@ -413,6 +413,8 @@ abstract final class GravixSignalIsolateRuntime {
             boundMs: dial[1] as int?,
             stalledAfterMs: dial[2] as int?,
             totalMs: dial[3] as int?,
+            freshUpMs: dial[4] as int?,
+            freshConnects: dial[5] as int?,
           );
         }
         d.done.complete(ws);
@@ -687,7 +689,9 @@ Future<void> _bgDial(SendPort out, Map<int, GravixRtcWebSocketIO> sockets, _Ping
     out.send(<Object?>[
       _kDialOk,
       id,
-      dial == null ? null : <Object?>[dial.path, dial.boundMs, dial.stalledAfterMs, dial.totalMs],
+      dial == null
+          ? null
+          : <Object?>[dial.path, dial.boundMs, dial.stalledAfterMs, dial.totalMs, dial.freshUpMs, dial.freshConnects],
       info,
       GravixSignalStandby.snapshot(),
     ]);

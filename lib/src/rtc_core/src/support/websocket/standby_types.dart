@@ -72,6 +72,42 @@ const Duration kGravixStandbyJoinWait = Duration(milliseconds: 1500);
 /// round trip plus the SFU's join handling (65-360 ms in the same data set).
 Duration kGravixStandbyUpgradeTimeout = const Duration(milliseconds: 1500);
 
+/// GRAVIX (0.9.0): the shortest time a join's upgrade over a standby connection
+/// gets before a fresh socket races it, at an RTT under [kGravixStandbyLowRttMs]
+/// (the default of [gravixStandbyLowRttUpgradeFloor]); higher RTTs keep 3 x RTT
+/// over the 0.4 / 0.5 s floors, so a stalled standby costs at most about
+/// max(3 x RTT, 0.8 s) before the fresh dial starts.
+///
+/// Field 2026-11-08 (Tuki, Redmi on Wi-Fi, 28 ms to dac1, signal isolate on): a
+/// viewer join's upgrade over an open standby went unanswered and wsOpen came
+/// 5.9 s after wsConnecting (stalled_redialed): 1.5 s of the 0.7.2 floor before
+/// the fresh dial started, then a fresh connection with no parallel socket for
+/// 10 s (websocket/io.dart _raceStandby, fixed with
+/// [kGravixStandbyRedialMaxConnects]). 0.8 s instead of 1.5 s: 0.7.2 raised the
+/// floor because 2 of 14 joins at 11-18 ms had abandoned an upgrade the SFU was
+/// still answering with the 0.4 s floor; 0.8 s is twice that, above the SFU's
+/// own join handling (65-360 ms in the field data) plus a busy reader, and the
+/// race is decided only when the fresh socket is up (one more TCP + TLS), so a
+/// late answer in that window still wins. Check in device logs: a redial whose
+/// `dialMs - freshUpMs` is about one RTT means the standby connection was dead
+/// (the shorter floor paid off); seconds there mean the SFU was slow to answer
+/// the fresh join too -- then raise [GravixStandby.lowRttUpgradeFloor] again.
+///
+/// Flutter only: the JS SDK's standby is protocol-level (the join is the
+/// socket's first message, no upgrade to race) and the Android SDK has no
+/// standby pre-connect.
+const Duration kGravixStandbyHedgeFloor = Duration(milliseconds: 800);
+
+/// GRAVIX (0.9.0): sockets the fresh dial after a stalled standby upgrade may
+/// start in all, one every upgrade bound (GravixConnectHedge): the path just
+/// lost the standby's answer, and one socket left to the OS's SYN
+/// retransmissions (1 s, 3 s, 7 s on Android) cost seconds; a parallel one at
+/// the next bound does not wait for them. The hedge hands the client the FIRST
+/// socket up and cancels the rest unwritten, so this never means a second join.
+/// 3: one socket, then two more over two bounds (<= 3 s at the cap); past them
+/// the dial's own bound (Timeouts / signalDialCap) ends it, as before.
+const int kGravixStandbyRedialMaxConnects = 3;
+
 /// Lower bound of the upgrade wait: 3 x a LAN-like RTT would be ~30 ms, shorter
 /// than the SFU's own join handling on a normal join.
 const Duration kGravixStandbyUpgradeFloor = Duration(milliseconds: 500);
@@ -92,7 +128,10 @@ bool gravixStandbyInSignalIsolate = false;
 /// 2026-10-27 (Redmi on Wi-Fi, 11-18 ms to dac1): with the 0.4 s floor 2 of 14
 /// joins abandoned a standby upgrade the SFU was still answering
 /// (stalled_redialed, 4.3 s / 5.7 s joins); with 1.5 s, 0 of 30.
-const Duration kGravixStandbyLowRttUpgradeFloorDefault = Duration(milliseconds: 1500);
+///
+/// 0.9.0: 0.8 s ([kGravixStandbyHedgeFloor], see there): a standby that really
+/// stalled cost the full 1.5 s before its fresh dial started.
+const Duration kGravixStandbyLowRttUpgradeFloorDefault = kGravixStandbyHedgeFloor;
 
 /// GRAVIX (2026-10-12): see `GravixStandby.lowRttUpgradeFloor`. Null = off.
 Duration? gravixStandbyLowRttUpgradeFloor = kGravixStandbyLowRttUpgradeFloorDefault;
@@ -123,10 +162,18 @@ Duration gravixStandbyUpgradeBound(int? rttMs) {
 /// passed, the standby connection was abandoned and closed, a fresh connection
 /// carried the upgrade: outcome `stalled_redialed`), `cold_after_error` (the warm
 /// connection failed outright, a cold dial followed).
+///
+/// 0.9.0, after a race (`standby_late`, `redial`): [freshConnects], the sockets
+/// the fresh dial started (more than 1: its first one was not up within a
+/// bound); [freshUpMs] (`redial` only), when its socket was up (TCP, + TLS for
+/// wss), from the start of the upgrade over the standby connection. [totalMs] -
+/// [freshUpMs] is the fresh upgrade's answer: the SFU's join handling + one RTT.
 class GravixStandbyDial {
-  GravixStandbyDial(this.path, {this.boundMs, this.stalledAfterMs, this.totalMs});
+  GravixStandbyDial(this.path, {this.boundMs, this.stalledAfterMs, this.totalMs, this.freshUpMs, this.freshConnects});
   final String path;
   final int? boundMs;
   final int? stalledAfterMs;
   final int? totalMs;
+  final int? freshUpMs;
+  final int? freshConnects;
 }

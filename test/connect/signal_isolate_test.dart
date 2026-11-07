@@ -211,11 +211,46 @@ void main() {
     expect(sb['outcome'], 'used');
     expect(sb['path'], 'standby');
     expect(sb['reused'], isTrue);
-    // (0.7.2: an RTT under 30 ms waits kGravixStandbyLowRttUpgradeFloorDefault)
-    expect(sb['boundMs'], 1500, reason: '3 x 6 ms, at the 1.5 s low-RTT floor (0.7.2 default)');
+    // (an RTT under 30 ms waits kGravixStandbyLowRttUpgradeFloorDefault: 1.5 s
+    // in 0.7.2-0.8.x, 0.8 s since 0.9.0)
+    expect(sb['boundMs'], 800, reason: '3 x 6 ms, at the 0.8 s low-RTT floor (0.9.0 default)');
     expect(sb['signalIsolate'], isTrue);
     expect(GravixSignalStandby.state(server.url, 'tok').state, 'none', reason: 'taken');
   });
+
+  // field 2026-11-08 (Redmi, 28 ms to dac1, signal isolate on): the race's
+  // timeline fields cross the isolate boundary
+  test(
+    'on: a stalled standby upgrade is redialled in the signal isolate; freshUpMs / freshConnects reach the join',
+    () async {
+      GravixSignalIsolate.enabled = true;
+      expect(await GravixSignalStandby.open(server.url, 'tok', rttHintMs: 28), isTrue);
+      // the standby upgrade is held 5 s by the server; the fresh one is answered
+      server.upgradeDelay = const Duration(seconds: 5);
+      final sc = SignalClient(GravixRtcWebSocket.connect);
+      addTearDown(sc.dispose);
+      final watch = Stopwatch()..start();
+      final connecting = sc.connect(
+        server.url,
+        'tok',
+        connectOptions: connectOptions(),
+        roomOptions: const RoomOptions(),
+      );
+      await _until(() => server.upgrades == 1);
+      server.upgradeDelay = Duration.zero;
+      await connecting;
+      expect(watch.elapsedMilliseconds, lessThan(800 + 700));
+      final sb = sc.gravixStandby!;
+      expect(sb['outcome'], 'stalled_redialed');
+      expect(sb['path'], 'redial');
+      expect(sb['boundMs'], 800);
+      expect(sb['stalledAfterMs'], 800);
+      expect(sb['freshConnects'], 1);
+      expect(sb['freshUpMs'], isA<int>());
+      expect(sb['freshUpMs'] as int, inInclusiveRange(800, sb['dialMs'] as int));
+      expect(server.accepts, 2);
+    },
+  );
 
   test('on: no standby for the url -> outcome none, a cold dial in the signal isolate', () async {
     GravixSignalIsolate.enabled = true;

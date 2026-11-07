@@ -22,6 +22,8 @@ import '../connect/gravix_join_timeline_log.dart';
 import '../connect/gravix_prewarm.dart';
 import '../connect/gravix_init_measure.dart';
 import '../connect/gravix_region_cache.dart';
+import '../connect/gravix_region_failover.dart' show gravixNormalizeRegionUrl, gravixRegionOfUrl;
+import '../connect/gravix_region_join_wait.dart';
 import '../connect/gravix_region_media.dart';
 import '../connect/gravix_restart_strategy.dart';
 import '../connect/gravix_region_prober.dart';
@@ -106,6 +108,7 @@ class GravixRoomService implements GravixAudioHost {
     this.reconnectPolicy,
     this.connectOptions,
     this.recovery = const GravixRecoveryOptions(),
+    this.regionWait = kGravixJoinMeasureWait,
     this.noiseSuppression = const GravixNoiseSuppressionOptions(),
     GravixRegionProber? regionProber,
     GravixRegionDecisionCache? regionDecisionCache,
@@ -348,6 +351,13 @@ class GravixRoomService implements GravixAudioHost {
   /// this service joins ([RoomOptions.recovery]). `GravixRecoveryOptions.legacy`
   /// = the 0.4.14 behaviour.
   final GravixRecoveryOptions recovery;
+
+  /// GRAVIX (0.9.0): how long a connect waits for the start-up region measurement
+  /// (gravixStartRegionMeasurement) when nothing fresh is measured for this
+  /// network: a run in flight is waited for, or one is started (not when the
+  /// last ended under 30 s ago). No measurement started by the app: no wait.
+  /// Duration.zero: no wait. See gravix_region_join_wait.dart.
+  final Duration regionWait;
 
   /// GRAVIX (2026-10-21): on-device noise suppression of the microphone
   /// ([RoomOptions.noiseSuppression]); configured before the mic track is
@@ -1179,8 +1189,21 @@ class GravixRoomService implements GravixAudioHost {
       // goes to the fastest measured region -- a lookup, nothing sent. A token
       // minted by the app's own backend carries no region list: the measured
       // regions are the list then (only when [url] is one of them).
-      final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url, media: joinMedia);
+      //
+      // 0.9.0 (2026-11-08): nothing fresh measured for this network -> wait for the run in flight
+      // (or start one), at most [regionWait]. Field, Tuki: a Doha viewer of a dac1 room joined
+      // dac1 (~320 ms) while the start-up run that would have said doh1 (~20 ms) was still out.
+      final regionWaited = await gravixAwaitRegionForJoin(bound: regionWait);
+      if (regionWaited.waited > Duration.zero) {
+        timeline?.notePath('svc:regionWait', detail: regionWaited.waited.inMilliseconds);
+      }
+      final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url, media: joinMedia, homeRegion: homeRegion);
       final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion, media: joinMedia);
+      // still nothing measured: the gateway's est_rtt_ms between home and the best estimate
+      final estPick = measuredPick != null || (gravixRegionMeasurement()?.best?.ok ?? false)
+          ? null
+          : gravixEstJoinRegion(url, _regionEntries, homeRegion: homeRegion, media: joinMedia);
+      var joinSource = 'token';
       if (measuredPick != null) {
         if (_regionEntries.isEmpty) _regionEntries = measuredList;
         _probeStartedAt = DateTime.now();
@@ -1195,6 +1218,7 @@ class GravixRoomService implements GravixAudioHost {
           fallbackReason: GravixRegionFallbackReason.none,
         );
         connectUrl = measuredPick.url;
+        joinSource = 'measured';
         connectLadder = gravixRegionFallbackLadder(
           outcome: raceOutcome,
           candidates: [for (final e in measuredList) e.url],
@@ -1223,6 +1247,7 @@ class GravixRoomService implements GravixAudioHost {
           fallbackReason: GravixRegionFallbackReason.none,
         );
         connectUrl = remembered.url;
+        joinSource = 'cache';
         // Nothing probed, nothing failed: the other candidates in gateway
         // order, then the pinned url.
         connectLadder = gravixRegionFallbackLadder(
@@ -1252,6 +1277,7 @@ class GravixRoomService implements GravixAudioHost {
         raceOutcome = outcome;
         if (regionDecisionCache) _regionCache.record(url, outcome, candidates: _regionEntries);
         connectUrl = outcome.winner ?? url;
+        joinSource = outcome.winner == null ? 'token' : 'race';
         // What to try if the winner's WebSocket refuses: the remaining
         // candidates, then the pinned url. Empty when there is nothing else.
         connectLadder = gravixRegionFallbackLadder(outcome: outcome, candidates: effectiveRegionUrls, pinnedUrl: url);
@@ -1268,7 +1294,23 @@ class GravixRoomService implements GravixAudioHost {
               ? '🌍 region probe: no responder (${outcome.fallbackReason.name}), using pinned $url'
               : '🌍 region probe: ${outcome.winner} won in ${outcome.elapsed.inMilliseconds}ms',
         );
+      } else if (estPick != null && gravixNormalizeRegionUrl(estPick.entry.url) != gravixNormalizeRegionUrl(url)) {
+        // 0.9.0: the estimate's region first, the pinned url as the last rung
+        connectUrl = estPick.entry.url;
+        joinSource = 'est';
+        connectLadder = [url];
+        report = report.copyWith(connectedUrl: connectUrl, winningRegionUrl: connectUrl);
+        connectionReport.value = report;
+      } else if (estPick != null) {
+        joinSource = 'est';
       }
+      GravixRegionLog.step(
+        'pick',
+        'join -> ${gravixRegionOfUrl(connectUrl, known: [..._regionEntries, ...gravixLastRegionDirectory()]) ?? Uri.tryParse(connectUrl)?.host ?? '?'}'
+            ' source=$joinSource media=${joinMedia.name}${homeRegion == null ? '' : ' home=$homeRegion'}'
+            ' ${regionWaited.cause}'
+            '${estPick == null ? (measuredPick == null && homeRegion != null && joinSource == 'token' ? ' est-fallback(none)' : '') : ' est-fallback(${estPick.pick.reason.wire} home=$homeRegion:${estPick.pick.homeEstMs}ms best=${estPick.pick.bestRegion}:${estPick.pick.bestEstMs}ms)'}',
+      );
 
       _url = url;
       _joinWatch = joinWatch;
@@ -1305,9 +1347,15 @@ class GravixRoomService implements GravixAudioHost {
       final room = _createRoomSeam?.call(options) ?? Room(roomOptions: options);
 
       // GRAVIX (0.4.15): the region entries name Room.connectedRegion
-      room.gravixRegionHints = [for (final e in _regionEntries) e];
+      room.gravixRegionHints = [
+        for (final e in _regionEntries) e,
+        // 0.9.0: an estimate's region outside the token's list still names Room.connectedRegion
+        if (estPick != null && !_regionEntries.any((e) => e.region == estPick.entry.region)) estPick.entry,
+      ];
       // GRAVIX (2026-10-21): a failover tries regions taking this join's media first
       room.gravixJoinMedia = joinMedia;
+      // GRAVIX (0.9.0): the latency move keeps a viewer whose home is close enough
+      room.gravixHomeRegion = homeRegion;
       // a video refusal raises the session's media: a later rejoin keeps it
       room.gravixOnJoinMediaRaised = (m) => _declaredMedia = m;
       // <candidate:fastAnswer>
@@ -1413,6 +1461,12 @@ class GravixRoomService implements GravixAudioHost {
           await room.dispose();
         } catch (_) {}
         throw StateError('left (disconnect) while joining');
+      }
+
+      // GRAVIX (0.9.0): landed on a url no fresh measurement chose: a refresh now, so the room's
+      // latency move can act after the confirm delay instead of the next 5-minute refresh
+      if (joinSource != 'measured' && joinSource != 'race' || gravixJoinMeasureState() != 'fresh') {
+        gravixRefreshAfter('join-source=$joinSource');
       }
 
       // Everything after this point (mic, routing) needs the session. Normally it
@@ -1646,9 +1700,10 @@ class GravixRoomService implements GravixAudioHost {
   /// Also reads the device info the join's URL carries, so the tap does not.
   ///
   /// [rttMs]: the round trip to that host if the app knows it (its region probe).
-  /// The join's upgrade over the standby connection gets 3 x RTT (0.5-1.5 s;
-  /// 1.5 s unknown) before a fresh dial races it, and the connection that did
-  /// not answer is closed (timeline `standby.outcome: stalled_redialed`).
+  /// The join's upgrade over the standby connection gets 3 x RTT (0.4-1.5 s;
+  /// 0.8 s under 30 ms; 1.5 s unknown) before a fresh dial races it, and the
+  /// connection that did not answer is closed (timeline `standby.outcome:
+  /// stalled_redialed`, with `freshUpMs` / `freshConnects`).
   ///
   /// Same as [GravixStandby.open] (0.4.8), which needs no service.
   ///

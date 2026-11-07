@@ -18,6 +18,7 @@ import 'dart:io' as io;
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart' as http_io;
+import 'package:meta/meta.dart';
 
 import '../../logger.dart';
 import '../../options.dart';
@@ -197,9 +198,25 @@ class _HedgedConnect {
   }
 }
 
+/// Tests only: replaces the socket connect of every client made here without
+/// certificate pinning (a connection whose SYN goes nowhere cannot be made
+/// against a local server: the kernel completes the handshake into the
+/// backlog). Null: the real connect.
+@visibleForTesting
+Future<io.ConnectionTask<io.Socket>> Function(Uri url, String? proxyHost, int? proxyPort)? gravixDebugSocketConnect;
+
 // What io.HttpClient does without a connectionFactory (no pinning): a plain socket
 // to the proxy (the client tunnels and secures it itself), a TLS socket for https.
 Future<io.ConnectionTask<io.Socket>> _plainConnect(Uri url, String? proxyHost, int? proxyPort) {
+  final debug = gravixDebugSocketConnect;
+  if (debug != null) return debug(url, proxyHost, proxyPort);
+  return gravixRealSocketConnect(url, proxyHost, proxyPort);
+}
+
+/// The real socket connect of [_plainConnect] (for a [gravixDebugSocketConnect]
+/// that hands some connects through).
+@visibleForTesting
+Future<io.ConnectionTask<io.Socket>> gravixRealSocketConnect(Uri url, String? proxyHost, int? proxyPort) {
   if (proxyHost != null && proxyPort != null) return io.Socket.startConnect(proxyHost, proxyPort);
   if (url.scheme == 'https' || url.scheme == 'wss') return io.SecureSocket.startConnect(url.host, _portFor(url));
   return io.Socket.startConnect(url.host, _portFor(url));

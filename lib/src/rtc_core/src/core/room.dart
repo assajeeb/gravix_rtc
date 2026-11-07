@@ -65,7 +65,16 @@ import '../utils.dart' show isSVCCodec, unpackStreamId;
 import '../participant/gravix_publish_runners.dart'; // GRAVIX (0.4.8)
 import '../../../connect/gravix_region_failover.dart'
     show gravixNormalizeRegionUrl, gravixRegionOfUrl; // GRAVIX (0.4.15)
-import '../../../connect/gravix_init_measure.dart' show gravixMediaMoveTarget, gravixMediaMoveWhy;
+import '../../../connect/gravix_init_measure.dart'
+    show
+        GravixRegionMeasurement,
+        GravixRegionMeasurementResult,
+        gravixMediaMoveTarget,
+        gravixMediaMoveWhy,
+        gravixRegionMeasurementRuns;
+import '../../../connect/gravix_region_join_wait.dart' show gravixRefreshAfter; // GRAVIX (0.9.0)
+import '../../../connect/gravix_region_selection.dart'
+    show GravixLatencyMoveReason, gravixLatencyMoveDecision, gravixLatencyMoveMinGain; // GRAVIX (0.9.0)
 import '../../../connect/gravix_region_media.dart'; // GRAVIX (2026-10-21)
 import '../../../connect/gravix_region_report.dart' show GravixRegionUrl; // GRAVIX (0.4.15)
 import '../publication/local.dart';
@@ -207,6 +216,20 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   /// tries the regions that allow it first (the others stay as the last resort).
   /// Null: no media order (the SDK's room service sets it).
   GravixRoomMedia? gravixJoinMedia;
+
+  /// GRAVIX (0.9.0): the room's home region the token named (a viewer's), when
+  /// known. GravixJoin and GravixRoomService set it. The latency move keeps a
+  /// viewer whose home region is within the home margin of the better region.
+  String? gravixHomeRegion;
+
+  /// GRAVIX (0.9.0): the latency move of this session was claimed (one per session).
+  bool _gravixLatencyMoveDone = false;
+
+  /// The latency move whose reconnect is under way: from / to region.
+  ({String? from, String? to})? _gravixLatencyMoving;
+
+  /// Finished measurement runs, while connected and [GravixRecoveryOptions.latencyRegionMove] is on.
+  StreamSubscription<GravixRegionMeasurementResult>? _gravixLatencySub;
 
   bool _gravixMediaMoveDone = false;
 
@@ -382,6 +405,132 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (identical(_gravixMoveDeciding, deciding)) _gravixMoveDeciding = null;
       if (!deciding.isCompleted) deciding.complete();
     }
+  }
+
+  /// GRAVIX (0.9.0): listens for finished measurement runs for this session's latency move.
+  void _gravixWatchLatency() {
+    _gravixStopLatencyWatch();
+    if (!roomOptions.recovery.latencyRegionMove) return;
+    final gen = _gravixSessionGen;
+    _gravixLatencySub = gravixRegionMeasurementRuns.listen((result) {
+      if (gen == _gravixSessionGen) gravixConsiderLatencyMove(result);
+    });
+  }
+
+  void _gravixStopLatencyWatch() {
+    final sub = _gravixLatencySub;
+    _gravixLatencySub = null;
+    if (sub != null) unawaited(sub.cancel());
+  }
+
+  /// GRAVIX (0.9.0, 2026-11-08): a finished measurement run while connected: a
+  /// LISTENER moves once per session, by a full reconnect (the media move's path,
+  /// [Engine.gravixRestartTo]), to the region [result] holds for this network and
+  /// the session's media, when [gravixLatencyMoveDecision] says so (a gain of at
+  /// least max(50 ms, 30 %), the home region not within the home margin of it, no
+  /// track published, no media move or reconnect under way, no media move earlier
+  /// in the session). One `[GravixRegion] latencyMove` line per run, with the
+  /// from / to regions, their RTTs and the outcome. True when the move started.
+  /// Never throws.
+  @internal
+  bool gravixConsiderLatencyMove(GravixRegionMeasurementResult result) {
+    String? fromRegion;
+    try {
+      final from = connectedUrl ?? _connectedUrl;
+      final media = gravixJoinMedia;
+      final known = [...gravixRegionHints, ...gravixLastRegionDirectory()];
+      fromRegion = connectedRegion ?? gravixRegionOfUrl(from, known: known);
+      bool same(String? a, String? b) =>
+          a != null && b != null && gravixNormalizeRegionUrl(a) == gravixNormalizeRegionUrl(b);
+      GravixRegionMeasurement? measuredFor(String? region, String? url) =>
+          result.regions.where((m) => m.ok && ((region != null && m.region == region) || same(m.url, url))).firstOrNull;
+      final held = result.bestFor(media);
+      final target = held != null && held.ok ? held : null;
+      final connectedM = measuredFor(fromRegion, from);
+      final home = gravixHomeRegion;
+      final homeM = home == null ? null : measuredFor(home, null);
+      // a region outside the caller's shortlist is never probed: the gateway's estimate stands in
+      int? estOf(String? region) {
+        final e = region == null
+            ? null
+            : gravixLastRegionDirectory().where((d) => d.region == region).firstOrNull?.estRttMs;
+        return e?.round();
+      }
+
+      final connectedEst = connectedM == null ? estOf(fromRegion) : null;
+      final homeRtt = homeM?.rttMs ?? estOf(home);
+      final busy =
+          connectionState != ConnectionState.connected ||
+          from == null ||
+          _gravixLeaving ||
+          engine.gravixReconnectInProgress ||
+          _gravixMediaMove != null ||
+          _gravixMoveDeciding != null ||
+          _gravixVideoOnMove != null ||
+          _gravixRoomVideoMoving ||
+          _gravixLatencyMoving != null;
+      final publishing = localParticipant?.trackPublications.isNotEmpty ?? false;
+      final decision = gravixLatencyMoveDecision(
+        enabled: roomOptions.recovery.latencyRegionMove,
+        moved: _gravixLatencyMoveDone || _gravixMediaMoves > 0,
+        busy: busy,
+        publishing: publishing,
+        connectedRegion: target != null && same(target.url, from) ? target.region : fromRegion,
+        connectedRttMs: connectedM?.rttMs,
+        connectedEstMs: connectedEst,
+        targetRegion: target?.region,
+        targetRttMs: target?.rttMs,
+        targetAllowsMedia: target == null || media == null || gravixRegionAllowsMedia(target.entry, media),
+        homeRegion: home,
+        homeRttMs: homeRtt,
+      );
+      final cRtt = connectedM?.rttMs ?? connectedEst;
+      final what =
+          'from=${fromRegion ?? '?'} rtt=${cRtt ?? '-'}${connectedM == null && connectedEst != null ? 'est' : ''} to=${target?.region ?? '-'} rtt=${target?.rttMs ?? '-'}'
+          '${cRtt != null && target != null ? ' gain=${cRtt - target.rttMs!} need=${gravixLatencyMoveMinGain(cRtt).round()}' : ''}'
+          '${home == null ? '' : ' home=$home rtt=${homeRtt ?? '-'}${homeM == null && homeRtt != null ? 'est' : ''}'}'
+          ' media=${media?.name ?? '-'} why=${result.selectReason?.name ?? '-'}';
+      if (decision != GravixLatencyMoveReason.move) {
+        GravixRegionLog.step('latencyMove', '$what stay reason=${decision.wire}');
+        return false;
+      }
+      _gravixLatencyMoveDone = true; // claimed before the restart: two runs racing move once
+      final moveUrl = target!.url;
+      if (!engine.gravixRestartTo(moveUrl)) {
+        _gravixLatencyMoveDone = false;
+        GravixRegionLog.step('latencyMove', '$what stay reason=reconnect-busy');
+        return false;
+      }
+      _gravixLatencyMoving = (from: fromRegion, to: target.region);
+      // names Room.connectedRegion after the move
+      if (!gravixRegionHints.any((e) => same(e.url, moveUrl))) {
+        gravixRegionHints = [...gravixRegionHints, GravixRegionUrl(region: target.region, url: moveUrl)];
+      }
+      GravixRegionLog.step('latencyMove', '$what -> ${target.region} outcome=started');
+      return true;
+    } catch (e) {
+      GravixRegionLog.step('latencyMove', 'from=${fromRegion ?? '?'} stay reason=error(${e.runtimeType})');
+      return false;
+    }
+  }
+
+  /// GRAVIX (0.9.0): a latency move's reconnect ended: [landed] on the connected region, or not.
+  void _gravixEndLatencyMove({required bool landed}) {
+    final moving = _gravixLatencyMoving;
+    if (moving == null) return;
+    _gravixLatencyMoving = null;
+    final at = connectedRegion;
+    GravixRegionLog.step(
+      'latencyMove',
+      'from=${moving.from ?? '?'} to=${moving.to ?? '?'} outcome=${!landed
+              ? 'failed'
+              : at == moving.to
+              ? 'landed'
+              : 'landed-elsewhere'}'
+          '${landed ? ' region=${at ?? '?'}' : ''}',
+    );
+    // the anchor is confirmed from the new connection: the region stays for this network
+    if (landed) gravixRefreshAfter('latency-move', minAge: Duration.zero);
   }
 
   /// Ends [move]'s waits; a wait already answered keeps its answer.
@@ -1096,6 +1245,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
     connectOptions ??= ConnectOptions();
     _gravixLeaving = false;
     _gravixMediaMoveDone = false; // one media move per session
+    _gravixLatencyMoveDone = false; // GRAVIX (0.9.0): one latency move per session
+    _gravixLatencyMoving = null;
+    _gravixStopLatencyWatch();
     _gravixSessionGen++;
     _gravixMoveDeciding = null;
     _gravixMediaMoves = 0;
@@ -1257,6 +1409,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
           didConnect = true;
           _connectedUrl = null; // a new connect: its first url is a change
           _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.connect);
+          _gravixWatchLatency(); // GRAVIX (0.9.0)
           return;
         } catch (e) {
           // the attempt is over: the join microphone's waits end now
@@ -2032,6 +2185,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       // They are NEW objects; whoever held the old ones must take these.
       // GRAVIX (0.4.15): the rejoin may have landed on another region.
       _gravixNoteConnectedUrl(RoomConnectedUrlChangeReason.rejoin);
+      _gravixEndLatencyMove(landed: true); // GRAVIX (0.9.0)
       // GRAVIX (2026-10-21): a media move is done (wherever the reconnect landed):
       // the refused camera is published again, after the republish above
       final move = _gravixMediaMove;
@@ -2658,6 +2812,8 @@ extension RoomPrivateMethods on Room {
     final mediaMove = _gravixMediaMove;
     if (mediaMove != null) _gravixEndMediaMove(mediaMove);
     _gravixMediaMove = null;
+    _gravixStopLatencyWatch(); // GRAVIX (0.9.0)
+    _gravixEndLatencyMove(landed: false);
     _gravixRestartEnded(false);
 
     // GRAVIX (2026-10-13): the join's camera still being published after

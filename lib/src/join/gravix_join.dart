@@ -29,6 +29,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../backend/gravix_token_provider.dart';
+import '../connect/gravix_region_join_wait.dart' show kGravixJoinMeasureWait;
 import '../connect/gravix_region_media.dart' show gravixJoinMedia;
 import '../connect/gravix_standby.dart';
 import '../rtc_core/src/core/gravix_join_camera.dart';
@@ -103,6 +104,7 @@ class GravixJoin {
     this.isRefusal,
     this.refusalMemo = defaultRefusalMemo,
     this.retryCapacityRefusals = false,
+    this.regionWait = kGravixJoinMeasureWait,
     @visibleForTesting GravixStandbyState Function(String url, String token)? standbyState,
     @visibleForTesting DateTime Function()? now,
   }) : standbyPool = standbyPool ?? GravixStandbyPool.instance,
@@ -127,6 +129,13 @@ class GravixJoin {
   /// true for it (no wrapping, no teardown of the Room): a wrapped error is not
   /// recognised and the join fails as before.
   final bool retryCapacityRefusals;
+
+  /// 0.9.0: how long a join (and a [warm]) waits for the start-up region
+  /// measurement when nothing fresh is measured ([gravixJoinUrlAsync]; only when
+  /// the app started one with gravixStartRegionMeasurement). Duration.zero: no
+  /// wait (a run is still kicked when none is out, and the est fallback still
+  /// applies).
+  final Duration regionWait;
 
   /// Where the join tokens come from (and are cached: pass
   /// `reuse: GravixTokenReuse.fastJoin`).
@@ -229,9 +238,16 @@ class GravixJoin {
 
   /// [request]'s media ([GravixTokenRequest.media], optional: see gravixJoinMedia), promoted to
   /// video by a join camera or the token's video grant (gravixJoinMedia).
-  GravixJoinUrlChoice _choose(GravixJoinCredentials c, GravixTokenRequest request, {bool camera = false}) {
+  ///
+  /// 0.9.0: waits for the region measurement first when nothing fresh is measured
+  /// (at most [regionWait], [gravixJoinUrlAsync]). Never throws.
+  Future<GravixJoinUrlChoice> _choose(
+    GravixJoinCredentials c,
+    GravixTokenRequest request, {
+    bool camera = false,
+  }) async {
     final media = gravixJoinMedia(declared: request.media, enableVideo: camera, token: c.token);
-    var choice = gravixJoinUrl(c, media: media);
+    var choice = await gravixJoinUrlAsync(c, media: media, wait: regionWait);
     final sb = _standbyUrlByToken[c.token];
     if (sb != null) {
       choice = choice.withStandby(
@@ -274,7 +290,7 @@ class GravixJoin {
     try {
       final c = await tokenProvider.getCredentials(request);
       _clearRefused(request);
-      final choice = _choose(c, request);
+      final choice = await _choose(c, request);
       final id = roomId ?? request.room;
       switch (role) {
         case GravixStandbyRole.touched:
@@ -480,6 +496,7 @@ class GravixJoin {
             return false;
           });
     late final GravixPrejoin handle;
+    GravixJoinUrlChoice? chosen;
     handle = GravixPrejoin.start(
       key: key,
       target: () async {
@@ -500,14 +517,16 @@ class GravixJoin {
           rethrow;
         }
         handle.mark(GravixJoinEventKind.tokenReady, c.fromCache ? 'cached' : 'fetched');
-        final choice = _choose(c, request, camera: joinCamera != null);
+        final choice = await _choose(c, request, camera: joinCamera != null);
+        if (choice.cause != null && choice.cause!.contains('waited=')) handle.logStep('regionWait', choice.cause!);
+        chosen = choice;
         handle.mark(
           GravixJoinEventKind.urlChosen,
           '${choice.region ?? '-'} ${choice.source.name}',
           'region=${choice.region ?? '-'} source=${choice.source.name} rtt=${choice.rttMs ?? '-'} '
               'host=${GravixJoinLog.host(choice.url)}',
         );
-        return GravixJoinTarget(url: choice.url, token: c.token);
+        return GravixJoinTarget(url: choice.url, token: c.token, homeRegion: c.homeRegion);
       },
       createRoom: createRoom ?? _createRoom,
       connect: connect ?? _connect,
@@ -525,6 +544,14 @@ class GravixJoin {
         if (refused) _noteRefused(request);
         return refused;
       },
+    );
+    // 0.9.0: a join that landed on a url no fresh measurement chose kicks a refresh, so the
+    // room's latency move can act within seconds (gravixRefreshAfterJoin)
+    unawaited(
+      handle.connected.then((ok) {
+        final c = chosen;
+        if (ok && c != null) gravixRefreshAfterJoin(c.source);
+      }, onError: (Object _) {}),
     );
     if (isSwitch) {
       handle.mark(GravixJoinEventKind.switchStart);

@@ -170,3 +170,174 @@ double gravixHomeRegionMargin(int fastestMs) =>
 /// relay hop.
 bool gravixHomeRegionWithinMargin({required int homeMs, required int fastestMs}) =>
     homeMs - fastestMs <= gravixHomeRegionMargin(fastestMs);
+
+// ---------------------------------------------------------------------------
+// 0.9.0 (2026-11-08): the join's est_rtt_ms fallback and the in-session latency
+// move. Field, Tuki app: a viewer in Doha joined a room whose home is dac1
+// (Dhaka) and landed on dac1 at ~320 ms instead of doh1 (~20 ms): the join did
+// not wait for the start-up measurement, and with nothing measured the token's
+// url (the home) stayed. Both rules are pure and run the shared fixture
+// (`estFallback`, `latencyMove` in test/fixtures/region_selection_cases.json).
+// ---------------------------------------------------------------------------
+
+/// One region of the last `/v1/regions` answer as the est fallback sees it.
+class GravixEstRegion {
+  const GravixEstRegion({required this.region, this.estRttMs, this.allowsMedia = true});
+  final String region;
+
+  /// The gateway's estimate (`est_rtt_ms`); null = none.
+  final double? estRttMs;
+
+  /// Whether the region takes the join's media (gravix_region_media.dart).
+  final bool allowsMedia;
+}
+
+/// Why [gravixEstFallbackPick] chose its region. Wire names = [wire].
+enum GravixEstPickReason {
+  /// The room's home region, within the home margin of the best estimate.
+  home('home'),
+
+  /// The best estimated region: home was too far.
+  est('est');
+
+  const GravixEstPickReason(this.wire);
+  final String wire;
+}
+
+class GravixEstPick {
+  const GravixEstPick({
+    required this.region,
+    required this.reason,
+    required this.homeEstMs,
+    required this.bestRegion,
+    required this.bestEstMs,
+  });
+  final String region;
+  final GravixEstPickReason reason;
+  final int homeEstMs;
+  final String bestRegion;
+  final int bestEstMs;
+}
+
+/// A join with [homeRegion] set and NOTHING measured: the gateway's estimates
+/// decide between home and the best estimated region. Pure.
+///
+/// 1. home must be listed, allow the media and have an estimate, else null (the
+///    token url, as before 0.9.0);
+/// 2. the best: the first [shortlist] region that allows the media and has an
+///    estimate (the console sorts its shortlist by the caller's IP), else the
+///    lowest estimate that allows the media (list order breaks ties);
+/// 3. home within [gravixHomeRegionMargin] (max(25 ms, 30 %)) of the best: home
+///    (`home`), else the best (`est`).
+GravixEstPick? gravixEstFallbackPick(
+  List<GravixEstRegion> regions, {
+  required String homeRegion,
+  List<String> shortlist = const [],
+}) {
+  bool usable(GravixEstRegion r) => r.allowsMedia && r.estRttMs != null;
+  final home = regions.where((r) => r.region == homeRegion && usable(r)).firstOrNull;
+  if (home == null) return null;
+  GravixEstRegion? best;
+  for (final s in shortlist) {
+    best = regions.where((r) => r.region == s && usable(r)).firstOrNull;
+    if (best != null) break;
+  }
+  if (best == null) {
+    for (final r in regions) {
+      if (usable(r) && (best == null || r.estRttMs! < best.estRttMs!)) best = r;
+    }
+  }
+  final homeMs = home.estRttMs!.round();
+  final bestMs = best!.estRttMs!.round();
+  final keepHome = best.region == home.region || gravixHomeRegionWithinMargin(homeMs: homeMs, fastestMs: bestMs);
+  return GravixEstPick(
+    region: keepHome ? home.region : best.region,
+    reason: keepHome ? GravixEstPickReason.home : GravixEstPickReason.est,
+    homeEstMs: homeMs,
+    bestRegion: best.region,
+    bestEstMs: bestMs,
+  );
+}
+
+/// The latency move's gain floor: a listener moves only when the held region is
+/// at least the larger of this and [kGravixLatencyMoveMinGainRatio] of the
+/// connected region's RTT faster. Higher than the join's keep-current margin
+/// (max(30 ms, 20 %)): a move is a full reconnect (a second or two without
+/// audio), worth it only for a gain the listener hears for the rest of the call.
+const kGravixLatencyMoveMinGain = Duration(milliseconds: 50);
+const kGravixLatencyMoveMinGainRatio = 0.3;
+
+/// The gain [gravixLatencyMoveDecision] needs over a connected region at
+/// [connectedMs]: max(50 ms, 30 %).
+double gravixLatencyMoveMinGain(int connectedMs) =>
+    math.max(kGravixLatencyMoveMinGain.inMilliseconds.toDouble(), connectedMs * kGravixLatencyMoveMinGainRatio);
+
+/// What [gravixLatencyMoveDecision] decided. [wire] is what the
+/// `[GravixRegion] latencyMove` line prints (`stay reason=<wire>` / `move`).
+enum GravixLatencyMoveReason {
+  move('move'),
+  optionOff('option-off'),
+  alreadyMoved('already-moved'),
+  busy('busy'),
+  noMeasurement('no-measurement'),
+  sameRegion('same-region'),
+  targetMedia('target-media'),
+  connectedUnmeasured('connected-unmeasured'),
+  home('home'),
+  smallGain('small-gain'),
+  publishing('publishing');
+
+  const GravixLatencyMoveReason(this.wire);
+  final String wire;
+  bool get moves => this == GravixLatencyMoveReason.move;
+}
+
+/// Whether a connected session moves to the region the measurement now holds
+/// for its network ([targetRegion], the anchor: a rival only gets there through
+/// the confirm hysteresis, see [gravixSelectRegion]). Pure, the rules in order:
+///
+/// 1. [enabled] off: `option-off`; one move per session ([moved]):
+///    `already-moved`; a media move or a reconnect under way ([busy]): `busy`;
+/// 2. no held region: `no-measurement`; it is the connected one: `same-region`;
+///    it does not take the session's media: `target-media`;
+/// 3. the connected region has no RTT this run: its `est_rtt_ms`
+///    ([connectedEstMs], e.g. the home region outside the caller's shortlist, so
+///    never probed) stands in; neither: `connected-unmeasured` (no evidence of a
+///    gain);
+/// 4. the room's home region ([homeRegion], measured at [homeRttMs]) is within
+///    the home margin of the held region: `home` (the viewer stays: no relay hop);
+/// 5. the gain is under [gravixLatencyMoveMinGain]: `small-gain`;
+/// 6. the local participant publishes a track ([publishing]): `publishing` -- a
+///    publisher moving mid-speech is an audible cut for everyone in the room;
+/// 7. otherwise `move`.
+GravixLatencyMoveReason gravixLatencyMoveDecision({
+  bool enabled = true,
+  bool moved = false,
+  bool busy = false,
+  bool publishing = false,
+  required String? connectedRegion,
+  int? connectedRttMs,
+  int? connectedEstMs,
+  String? targetRegion,
+  int? targetRttMs,
+  bool targetAllowsMedia = true,
+  String? homeRegion,
+  int? homeRttMs,
+}) {
+  if (!enabled) return GravixLatencyMoveReason.optionOff;
+  if (moved) return GravixLatencyMoveReason.alreadyMoved;
+  if (busy) return GravixLatencyMoveReason.busy;
+  if (targetRegion == null || targetRttMs == null) return GravixLatencyMoveReason.noMeasurement;
+  if (connectedRegion == targetRegion) return GravixLatencyMoveReason.sameRegion;
+  if (!targetAllowsMedia) return GravixLatencyMoveReason.targetMedia;
+  final connectedMs = connectedRttMs ?? connectedEstMs;
+  if (connectedRegion == null || connectedMs == null) return GravixLatencyMoveReason.connectedUnmeasured;
+  if (homeRegion != null &&
+      homeRttMs != null &&
+      gravixHomeRegionWithinMargin(homeMs: homeRttMs, fastestMs: targetRttMs)) {
+    return GravixLatencyMoveReason.home;
+  }
+  if (connectedMs - targetRttMs < gravixLatencyMoveMinGain(connectedMs)) return GravixLatencyMoveReason.smallGain;
+  if (publishing) return GravixLatencyMoveReason.publishing;
+  return GravixLatencyMoveReason.move;
+}

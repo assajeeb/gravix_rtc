@@ -134,6 +134,20 @@ the `url` from the same `{token, url}` response.
 Optional, once at app start: `gravixStartRegionMeasurement(regionsUrl: …)`
 measures the regions so joins go straight to the fastest one.
 
+Since 0.9.0, a join made while that measurement is still running (or with only a stale or
+failed answer) waits for it, at most 800 ms (`kGravixJoinMeasureWait`; `regionWait:` on
+`GravixJoin` / `GravixRoomService`, `Duration.zero` = no wait). Still nothing measured, a
+viewer whose token names the room's home region goes by the console's `est_rtt_ms`: the home
+region when it is within max(25 ms, 30 %) of the best estimate, else that region. Without a
+measurement started by the app nothing waits, as before.
+
+A listener (nothing published) who joined a clearly slower region than the one the measurement
+then holds for its network moves once, mid-call, by a full reconnect (a second or two of silence):
+the gain must be at least max(50 ms, 30 %), the region must take the session's media, and a
+home region within the home margin keeps the viewer there. Publishers never move this way.
+`GravixRecoveryOptions(latencyRegionMove: false)` turns it off. Log lines:
+`[GravixRegion] pick join ...` and `[GravixRegion] latencyMove ...`.
+
 ### Fast join
 
 For an app that drives the core `Room` (0.4.19, opt-in):
@@ -798,6 +812,7 @@ room.events.on<RoomConnectedUrlChangedEvent>((e) => showServer(e.region ?? e.url
 | `resumeSatisfiesPeerFailure` | `true` | (2026-10-11) a peer connection reported Failed (the old ICE session, as the network returns) while a resume runs that then brings both connections back: no full rejoin after the resume (the far side saw a fake leave + join) |
 | `resumePeerRestartWait` | 3 s (`Duration.zero` = off) | (2026-10-11) with `resumeSatisfiesPeerFailure`: a connection still restarting when the resume succeeds gets this long to come back before the full rejoin (it failing rejoins at once) |
 | `lastGoodRegionList` | `true` | (2026-10-11) the failover's region list is fetched from the url the app connected to -- usually the region that just died; when that fetch fails, the list fetched at connect is used (any age) instead of ending the attempt, and a host that just failed is not asked at all. A 401/403 still ends it; no list at all: as before |
+| `latencyRegionMove` | `true` | (0.9.0) a listener (no track published) moves once per session to the region the start-up measurement holds for its network, when it is at least max(50 ms, 30 %) faster than the connected one, takes the session's media, and the room's home region is not within the home margin of it; never during a media move or a reconnect, never after a media move |
 | `restartAbortsOnSignalLoss` | `true` | (2026-10-11) a full reconnect whose signal socket closes fails at once instead of waiting 10 s for connections that can no longer be negotiated; such a failure during a network change does not count against the reconnect attempts |
 | `uplinkFeedbackStallFor` | 5 s (`Duration.zero` = off) | (2026-10-11) a published, unmuted track that keeps sending with no receiver report from the server for this long (the server's RTCP stuck on a dead path after the connection moved to ICE-TCP) -> a resume |
 | `upstreamReconnectFixes` | `true` | upstream 2.13.0/2.13.1 reconnect fixes (Leave{RESUME} resumes, no dropped requests, severed resume retried, negotiation errors reconnect) |

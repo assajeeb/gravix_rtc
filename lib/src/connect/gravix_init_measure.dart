@@ -464,7 +464,29 @@ void gravixClearRegionMeasurement() {
   _held = null;
   _memoryStates.clear();
   gravixClearRegionMedia();
+  // 0.9.0: a test's handle must not make the next test's joins wait for it
+  _activeHandle = null;
 }
+
+/// 0.9.0 (2026-11-08): the handle [gravixStartRegionMeasurement] started last,
+/// while it is not stopped. A join with nothing fresh measured waits for its run
+/// (gravix_region_join_wait.dart); none registered = no wait, as before 0.9.0.
+GravixRegionMeasurementHandle? _activeHandle;
+
+/// See [_activeHandle]. Null when the app never started a measurement, or
+/// stopped it.
+GravixRegionMeasurementHandle? gravixActiveRegionMeasurement() => _activeHandle;
+
+final StreamController<GravixRegionMeasurementResult> _runs = StreamController.broadcast();
+
+/// 0.9.0: every finished [gravixMeasureRegions] run, after joins can see its
+/// answer ([gravixRegionMeasurement]). A connected Room listens for the latency
+/// move (RoomOptions.recovery.latencyRegionMove).
+Stream<GravixRegionMeasurementResult> get gravixRegionMeasurementRuns => _runs.stream;
+
+/// 0.9.0: the last answer held, fresh or not (a join tells `stale` from
+/// `no-measurement` by it). Joins use [gravixRegionMeasurement].
+GravixRegionMeasurementResult? gravixHeldRegionMeasurement() => _held;
 
 /// The current answer, when fresh.
 GravixRegionMeasurementResult? gravixRegionMeasurement({DateTime? now}) {
@@ -625,6 +647,18 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     } else if (regionsUrl != null) {
       final st = store ?? _defaultStore;
       final key = 'gravix.regions:$regionsUrl';
+      // 0.9.0: a repeat launch knows the last directory (its `est_rtt_ms`, `media`)
+      // before the fetch answers: a join that stops waiting for this run still has
+      // the estimates for its fallback (gravix_region_join_wait.dart).
+      if (gravixLastRegionDirectory().isEmpty) {
+        try {
+          final saved = st.read(key);
+          final d = saved == null ? null : GravixRegionDirectory.fromJson(json.decode(saved));
+          if (d != null) gravixNoteRegionDirectory(d.regions, shortlist: d.shortlist);
+        } catch (_) {
+          // a bad saved copy: the fetch decides
+        }
+      }
       try {
         if (fetchList != null && fetchDirectory == null) {
           dir = GravixRegionDirectory(regions: await fetchList(regionsUrl));
@@ -1022,6 +1056,7 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
       unawaited(probe.whenComplete(() => _videoProbes.remove(probe)));
     }
   }
+  _runs.add(result);
   return result;
 }
 
@@ -1380,12 +1415,16 @@ String _normUrl(String u) => u.replaceAll(RegExp(r'/+$'), '');
 ///     region allows [media] or is unknown; else the first shortlist region
 ///     allowing it, the lowest `est_rtt_ms` allowing it, or the first offered
 ///     one (`fallback`).
+///
+/// [log] false (0.9.0): no `pick` line; the caller writes its own (the join's
+/// [gravixJoinUrlAsync] line carries the wait and its cause too).
 GravixRegionPick? gravixPickRegionFor(
   String pinnedUrl,
   List<GravixRegionUrl> candidates, {
   DateTime? now,
   String? homeRegion,
   GravixRoomMedia? media,
+  bool log = true,
 }) {
   if (candidates.isEmpty) return null;
   final m = gravixRegionMeasurement(now: now);
@@ -1442,15 +1481,17 @@ GravixRegionPick? gravixPickRegionFor(
         media: media,
         skipped: skipped,
       );
-      GravixRegionLog.step(
-        'pick',
-        'media=${media.name} nothing-measured pinned=${pinnedEntry.region}(${gravixMediaSkipWhy(pinnedEntry, media, now: now)})'
-            ' -> ${pick.entry.region} reason=fallback cause=${offered != null ? fb!.source.name : 'first-offered'}',
-      );
+      if (log) {
+        GravixRegionLog.step(
+          'pick',
+          'media=${media.name} nothing-measured pinned=${pinnedEntry.region}(${gravixMediaSkipWhy(pinnedEntry, media, now: now)})'
+              ' -> ${pick.entry.region} reason=fallback cause=${offered != null ? fb!.source.name : 'first-offered'}',
+        );
+      }
       return pick;
     }
   }
-  if (media != null) {
+  if (media != null && log) {
     final rtt = pick == null
         ? null
         : m?.regions.where((r) => r.region == pick!.entry.region && r.ok).firstOrNull?.rttMs;
@@ -1534,11 +1575,35 @@ GravixRegionPick? _pickMeasured(
 /// shortlist region allowing it. No region allows [media]: empty (the token url
 /// stays) and the log says why. A lookup, nothing sent. Field 2026-10-27: such a
 /// video join stayed on doh1 and its camera publish was refused.
-List<GravixRegionUrl> gravixMeasuredCandidates(String connectUrl, {DateTime? now, GravixRoomMedia? media}) {
+///
+/// [homeRegion] (0.9.0, a viewer's join): [connectUrl] is a fleet region of the
+/// last `/v1/regions` answer that this caller's measurement never probed (outside
+/// its shortlist, e.g. a Dhaka home from Doha): the candidates are the measured
+/// regions plus the directory, so the viewer goes to the measured best (an
+/// unmeasured home counts as none). A host (no [homeRegion]) keeps its url.
+List<GravixRegionUrl> gravixMeasuredCandidates(
+  String connectUrl, {
+  DateTime? now,
+  GravixRoomMedia? media,
+  String? homeRegion,
+}) {
   final m = gravixRegionMeasurement(now: now);
   String norm(String u) => u.replaceAll(RegExp(r'/+$'), '');
   if (m != null && m.regions.any((r) => norm(r.url) == norm(connectUrl))) {
     return [for (final r in m.regions) r.entry];
+  }
+  if (homeRegion != null && homeRegion.isNotEmpty && m != null && (m.best?.ok ?? false)) {
+    final dir = gravixLastRegionDirectory();
+    final n = gravixNormalizeRegionUrl(connectUrl);
+    final token = dir.where((c) => gravixNormalizeRegionUrl(c.url) == n).firstOrNull;
+    if (token != null && (media == null || gravixRegionAllowsMedia(token, media, now: now))) {
+      final out = <GravixRegionUrl>[for (final r in m.regions) r.entry];
+      for (final c in dir) {
+        if (!out.any((o) => o.region == c.region || norm(o.url) == norm(c.url))) out.add(c);
+      }
+      GravixRegionLog.step('candidates', 'home=$homeRegion pinned=${token.region} unmeasured -> directory+measured');
+      return out;
+    }
   }
   if (media == null) return const [];
   final dir = gravixLastRegionDirectory();
@@ -1564,21 +1629,31 @@ List<GravixRegionUrl> gravixMeasuredCandidates(String connectUrl, {DateTime? now
 /// Measure now, then every [refresh] and whenever the network changes. Call once
 /// when the app starts, e.g. with `https://<console host>/v1/regions`. Never throws.
 class GravixRegionMeasurementHandle {
-  GravixRegionMeasurementHandle._(this._run, this._timer, this._sub, this._onStop);
+  GravixRegionMeasurementHandle._(this._run, this._timer, this._sub, this._onStop, this._inFlight, this._lastEnded);
   final Future<GravixRegionMeasurementResult> Function() _run;
   final Timer? _timer;
   final StreamSubscription<Object?>? _sub;
   final void Function() _onStop;
+  final Future<GravixRegionMeasurementResult>? Function() _inFlight;
+  final DateTime? Function() _lastEnded;
   late final Future<GravixRegionMeasurementResult> ready;
 
-  /// Measure again now.
+  /// Measure again now (joins the run in flight, if any).
   Future<GravixRegionMeasurementResult> refresh() => _run();
+
+  /// 0.9.0: the run under way (start-up, refresh, network change, confirm), or
+  /// null when none is.
+  Future<GravixRegionMeasurementResult>? get inFlight => _inFlight();
+
+  /// 0.9.0: when the last run of this handle ended (null: none has yet).
+  DateTime? get lastRunEndedAt => _lastEnded();
 
   /// Stop re-measuring. The last answer stays until its TTL.
   void stop() {
     _timer?.cancel();
     _sub?.cancel();
     _onStop();
+    if (identical(_activeHandle, this)) _activeHandle = null;
   }
 }
 
@@ -1606,6 +1681,7 @@ GravixRegionMeasurementHandle gravixStartRegionMeasurement({
   GravixRegionNetworkReader? networkType,
 }) {
   Future<GravixRegionMeasurementResult>? running;
+  DateTime? lastEnded;
   // The list store matters only when the list is fetched.
   Future<GravixRegionListStore?> resolveStore() async =>
       store ?? (regionUrls == null && regionsUrl != null ? await _persistentStore() : null);
@@ -1626,7 +1702,10 @@ GravixRegionMeasurementHandle gravixStartRegionMeasurement({
           networkType: networkType,
         ),
       )
-      .whenComplete(() => running = null);
+      .whenComplete(() {
+        running = null;
+        lastEnded = DateTime.now();
+      });
   // A rival that won once (`confirming`) is measured again soon instead of at
   // the next refresh: joins move only after a second win, and that second run
   // should not be 5 minutes away when the held region really got worse.
@@ -1650,10 +1729,19 @@ GravixRegionMeasurementHandle gravixStartRegionMeasurement({
       // no connectivity plugin on this platform: the periodic refresh still runs
     }
   }
-  final handle = GravixRegionMeasurementHandle._(runAndConfirm, timer, sub, () {
-    stopped = true;
-    confirm?.cancel();
-  });
+  final handle = GravixRegionMeasurementHandle._(
+    runAndConfirm,
+    timer,
+    sub,
+    () {
+      stopped = true;
+      confirm?.cancel();
+    },
+    () => running,
+    () => lastEnded,
+  );
+  // 0.9.0: registered first, so a join made while the first run is out waits for it
+  _activeHandle = handle;
   handle.ready = runAndConfirm();
   return handle;
 }
