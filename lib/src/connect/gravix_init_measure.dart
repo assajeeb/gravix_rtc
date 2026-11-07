@@ -51,6 +51,7 @@ import 'gravix_region_failover.dart' show gravixNormalizeRegionUrl;
 import 'gravix_region_media.dart';
 import 'gravix_region_probe_client.dart';
 import 'gravix_region_report.dart';
+import 'gravix_region_sampler_isolate.dart';
 import 'gravix_region_selection.dart';
 import 'gravix_region_shortlist.dart';
 
@@ -594,6 +595,9 @@ class _Track {
   bool done = false;
   bool retried = false;
   GravixRegionProbeClient? client;
+
+  /// Sockets the helper isolate's probe client for this region had opened (0.9.1).
+  int? isolateConnections;
 }
 
 /// Measures the planned regions in parallel within the total budget (each on its
@@ -605,7 +609,9 @@ class _Track {
 /// [samplerFor] (default [gravixDefaultRegionSampler]) makes each region's sampler
 /// on that region's [GravixRegionProbeClient]. [sampler], when given, is used
 /// instead for every sample with no client (the pre-0.4.6 stateless hook: it gets
-/// no connection reuse unless it keeps its own).
+/// no connection reuse unless it keeps its own). With neither (0.9.1), the default
+/// sampler runs in a helper isolate on dart:io, so a busy app isolate does not
+/// delay its timestamps ([GravixRegionMeasureIsolate]).
 ///
 /// [budget]: total time, default the gateway's `probe_budget_ms`, else
 /// [kGravixMeasureBudget] ([kGravixMeasureBudgetCellular] on cellular).
@@ -679,6 +685,7 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     }
   } catch (e) {
     final msg = e.toString();
+    GravixRegionLog.step('select', '-> none reason=no-directory cause=${e.runtimeType}');
     return GravixRegionMeasurementResult(
       measuredAt: DateTime.now(),
       regions: const [],
@@ -809,11 +816,69 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
     }
   }
 
-  final workers = [for (var i = 0; i < tracks.length && i < kGravixMeasureConcurrency; i++) worker()];
-  unawaited(Future.wait(workers).then((_) => finish('complete')));
+  // 0.9.1: the default sampler times its requests in a helper isolate, so a busy app
+  // isolate (start-up) does not add its event-loop delay to every sample. The budget,
+  // the early stop and the choice stay here (gravix_region_sampler_isolate.dart).
+  var via = 'main';
+  GravixRegionSamplingRun? isoRun;
+  if (sampler == null && samplerFor == null && GravixRegionMeasureIsolate.enabled && tracks.isNotEmpty) {
+    final unavailable = gravixRegionIsolateUnavailable();
+    if (unavailable != null) {
+      if (unavailable != 'web') GravixRegionLog.step('sampler', 'via=main cause=$unavailable');
+    } else {
+      try {
+        isoRun = await gravixStartRegionSamplingIsolate(
+          regions: [for (final t in tracks) t.entry],
+          samples: kGravixMeasureSamples,
+          timeout: kGravixMeasureTimeout,
+          concurrency: kGravixMeasureConcurrency,
+          budget: runBudget - sw.elapsed,
+          onEvent: (e) {
+            if (end.isCompleted) return; // an answer after the end is not part of this run
+            if (e.index < 0) {
+              finish(e.kind == GravixRegionSampleEventKind.budget ? 'budget' : 'complete');
+              return;
+            }
+            final t = tracks[e.index];
+            if (e.connections != null) t.isolateConnections = e.connections;
+            switch (e.kind) {
+              case GravixRegionSampleEventKind.sample:
+                t.samples.add(e.elapsed!.inMilliseconds);
+                if (t.samples.length >= 2 && gravixShouldStopMeasuring(progress())) finish('early');
+              case GravixRegionSampleEventKind.retry:
+                t.retried = true;
+              case GravixRegionSampleEventKind.failed:
+                t.failed = true;
+                t.done = true;
+                if (gravixShouldStopMeasuring(progress())) finish('early');
+              case GravixRegionSampleEventKind.done:
+                t.done = true;
+                if (gravixShouldStopMeasuring(progress())) finish('early');
+              case GravixRegionSampleEventKind.budget:
+              case GravixRegionSampleEventKind.complete:
+                break;
+            }
+          },
+          onExit: () {
+            // an isolate gone mid-run: what it sent stands
+            if (!end.isCompleted) GravixRegionLog.step('sampler', 'isolate-exit before the end of the run');
+            finish('complete');
+          },
+        );
+        via = 'isolate';
+      } catch (e) {
+        GravixRegionLog.step('sampler', 'via=main cause=isolate-failed(${e.runtimeType})');
+      }
+    }
+  }
+  if (isoRun == null) {
+    final workers = [for (var i = 0; i < tracks.length && i < kGravixMeasureConcurrency; i++) worker()];
+    unawaited(Future.wait(workers).then((_) => finish('complete')));
+  }
   final why = await end.future;
   budgetTimer.cancel();
   final elapsed = sw.elapsed;
+  isoRun?.stop(); // aborts what is in flight there; the isolate exits
   for (final t in tracks) {
     t.client?.close(); // aborts a request still in flight
   }
@@ -831,7 +896,7 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
           entry: t.entry,
           rttMs: warm.isEmpty ? null : warm.reduce((a, b) => a < b ? a : b),
           samplesMs: List.unmodifiable(t.samples),
-          connections: t.client?.connections,
+          connections: t.client?.connections ?? t.isolateConnections,
           status: status,
           source: t.source,
           budgetHit: why == 'budget' && !t.done && !t.failed,
@@ -839,6 +904,16 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
         );
       }(),
   ];
+  // 0.9.1: the raw samples of every planned region, so a device log shows what the
+  // choice below was made from (cold = the dropped first request, `-` = none).
+  for (final m in measured) {
+    final warm = m.samplesMs.skip(1).join(',');
+    GravixRegionLog.step(
+      'sample',
+      'region=${m.region} warm=[$warm] cold=${m.samplesMs.isEmpty ? '-' : m.samplesMs.first} status=${m.state.name}'
+          '${m.retried ? ' retried' : ''}${m.connections == null ? '' : ' conns=${m.connections}'} via=$via',
+    );
+  }
   measured.sort((a, b) {
     if (a.state != b.state) return a.state.index.compareTo(b.state.index);
     if (!a.ok) return 0;
@@ -900,6 +975,14 @@ Future<GravixRegionMeasurementResult> gravixMeasureRegions({
           : GravixRegionBestSource.est;
     }
   }
+
+  // 0.9.1: the run's answer, on every path (budget cut, nothing answered, fallback).
+  GravixRegionLog.step(
+    'select',
+    '-> ${best?.region ?? 'none'} rtt=${best?.rttMs ?? '-'} reason=${selection?.reason.name ?? 'fallback'}'
+        ' source=${bestSource?.name ?? 'none'}${current == null ? '' : ' anchor=$current'}'
+        ' why=$why ms=${elapsed.inMilliseconds} budget=${runBudget.inMilliseconds}',
+  );
 
   // Per-region media (2026-10-21): for each medium some measured region does
   // not take, the same hysteresis over the regions that do, with its own anchor,

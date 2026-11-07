@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.9.1 — 2026-11-08
+
+The region measurement times its requests in a helper isolate. Field, Tuki app (Redmi, one
+Wi-Fi, cold starts): dac1 is 5-20 ms away (ICE RTT; the Infinix on the same Wi-Fi measured
+19 ms), but the start-up measurement read dac1 / sgp1 / blr1 = 64 / 135 / 135, 10 / 59 / 64,
+all timed out at the 1501 ms budget, 7 / 306 / 312, 54 / 198 / 226, blr1 61 / sgp1 77 / dac1 85
+(the order flipped), 120 / 238 / 248, and it failed every time under the profiler. The
+stopwatch ran on the app's isolate, busy with start-up: each sample was the round trip plus
+the wait for the event loop. 0.9.0's latency move needs a gain of max(50 ms, 30 %) and the
+join's pick uses these numbers, so the delay chose regions.
+
+### Fixed
+- **Probe timing off the app isolate** (dart:io). `gravixMeasureRegions` (and so
+  `gravixStartRegionMeasurement`) hands each run's region list to one helper isolate, which
+  measures the regions there in parallel (`kGravixMeasureConcurrency`): the cold request, one
+  retry when it got no answer, then the warm samples on its kept-alive connection, each
+  request bounded by `kGravixMeasureTimeout`, and the region verification as before (a probe
+  naming another region = failed). Every sample is streamed back as it is taken; the budget
+  (`probe_budget_ms`), the early stop and the choice stay on the app's isolate, and the end of
+  the run aborts what is in flight there and the isolate exits. In the SDK's test with the app
+  isolate blocked in 300 ms chunks and a local region answering at once: 0-1 ms with the
+  helper isolate, 301-303 ms with the 0.9.0 sampler.
+- **Fallback.** The app's isolate measures, as in 0.9.0, when the app passes its own
+  `sampler` / `samplerFor` (unchanged seams), on web, when the app installed `HttpOverrides`
+  (they apply to their own isolate only; `GravixRegionMeasureIsolate.ignoreHttpOverrides`
+  measures in the helper isolate anyway), or when the isolate cannot start (logged).
+  `GravixRegionMeasureIsolate.enabled = false` is the rollback. The background video-region
+  probe (after a run whose fastest region is audio-only) still samples on the app isolate.
+
+### Added: logs
+- `[GravixRegion] sample region=<r> warm=[a,b] cold=<ms|-> status=ok|failed|unmeasured
+  [retried] [conns=N] via=isolate|main`: one line per planned region at the end of every run,
+  the raw samples the choice was made from.
+- `[GravixRegion] select -> <region|none> rtt=<ms|-> reason=<..|fallback> source=<..|none>
+  [anchor=<r>] why=complete|early|budget ms=<run> budget=<ms>`: the run's answer on every path
+  (before, only the per-media choice was logged, so a fleet whose regions all take video logged
+  no select line), and `select -> none reason=no-directory` when there was no region list.
+- `[GravixRegion] sampler via=main cause=isolate-failed(<type>)|http-overrides` when the helper
+  isolate is not used.
+
 ## 0.9.0 — 2026-11-08
 
 Joins wait for the region measurement, and a listener may be reconnected mid-call to a

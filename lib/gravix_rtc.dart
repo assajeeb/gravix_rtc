@@ -47,6 +47,7 @@ export 'src/connect/gravix_region_cache.dart';
 export 'src/connect/gravix_region_join_wait.dart';
 export 'src/connect/gravix_region_media.dart' hide gravixClearRegionMedia;
 export 'src/connect/gravix_region_probe_client.dart';
+export 'src/connect/gravix_region_sampler_isolate.dart' show GravixRegionMeasureIsolate;
 export 'src/connect/gravix_region_prober.dart';
 export 'src/connect/gravix_region_report.dart';
 export 'src/connect/gravix_region_selection.dart';
