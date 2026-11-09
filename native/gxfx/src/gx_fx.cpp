@@ -420,6 +420,14 @@ void gx_fx_get_status(gx_fx *fx, gx_fx_status *o) {
   o->max_us = fx->maxUs.load(std::memory_order_relaxed);
 }
 
+int gx_fx_process_int16_scale(gx_fx *fx, float *pcm, int n, int rate) {
+  if (!pcm || n <= 0 || n > kMaxFrames) return GX_FX_PASSTHROUGH;
+  for (int i = 0; i < n; i++) pcm[i] *= 1.f / 32768.f;  // a power of two: an untouched block comes back exact
+  int rc = gx_fx_process(fx, pcm, n, rate);
+  for (int i = 0; i < n; i++) pcm[i] *= 32768.f;
+  return rc;
+}
+
 int gx_fx_process(gx_fx *fx, float *pcm, int n, int rate) {
   Chain *next = fx->pending.load(std::memory_order_acquire);
   Chain *c = fx->chain;

@@ -14,7 +14,7 @@ JNIEXPORT jint JNICALL JNI_FN(nativeProcess)(JNIEnv *env, jclass, jlong h, jobje
   if (!h || n <= 0) return GX_FX_PASSTHROUGH;
   auto *p = static_cast<float *>(env->GetDirectBufferAddress(buf));
   if (!p || env->GetDirectBufferCapacity(buf) < static_cast<jlong>(n) * 4) return GX_FX_PASSTHROUGH;
-  return gx_fx_process(FX(h), p, n, rate);
+  return gx_fx_process_int16_scale(FX(h), p, n, rate);
 }
 // requested, active, rate, bypass, watchdog, latency_ms, frames, over, max_us
 JNIEXPORT void JNICALL JNI_FN(nativeStatus)(JNIEnv *env, jclass, jlong h, jintArray out) {

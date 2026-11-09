@@ -35,7 +35,7 @@ final class GxVoiceFx {
         let channels = audioBuffer.channels
         guard frames > 0, channels > 0 else { return }
         let ch0 = audioBuffer.rawBuffer(forChannel: 0)
-        let rc = gx_fx_process(fx, ch0, Int32(frames), Int32(frames * 100))
+        let rc = gx_fx_process_int16_scale(fx, ch0, Int32(frames), Int32(frames * 100))
         if rc == Int32(GX_FX_OK) {
             if channels > 1 { for c in 1 ..< channels { audioBuffer.rawBuffer(forChannel: c).update(from: ch0, count: frames) } }
         } else if rc == Int32(GX_FX_NEED_REBUILD) {

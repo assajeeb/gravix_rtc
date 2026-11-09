@@ -69,6 +69,10 @@ void gx_fx_get_status(gx_fx *fx, gx_fx_status *out);
 /* In place, mono float, one 10 ms block (any block size up to 4096 frames). */
 int gx_fx_process(gx_fx *fx, float *pcm, int frames, int rate);
 
+/* The same for int16-scale floats ([-32768, 32767]), which is what WebRTC's
+ * capturePostProcessing delivers. gx_fx_process itself wants [-1, 1]. */
+int gx_fx_process_int16_scale(gx_fx *fx, float *pcm, int frames, int rate);
+
 /* Runs a preset on a private chain over synthetic speech. Control thread. 0, or -1. */
 int gx_fx_benchmark(int preset, int rate, int seconds, gx_fx_bench *out);
 

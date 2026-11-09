@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1 — 2026-11-10
+
+### Fixed
+- Voice effects: every effect made the microphone almost silent in a real call. WebRTC's capture audio is int16-scale and the effects expected [-1, 1]. 0.10.0 should not be used with effects.
+
 ## 0.10.0 — 2026-11-10
 
 ### Added
