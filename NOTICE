@@ -110,3 +110,9 @@ file and in the copyright lines at the top of the derived files listed above
 (plus fork-maintenance notes under `doc/` and `CHANGELOG.md`). It is not used in
 any identifier, package name, channel name or runtime string; source comments do
 not reach compiled artifacts.
+
+## Third-party components (voice effects, `native/gxfx`)
+
+- Signalsmith Stretch (MIT, `native/gxfx/third_party/signalsmith-stretch-LICENSE.txt`), https://github.com/Signalsmith-Audio/signalsmith-stretch
+- Signalsmith Linear (MIT, `native/gxfx/third_party/signalsmith-linear/LICENSE.txt`), https://github.com/Signalsmith-Audio/linear
+- The reverb follows the structure of Freeverb by Jezar at Dreampoint (public domain).

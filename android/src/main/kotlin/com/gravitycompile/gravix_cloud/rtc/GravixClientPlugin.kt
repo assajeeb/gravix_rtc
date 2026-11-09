@@ -152,6 +152,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
       }
     }
     // noise suppression events (switch, routeReset, musicBypass, summary) to Dart
+    GxVoiceFx.eventSink = { m -> mainHandler.post { invokeOnChannel("onVoiceEffects", m) } }
     GxNoiseProcessor.eventSink = { m -> mainHandler.post { invokeOnChannel("onNoiseSuppression", m) } }
     GxRecordStartGuard.eventSink = recordFailureSink
     GxNoiseProcessor.stateReader = {
@@ -742,6 +743,22 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
       "setMicrophoneMute" -> {
         handleSetMicrophoneMute(call, result)
+      }
+
+      "fxConfigure" -> {
+        @Suppress("UNCHECKED_CAST")
+        val args = (call.arguments as? Map<String, Any?>) ?: emptyMap()
+        result.success(GxVoiceFx.configure(flutterWebRTCPlugin, args))
+      }
+
+      "fxStats" -> {
+        result.success(GxVoiceFx.stats())
+      }
+
+      "fxBenchmark" -> {
+        @Suppress("UNCHECKED_CAST")
+        val args = (call.arguments as? Map<String, Any?>) ?: emptyMap()
+        GxVoiceFx.benchmark(args) { m -> mainHandler.post { result.success(m) } }
       }
 
       "nsDeviceFacts" -> {

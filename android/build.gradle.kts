@@ -63,7 +63,7 @@ android {
         }
         externalNativeBuild {
             cmake {
-                arguments += listOf("-DANDROID_STL=none", "-DGXNS_STUDIO=" + (if (gravixNsStudio) "ON" else "OFF"))
+                arguments += listOf("-DANDROID_STL=c++_static", "-DGXNS_STUDIO=" + (if (gravixNsStudio) "ON" else "OFF"))
             }
         }
     }

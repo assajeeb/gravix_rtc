@@ -7,6 +7,7 @@ doc/UPSTREAM_FORK.md
 # gx_ns host tests, PCM fixtures and fixture tools: development only (the C sources ship)
 native/gxns/tests/
 native/gxns/tools/
+native/gxfx/tests/
 # iOS NS host check (dev only)
 tool/ns_ios_host/
 tool/ns_android/

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0 — 2026-11-10
+
+### Added
+- Voice effects of the microphone: `GravixVoiceEffects.instance.set(GravixVoiceEffect.robot)`, with 35 effects (voice change, voice character, rooms and scale snapping; see `GravixVoiceEffect`) and `none`, on Android and iOS. Runs on the device after noise suppression; the servers are not involved. Effects that change pitch add about 40 ms of delay, the others none. The voice goes out without the effect while room music plays, so the music is not pitch shifted. A device that cannot keep up falls back to no effect (`GravixVoiceEffectReason.watchdog`).
+
 ## 0.9.1 — 2026-11-08
 
 The region measurement times its requests in a helper isolate. Field, Tuki app (Redmi, one

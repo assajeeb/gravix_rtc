@@ -78,6 +78,7 @@ export 'src/music/gravix_music_controller.dart';
 export 'src/music/gravix_music_channel.dart' show kGravixMusicChannel;
 export 'src/music/gravix_room_music.dart';
 export 'src/noise/noise.dart';
+export 'src/voice_fx/gravix_voice_effects.dart';
 export 'src/rtc_core/src/audio/gravix_audio_scenario.dart';
 export 'src/room/gravix_audio_first.dart';
 export 'src/room/gravix_effective_quality.dart';

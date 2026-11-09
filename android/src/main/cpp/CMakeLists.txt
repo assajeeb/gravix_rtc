@@ -1,7 +1,7 @@
 # libgxns.so for Android: the gx_ns core (RNNoise + speexdsp resampler + gx_ns)
 # from ../native/gxns plus the JNI bridge used by GxNoiseProcessor.kt.
 cmake_minimum_required(VERSION 3.18)
-project(gxns_android C)
+project(gxns_android C CXX)
 
 set(GXNS_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../../../native/gxns)
 # Reuse the core's source list / defines (it only defines static targets).
@@ -19,6 +19,16 @@ target_link_options(gxns_jni PRIVATE
   -Wl,--gc-sections
   -Wl,--exclude-libs,ALL
   -Wl,--build-id=sha1)
+
+# libgxfx.so: voice effects (../native/gxfx). C++ with a private static libc++,
+# separate from libgxns so noise suppression never depends on it.
+set(GXFX_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../../../native/gxfx)
+add_library(gxfx SHARED gx_fx_jni.cpp ${GXFX_ROOT}/src/gx_fx.cpp)
+target_include_directories(gxfx PRIVATE ${GXFX_ROOT}/include)
+target_compile_features(gxfx PRIVATE cxx_std_17)
+target_compile_options(gxfx PRIVATE -O2 -fvisibility=hidden -fvisibility-inlines-hidden -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
+target_link_libraries(gxfx PRIVATE log m)
+target_link_options(gxfx PRIVATE -Wl,-z,max-page-size=16384 -Wl,--gc-sections -Wl,--exclude-libs,ALL -Wl,--build-id=sha1)
 
 # Studio engine (DeepFilterNet3 on the bundled minimal ONNX Runtime): arm64-v8a
 # only. A separate library so libgxns never depends on ORT.

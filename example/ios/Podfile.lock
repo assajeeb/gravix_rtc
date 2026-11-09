@@ -58,7 +58,7 @@ SPEC CHECKSUMS:
   device_info_plus: 21fcca2080fbcd348be798aa36c3e5ed849eefbe
   Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
   flutter_webrtc: 99283145164f482a16bf7122ef407b5d59d43158
-  gravix_rtc: b9ea8578254b4ca0782ac420ccfe6e13e8f5ea5e
+  gravix_rtc: 16ffddaf77a39e8600171ab553bbe54dd22487a7
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
   WebRTC-SDK: 7dc931c64c00c735a614382f1a59cf65019c3c17

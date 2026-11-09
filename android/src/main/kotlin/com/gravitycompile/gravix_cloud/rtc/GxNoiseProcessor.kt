@@ -130,6 +130,11 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   }
 
   override fun process(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
+    processNoise(numBands, numFrames, buffer)
+    GxVoiceFx.process(buffer, numFrames, initChannels)
+  }
+
+  private fun processNoise(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
     val h = handle
     if (h == 0L) return
     val cap = buffer.capacity()
@@ -249,7 +254,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
    */
   @Synchronized
   fun installOn(plugin: FlutterWebRTCPlugin?, where: String): Boolean {
-    if (handle == 0L) return false
+    if (handle == 0L && !GxVoiceFx.wanted()) return false
     val c = try {
       plugin?.audioProcessingController
     } catch (t: Throwable) {
@@ -307,6 +312,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
 
   /** MusicMixerEngine session start / end (any thread). */
   fun onMusic(active: Boolean) {
+    GxVoiceFx.onMusic(active)
     if (musicActive == active) return
     musicActive = active
     val now = SystemClock.elapsedRealtime()

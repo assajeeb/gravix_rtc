@@ -1,0 +1,4 @@
+module gxfx {
+    header "gx_fx.h"
+    export *
+}

@@ -117,6 +117,7 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
         // post-processing slot now (before any capture), pass-through until
         // Dart sends nsConfigure.
         GxNoiseProcessor.shared.install(channel: channel)
+        GxVoiceFx.shared.install(channel: channel)
         instance.startObservingRouteChanges()
         BroadcastManager.shared.isBroadcastingPublisher
             .sink { isBroadcasting in
@@ -813,6 +814,9 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         #if os(iOS)
+        if call.method.hasPrefix("fx"), GxVoiceFx.shared.handle(call, result: result) {
+            return
+        }
         if call.method.hasPrefix("ns"), GxNoiseProcessor.shared.handle(call, result: result) {
             return
         }

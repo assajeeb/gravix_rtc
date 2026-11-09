@@ -438,6 +438,12 @@ class Native {
   @internal
   static Stream<Map<String, Object?>> get noiseSuppressionEvents => _noiseSuppression.stream;
 
+  static final StreamController<Map<String, Object?>> _voiceEffects = StreamController.broadcast();
+
+  /// `onVoiceEffects` from the native processor (watchdog, music bypass).
+  @internal
+  static Stream<Map<String, Object?>> get voiceEffectEvents => _voiceEffects.stream;
+
   /// A noise-suppression call on the gravix_client channel (`nsDeviceFacts`,
   /// `nsConfigure`, `nsStats`). Null when the platform has no implementation.
   @internal
@@ -693,6 +699,10 @@ class Native {
       case 'onOtherAppAudio':
         final args = call.arguments;
         if (args is Map) _otherAppAudio.add(args.cast<String, Object?>());
+        return null;
+      case 'onVoiceEffects':
+        final args = call.arguments;
+        if (args is Map) _voiceEffects.add(args.cast<String, Object?>());
         return null;
       case 'onNoiseSuppression': // Android
         final args = call.arguments;

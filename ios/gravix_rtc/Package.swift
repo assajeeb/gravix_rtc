@@ -41,10 +41,18 @@ let package = Package(
                 .headerSearchPath("shim"),
             ]
         ),
+        // Voice effects core (C++17; sources live once in native/gxfx, same
+        // forwarder pattern as gxns).
+        .target(
+            name: "gxfx",
+            path: "Sources/gxfx",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "gravix_rtc",
             dependencies: [
                 "gxns",
+                "gxfx",
                 .product(name: "FlutterFramework", package: "FlutterFramework"),
                 .product(name: "flutter-webrtc", package: "flutter_webrtc"),
                 .product(name: "WebRTC", package: "flutter_webrtc")
@@ -60,5 +68,6 @@ let package = Package(
                 .copy("Resources/ns"),
             ]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

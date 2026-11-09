@@ -19,8 +19,8 @@ A new Flutter plugin project.
   # below, not listed here, so CocoaPods never copies a forwarder header into
   # the framework (its relative #include would break there). Swift imports the
   # core as `gxns` through include/module.modulemap (SWIFT_INCLUDE_PATHS).
-  s.source_files = 'gravix_rtc/Sources/gravix_rtc/**/*.swift', 'gravix_rtc/Sources/gxns/*.c'
-  s.preserve_paths = 'gravix_rtc/Sources/gxns/**/*'
+  s.source_files = 'gravix_rtc/Sources/gravix_rtc/**/*.swift', 'gravix_rtc/Sources/gxns/*.c', 'gravix_rtc/Sources/gxfx/*.cpp'
+  s.preserve_paths = 'gravix_rtc/Sources/gxns/**/*', 'gravix_rtc/Sources/gxfx/**/*'
   s.dependency 'Flutter'
   # The native RTC plugin talks to flutter_webrtc's audio device module and
   # RTCAudioSession. WebRTC-SDK without a version: flutter_webrtc pins it
@@ -31,14 +31,16 @@ A new Flutter plugin project.
   s.dependency 'WebRTC-SDK'
   s.static_framework = true
   s.frameworks = 'AVFoundation', 'ReplayKit', 'CoreML'
+  s.libraries = 'c++'
   s.platform = :ios, '13.0'
 
   # Flutter.framework does not contain a i386 slice.
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/include" "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/shim"',
-    'SWIFT_INCLUDE_PATHS' => '$(inherited) "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/include"',
+    'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
+    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxfx/include" "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/include" "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/shim"',
+    'SWIFT_INCLUDE_PATHS' => '$(inherited) "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxfx/include" "$(PODS_TARGET_SRCROOT)/gravix_rtc/Sources/gxns/include"',
     # The noise suppression core runs on the real-time capture thread: keep it
     # optimised in Debug builds too (only C is affected; Swift keeps -Onone).
     'GCC_OPTIMIZATION_LEVEL' => '2',

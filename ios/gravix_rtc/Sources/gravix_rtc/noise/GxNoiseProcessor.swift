@@ -117,6 +117,11 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
     }
 
     func audioProcessingProcess(_ audioBuffer: RTCAudioBuffer) {
+        processNoise(audioBuffer)
+        GxVoiceFx.shared.process(audioBuffer)
+    }
+
+    private func processNoise(_ audioBuffer: RTCAudioBuffer) {
         guard gxns_flag_get(enabled) != 0, let ns else { return }
         let frames = audioBuffer.frames
         let channels = audioBuffer.channels
@@ -358,6 +363,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
     }
 
     private func setMusicActive(_ on: Bool, source: String) {
+        GxVoiceFx.shared.setMusicActive(on)
         guard musicActive != on else { return }
         musicActive = on
         guard let ns, config.musicBypass else { return }
