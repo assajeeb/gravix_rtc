@@ -192,6 +192,16 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
   @internal
   Duration? gravixNextDialTimeout;
 
+  /// GRAVIX (0.10.2, GravixRecoveryOptions.reconnectDialTimeout): the next [connect] only: no
+  /// connection up within this, the dial gives up (a dial whose connection is up keeps its
+  /// bounds). Where the connector cannot tell (web, unbounded), it caps the dial timeout.
+  @internal
+  Duration? gravixNextConnectWithin;
+
+  /// GRAVIX (0.10.2): the last [connect]'s dial failed with no connection up within its bound.
+  @internal
+  bool gravixLastDialNoConnection = false;
+
   /// GRAVIX (2026-10-11, GravixRecoveryOptions.silentHostFailFast): the host
   /// whose last signal dial failed with no connection up at all, and when.
   String? _gravixSilentHost;
@@ -236,7 +246,15 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
     // same-url retry, set by the engine); null = timeouts.connection
     final gravixDialTimeout = gravixNextDialTimeout;
     gravixNextDialTimeout = null;
-    final dialTimeout = gravixDialTimeout ?? connectOptions.timeouts.connection;
+    final gravixWithin = gravixNextConnectWithin;
+    gravixNextConnectWithin = null;
+    gravixLastDialNoConnection = false;
+    var dialTimeout = gravixDialTimeout ?? connectOptions.timeouts.connection;
+    // GRAVIX (0.10.2): a connector that cannot see the connection come up gets a shorter timeout
+    final gravixWithinSeen =
+        !kIsWeb && roomOptions.recovery.boundedSignalConnect && _wsConnector is GravixBoundedWebSocketConnector;
+    final gravixWithinAsTimeout = gravixWithin != null && !gravixWithinSeen && gravixWithin < dialTimeout;
+    if (gravixWithinAsTimeout) dialTimeout = gravixWithin;
     // GRAVIX (2026-10-11, GravixRecoveryOptions.boundedSignalConnect): every
     // network step of this connect -- the dial, and the validate request after a
     // failed dial -- ends at [dialTimeout] and closes its socket. Soak 2026-10-11
@@ -359,7 +377,7 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
               preconnected: preconnected,
               connectTimeout: dialCap,
               hedgeAfter: hedged && !silentBefore ? dialTimeout : null,
-              connectWithin: silentBefore ? dialTimeout : null,
+              connectWithin: gravixWithin ?? (silentBefore ? dialTimeout : null),
               upgradeWindow: extended ? window : null,
               dialCeiling: extended ? ceiling : null,
             )
@@ -394,6 +412,8 @@ class SignalClient extends Disposable with EventsEmittable<SignalEvent> {
         if (failFast) gravixForgetSilentHost();
       } catch (e) {
         if (failFast) _gravixNoteDialFailure(rtcUri.host, e);
+        gravixLastDialNoConnection =
+            (e is GravixDialTimeoutException && e.noConnection) || (gravixWithinAsTimeout && e is TimeoutException);
         // GRAVIX: a dial that answers after the join gave up (the connection
         // timeout) is a server session nobody reads -- a ghost participant until
         // the SFU's ping timeout: close it when it lands. (Caught broadly: this

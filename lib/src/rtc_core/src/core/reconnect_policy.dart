@@ -21,7 +21,17 @@ import 'dart:math' as math;
 
 /// What the engine knows when it asks a [ReconnectPolicy] for the next delay.
 class ReconnectContext {
-  const ReconnectContext({required this.retryCount, required this.elapsedMs, this.retryReason, this.serverUrl});
+  const ReconnectContext({
+    required this.retryCount,
+    required this.elapsedMs,
+    this.retryReason,
+    this.serverUrl,
+    this.gravixLastDialTimedOut,
+  });
+
+  /// GRAVIX (0.10.2): the last attempt's signal dial got no connection within its timeout (the
+  /// network is down, not the server refusing). Null on the first call after a disconnect.
+  final bool? gravixLastDialTimedOut;
 
   /// Number of failed reconnect attempts so far (0 on the first call after a
   /// disconnect).
@@ -75,7 +85,13 @@ const List<int> kDefaultReconnectDelaysInMs = [
 class DefaultReconnectPolicy implements ReconnectPolicy {
   DefaultReconnectPolicy([List<int>? retryDelays, math.Random? random])
     : retryDelays = List<int>.unmodifiable(retryDelays ?? kDefaultReconnectDelaysInMs),
+      gravixDefaultTable = retryDelays == null,
       _random = random ?? math.Random();
+
+  /// GRAVIX (0.10.2): built with the SDK's own table. Only then does the engine apply
+  /// `GravixRecoveryOptions.reconnectRetryDelayCap` and `reconnectGiveUpAfter`; a table the app
+  /// passed is used exactly, attempt limit included.
+  final bool gravixDefaultTable;
 
   final List<int> retryDelays;
   final math.Random _random;

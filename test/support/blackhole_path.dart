@@ -91,6 +91,9 @@ final class BlackholePath extends IOOverrides {
   bool refuse = false;
   int refused = 0;
 
+  /// The next this-many connects are refused at once (then the path behaves as [up] says).
+  int refuseNext = 0;
+
   /// `host:port` of every connect, as dart:io was asked for it (the override
   /// redirects them all to the local server, so a wrong port would otherwise go
   /// unnoticed: emulator 2026-10-11, the hedged dial asked for port 0).
@@ -106,7 +109,8 @@ final class BlackholePath extends IOOverrides {
     int sourcePort = 0,
   }) {
     requested.add('${host is InternetAddress ? host.address : host}:$port');
-    if (refuse) {
+    if (refuse || refuseNext > 0) {
+      if (refuseNext > 0) refuseNext--;
       refused++;
       return Future.error(const SocketException('Connection refused'));
     }

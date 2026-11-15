@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.10.2 — 2026-11-15
+
+Reconnecting after long network cuts (Bangladesh networks drop often). Same rules as the JS SDK
+0.9.1.
+
+### Fixed
+- After a 30-90 s cut the SDK reached the server up to ~23 s after the network was back: each
+  reconnect dial waited out its timeout (10 s, a full reconnect's raced dial up to 30 s) while TCP
+  backed off, then 7 s + jitter, so no dial was in flight when the network returned.
+- A reconnect dial with no connection up after 3.5 s now gives up
+  (`GravixRecoveryOptions.reconnectDialTimeout`); a dial whose connection is up keeps its bounds.
+  Every 4th dial in a row with no connection is a long one (a resume: 8 s; a full reconnect: the
+  0.10.1 raced dial), so a slow but live path still connects. The first join is not affected.
+- After a dial with no connection the next attempt waits 1-2 s (`reconnectRetryDelayCap`). A
+  failure the server answered keeps the old back-off (up to 7 s + 1 s of jitter): a restarting
+  server sees no extra dials.
+- The default reconnect policy gives up after 150 s (`reconnectGiveUpAfter`), not after the 10th
+  attempt; `RoomAttemptReconnectEvent.maxAttemptsRetry` is then -1. A policy or a
+  `DefaultReconnectPolicy` table the app passes is used exactly as before.
+- A connectivity change (not `none`) starts a reconnect waiting for its back-off at once; one that
+  arrives during an attempt makes the next retry go with no wait.
+- Unchanged: a refused resume rejoins fully at once. Resumes whose dials got no connection become a
+  full reconnect no sooner than two 0.10.1 dials did (2 x `Timeouts.connection`).
+- `ReconnectContext.gravixLastDialTimedOut` tells an app's own policy whether the last dial had no
+  connection.
+- A resume dial whose socket fails as the network comes back (the dial before got no connection)
+  is resumed once more at once instead of a full reconnect, which dropped the session the server
+  still held (JS rig, cut 75 s, grace 120 s). A second failure in a row still reconnects fully.
+- Rollback: `RoomOptions(recovery: GravixRecoveryOptions.before0102)` (`legacy` includes it).
+
 ## 0.10.1 — 2026-11-10
 
 ### Fixed

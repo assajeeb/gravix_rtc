@@ -128,6 +128,8 @@ void main() {
         sameUrlRetryDialTimeout: Duration(milliseconds: 200),
         signalDialCap: Duration(milliseconds: 900),
         silentHostFailFast: false,
+        // (0.10.2) the 0.10.1 reconnect timing: its short dials would shorten this path too
+        reconnectDialTimeout: Duration.zero,
       ),
     );
     final ms = await failoverMs();

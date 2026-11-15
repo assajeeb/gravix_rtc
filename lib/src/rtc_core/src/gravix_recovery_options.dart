@@ -61,7 +61,19 @@ class GravixRecoveryOptions {
     this.slowTcpFor = const Duration(seconds: 10),
     this.resumeAfterNetworkSocketError = true,
     this.resumeBeforeFullOnNetworkFailure = true,
+    this.reconnectDialTimeout = const Duration(milliseconds: 3500),
+    this.reconnectRetryDelayCap = const Duration(seconds: 2),
+    this.reconnectGiveUpAfter = const Duration(seconds: 150),
   });
+
+  /// GRAVIX (0.10.2): the 0.10.1 reconnect timing (dials wait out their timeout, the 7 s
+  /// back-off, 10 attempts); everything else stays on. The rollback of 0.10.2:
+  /// `RoomOptions(recovery: GravixRecoveryOptions.before0102)`.
+  static const before0102 = GravixRecoveryOptions(
+    reconnectDialTimeout: Duration.zero,
+    reconnectRetryDelayCap: Duration.zero,
+    reconnectGiveUpAfter: Duration.zero,
+  );
 
   /// GRAVIX (2026-10-14): the 0.4.16 behaviour in one step: every recovery switch
   /// 0.4.18 added is off (resumeReasonNetworkWindow, freshPeerFailedGrace,
@@ -121,6 +133,9 @@ class GravixRecoveryOptions {
     iceTransportWatch: Duration.zero,
     resumeAfterNetworkSocketError: false,
     resumeBeforeFullOnNetworkFailure: false,
+    reconnectDialTimeout: Duration.zero,
+    reconnectRetryDelayCap: Duration.zero,
+    reconnectGiveUpAfter: Duration.zero,
   );
 
   /// Reconnect fixes ported from the upstream client SDK 2.13.0: a server
@@ -587,6 +602,32 @@ class GravixRecoveryOptions {
   /// behaviour).
   final bool resumeBeforeFullOnNetworkFailure;
 
+  /// GRAVIX (0.10.2, 2026-11-15, Edu reconnect rig; JS SDK 0.9.1 parity): a reconnect dial (a
+  /// resume, or a full reconnect's signal dial) with no connection up this long after it started
+  /// gives up, instead of waiting out `Timeouts.connection` (10 s) or the full reconnect's 30 s
+  /// race while TCP backs off: after a 30-90 s cut no dial was in flight when the network came
+  /// back, and the SDK reached the SFU up to ~23 s late. A dial whose connection IS up keeps its
+  /// normal bounds (a slow but live path), and every 4th dial in a row with none waits
+  /// max(2 x this, 8 s). Not the first join, nor the same-url retry ([sameUrlRetryDialTimeout]).
+  /// Resumes whose dials got no connection still become a full reconnect after two in a row, but
+  /// no sooner than two 0.10.1 dials took (2 x `Timeouts.connection`): two short dials would
+  /// replace a session the server still holds (new track SIDs); a server that dropped it refuses
+  /// the resume and the full reconnect follows at once. Duration.zero: off (the 0.10.1 timing).
+  final Duration reconnectDialTimeout;
+
+  /// GRAVIX (0.10.2): after a reconnect dial that got no connection (the network is down), the
+  /// wait before the next attempt is at most this, from half of it to all of it (jitter kept). A
+  /// failure the server answered (a refused resume, an HTTP error, a closed socket) keeps the
+  /// policy's back-off (up to 7 s + 1 s of jitter): a restarting server sees no extra dials. Only
+  /// with the SDK's default reconnect policy. Duration.zero: off.
+  final Duration reconnectRetryDelayCap;
+
+  /// GRAVIX (0.10.2): with the SDK's default reconnect policy, reconnecting stops this long after
+  /// the connection was lost, instead of after the 10th attempt (short dials spent 10 attempts in
+  /// under a minute). Must outlast the server's hold of the session (Edu publisher grace: 120 s).
+  /// RoomAttemptReconnectEvent.maxAttemptsRetry is then -1. Duration.zero: the 10-attempt limit.
+  final Duration reconnectGiveUpAfter;
+
   GravixRecoveryOptions copyWith({
     bool? upstreamReconnectFixes,
     bool? measuredRegionFailover,
@@ -648,6 +689,9 @@ class GravixRecoveryOptions {
     Duration? slowTcpFor,
     bool? resumeAfterNetworkSocketError,
     bool? resumeBeforeFullOnNetworkFailure,
+    Duration? reconnectDialTimeout,
+    Duration? reconnectRetryDelayCap,
+    Duration? reconnectGiveUpAfter,
   }) => GravixRecoveryOptions(
     upstreamReconnectFixes: upstreamReconnectFixes ?? this.upstreamReconnectFixes,
     measuredRegionFailover: measuredRegionFailover ?? this.measuredRegionFailover,
@@ -709,5 +753,8 @@ class GravixRecoveryOptions {
     slowTcpFor: slowTcpFor ?? this.slowTcpFor,
     resumeAfterNetworkSocketError: resumeAfterNetworkSocketError ?? this.resumeAfterNetworkSocketError,
     resumeBeforeFullOnNetworkFailure: resumeBeforeFullOnNetworkFailure ?? this.resumeBeforeFullOnNetworkFailure,
+    reconnectDialTimeout: reconnectDialTimeout ?? this.reconnectDialTimeout,
+    reconnectRetryDelayCap: reconnectRetryDelayCap ?? this.reconnectRetryDelayCap,
+    reconnectGiveUpAfter: reconnectGiveUpAfter ?? this.reconnectGiveUpAfter,
   );
 }

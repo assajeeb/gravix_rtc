@@ -54,6 +54,7 @@ import '../../../connect/gravix_answer_order.dart'; // GRAVIX: subscriber answer
 import '../../../connect/gravix_viewer_fast_start.dart'; // GRAVIX: viewer fast start (passive subscriber DTLS)
 import 'add_track_rejection.dart';
 import 'reconnect_policy.dart';
+import 'reconnect_timing.dart';
 import 'signal_client.dart';
 import 'gravix_ice_transport.dart';
 import 'gravix_pub_log.dart';
@@ -433,6 +434,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       final before = event.oldState.toSet(), now = event.state.toSet();
       if (now.contains(ConnectivityResult.none) || before.length != now.length || !before.containsAll(now)) {
         _gravixNoteNetTrouble();
+        if (now.isNotEmpty && !now.contains(ConnectivityResult.none)) _gravixNetworkBack();
       }
     });
 
@@ -487,6 +489,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
 
     signalClient.gravixNextDialTimeout = _gravixNextDialTimeout;
     _gravixNextDialTimeout = null;
+    signalClient.gravixNextConnectWithin = _gravixNextConnectWithin;
+    _gravixNextConnectWithin = null;
     // upstream 2.13.1 (#1228): this attempt's setup time scales the video start bitrate hint
     final connectStopwatch = Stopwatch()..start();
     try {
@@ -593,6 +597,51 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
   /// GRAVIX (0.4.15): the dial timeout of the next [connect] only (the
   /// same-url retry of a full reconnect).
   Duration? _gravixNextDialTimeout;
+
+  /// GRAVIX (0.10.2, reconnectDialTimeout): the connect-within bound of the next [connect] only.
+  Duration? _gravixNextConnectWithin;
+
+  /// GRAVIX (0.10.2): the last reconnect attempt's dial got no connection; how many in a row.
+  bool _gravixLastDialNoConnection = false;
+  int _gravixNoConnectionDialsInARow = 0;
+
+  /// GRAVIX (0.10.2): the network came back while an attempt ran: the next retry has no wait.
+  bool _gravixRetryAtOnce = false;
+
+  /// GRAVIX (0.10.2): what the reconnect waiting for its timer was asked for.
+  ClientDisconnectReason? _gravixPendingReason;
+  lk_models.ReconnectReason? _gravixPendingReconnectReason;
+
+  /// The connect-within bound of a reconnect dial now (null: off).
+  Duration? _gravixReconnectConnectWithin() => gravixReconnectConnectWithin(
+    roomOptions.recovery.reconnectDialTimeout,
+    connectOptions.timeouts.connection,
+    _gravixNoConnectionDialsInARow,
+  );
+
+  /// GRAVIX (0.10.2): the device's network is back (a connectivity change that is not `none`):
+  /// a reconnect waiting for its timer goes now; one in flight retries with no wait if it fails.
+  void _gravixNetworkBack() {
+    final recovery = roomOptions.recovery;
+    if (_isClosed ||
+        (recovery.reconnectDialTimeout <= Duration.zero && recovery.reconnectRetryDelayCap <= Duration.zero)) {
+      return;
+    }
+    if (_attemptingReconnect) {
+      _gravixRetryAtOnce = true;
+      return;
+    }
+    if (_reconnectStart != null && (_reconnectTimeout?.isActive ?? false)) {
+      logger.info('network back: reconnecting now instead of after the back-off');
+      _clearReconnectTimeout();
+      unawaited(
+        attemptReconnect(
+          _gravixPendingReason ?? ClientDisconnectReason.reconnectRetry,
+          reconnectReason: _gravixPendingReconnectReason,
+        ),
+      );
+    }
+  }
 
   /// GRAVIX (0.4.15): the next [restartConnection] is the same-url retry.
   bool _gravixSameUrlRetryNext = false;
@@ -1778,15 +1827,22 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     }
 
     final policy = reconnectPolicy;
+    final recovery = roomOptions.recovery;
     int? nextDelay;
     try {
-      nextDelay = policy.nextRetryDelayInMs(
+      // GRAVIX (0.10.2): the default policy gets the time budget and the cap after a dial with
+      // no connection (reconnect_timing.dart)
+      nextDelay = gravixReconnectDelay(
+        policy,
         ReconnectContext(
           retryCount: _reconnectAttempts,
           elapsedMs: DateTime.timestamp().difference(_reconnectStart ?? DateTime.timestamp()).inMilliseconds,
           retryReason: reason.name,
           serverUrl: url,
         ),
+        lastDialTimedOut: _gravixLastDialNoConnection,
+        retryDelayCap: recovery.reconnectRetryDelayCap,
+        giveUpAfter: recovery.reconnectGiveUpAfter,
       );
     } catch (e) {
       // An error in the app's policy stops reconnecting (React parity).
@@ -1807,12 +1863,24 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     // policy adds it exactly as this code used to.
     // GRAVIX: a reconnect the server asked for (Leave) or a resume it refused
     // goes at once, as the JS SDK does for a Leave.
-    final delay = (immediate || reason == ClientDisconnectReason.leaveReconnect || nextDelay < 0) ? 0 : nextDelay;
+    // GRAVIX (0.10.2): the network came back during the attempt that just failed
+    final atOnce = _gravixRetryAtOnce;
+    _gravixRetryAtOnce = false;
+    final delay = (immediate || atOnce || reason == ClientDisconnectReason.leaveReconnect || nextDelay < 0)
+        ? 0
+        : nextDelay;
+    _gravixPendingReason = reason;
+    _gravixPendingReconnectReason = reconnectReason;
 
     events.emit(
       EngineAttemptReconnectEvent(
         attempt: _reconnectAttempts + 1,
-        maxAttempts: policy is DefaultReconnectPolicy ? policy.maxAttempts : -1,
+        // (0.10.2) a time budget has no fixed attempt count
+        maxAttempts:
+            policy is DefaultReconnectPolicy &&
+                !(policy.gravixDefaultTable && recovery.reconnectGiveUpAfter > Duration.zero)
+            ? policy.maxAttempts
+            : -1,
         nextRetryDelaysInMs: delay,
       ),
     );
@@ -1872,6 +1940,7 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     _gravixAttemptSignalLost = false; // GRAVIX (2026-10-11, restartAbortsOnSignalLoss)
     // a new attempt owns the publisher now
     _gravixStopPublisherWatch();
+    signalClient.gravixLastDialNoConnection = false; // GRAVIX (0.10.2)
     try {
       _attemptingReconnect = true;
 
@@ -1914,6 +1983,9 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
       _attemptingReconnect = false;
       _isReconnecting = false;
       _unrecoveredResumes = 0;
+      _gravixLastDialNoConnection = false;
+      _gravixNoConnectionDialsInARow = 0;
+      _gravixRetryAtOnce = false;
       succeeded = true;
       // GRAVIX (2026-10-14, review F1): the transport watch resumes after the
       // reconnect, firstReadDelay later
@@ -1938,6 +2010,12 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         _reconnectAttempts = _reconnectAttempts + 1;
       }
       logger.fine('attemptReconnect: ${fullReconnect ? 'full reconnect' : 'resume'} failed: $e');
+      // GRAVIX (0.10.2): no connection came up within the dial's bound (the network is down)
+      final noConnection = signalClient.gravixLastDialNoConnection;
+      // (the attempt before this one got no connection: the network was down until now)
+      final afterNoConnectionDial = _gravixNoConnectionDialsInARow > 0;
+      _gravixLastDialNoConnection = noConnection;
+      _gravixNoConnectionDialsInARow = noConnection ? _gravixNoConnectionDialsInARow + 1 : 0;
       bool recoverable = true;
       var immediate = false;
       if (upstreamFixes && fullReconnect) {
@@ -1956,24 +2034,36 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         _unrecoveredResumes = 0;
       } else if (e is WebSocketException &&
           !(upstreamFixes ? fullReconnect : fullReconnectOnNext) &&
-          roomOptions.recovery.resumeAfterNetworkSocketError &&
-          (_gravixNetChangedRecently() || await _gravixReadsOffline())) {
+          ((roomOptions.recovery.resumeAfterNetworkSocketError &&
+                  (_gravixNetChangedRecently() || await _gravixReadsOffline())) ||
+              // GRAVIX (0.10.2): the same failure right after a dial with no connection: the
+              // network just came back (a cut that ends with no connectivity event). Rig
+              // 2026-11-15 (JS, cut 75 s): the full rejoin dropped the session the SFU held.
+              // Resume once more at once; a session that is gone fails again, then rejoins.
+              (roomOptions.recovery.reconnectDialTimeout > Duration.zero && afterNoConnectionDial))) {
+        final justBack = afterNoConnectionDial && roomOptions.recovery.reconnectDialTimeout > Duration.zero;
         // GRAVIX (2026-10-14, resumeAfterNetworkSocketError): the resume's dial
         // failed because the phone's network is changing, not because the
         // session is gone: the next attempt waits for the network and resumes.
         // Two such failures in a row still become a full reconnect.
+        // (just back: the unanswered resumes before do not count -- the network was down)
+        if (justBack) _unrecoveredResumes = 0;
         if (++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
           logger.info('resume dial failed $_unrecoveredResumes times during a network change; full reconnect');
           fullReconnectOnNext = true;
           _unrecoveredResumes = 0;
         } else {
-          logger.info('resume dial failed during a network change ($e); resuming again');
+          logger.info(
+            'resume dial failed ${justBack ? 'as the network came back' : 'during a network change'} ($e); resuming again',
+          );
+          if (justBack) immediate = true;
         }
       } else if (e is WebSocketException || e is MediaConnectException) {
         // cannot resume connection, need to do full reconnect
         fullReconnectOnNext = true;
       } else if (!(upstreamFixes ? fullReconnect || fullReconnectOnNext : fullReconnectOnNext) &&
-          ++_unrecoveredResumes >= _unrecoveredResumesBeforeFull) {
+          ++_unrecoveredResumes >= _unrecoveredResumesBeforeFull &&
+          _gravixUnansweredResumesMayEscalate(noConnection)) {
         // GRAVIX (regionReprobeOnRestart, 2026-09-19): a resume against an
         // UNREACHABLE region times out rather than being refused, and upstream
         // keeps resuming. The JS SDK's live test (pinned SFU stopped) showed the
@@ -2229,6 +2319,8 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     try {
       // wait for socket to connect rtc server
       try {
+        // GRAVIX (0.10.2): the resume's dial gives up when no connection comes up in time
+        signalClient.gravixNextConnectWithin = _gravixReconnectConnectWithin();
         await signalClient.connect(
           url!,
           token!,
@@ -2592,6 +2684,16 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
     return true;
   }
 
+  /// GRAVIX (0.10.2, reconnectDialTimeout): short resume dials with no connection become a full
+  /// reconnect no sooner than two 0.10.1 dials did (2 x Timeouts.connection).
+  bool _gravixUnansweredResumesMayEscalate(bool noConnection) {
+    final recovery = roomOptions.recovery;
+    final floor = connectOptions.timeouts.connection * _unrecoveredResumesBeforeFull;
+    if (!noConnection || recovery.reconnectDialTimeout <= Duration.zero) return true;
+    final start = _reconnectStart;
+    return start == null || DateTime.timestamp().difference(start) >= floor;
+  }
+
   @internal
   Future<void> restartConnection({String? regionUrl}) async {
     // GRAVIX (0.4.15): this call is the same-url retry of a failed full reconnect
@@ -2671,6 +2773,15 @@ class Engine extends Disposable with EventsEmittable<EngineEvent> {
         _inRestart = true;
         // GRAVIX (0.4.15): the same-url retry dials with a short timeout
         _gravixNextDialTimeout = gravixSameUrlRetry ? recovery.sameUrlRetryDialTimeout : null;
+        // GRAVIX (0.10.2): a reconnect's dial gives up when no connection comes up in time
+        // (every 4th in a row with none keeps the 0.10.1 raced bounds: a slow but live path)
+        _gravixNextConnectWithin = gravixSameUrlRetry || !_attemptingReconnect
+            ? null
+            : gravixFullReconnectConnectWithin(
+                recovery.reconnectDialTimeout,
+                connectOptions.timeouts.connection,
+                _gravixNoConnectionDialsInARow,
+              );
         try {
           await connect(
             regionUrl ?? url!,
