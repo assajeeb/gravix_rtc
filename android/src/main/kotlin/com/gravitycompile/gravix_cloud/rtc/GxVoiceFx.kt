@@ -27,6 +27,8 @@ internal object GxVoiceFx {
   @Volatile private var used = false
   @Volatile private var handle = 0L
   @Volatile private var musicActive = false
+  /** Music is mixed BEFORE the effect (pre-APM route): the effect must be dry. */
+  @Volatile private var musicPreMixed = false
   private var loadError: String? = null
   private val worker by lazy { Executors.newSingleThreadExecutor { r -> Thread(r, "gravix-fx") } }
 
@@ -69,24 +71,50 @@ internal object GxVoiceFx {
     if (handle == 0L) {
       handle = nativeCreate()
       nativeSetWatchdog(handle, WATCHDOG_US, WATCHDOG_CONSECUTIVE)
-      nativeSetBypass(handle, musicActive)
+      nativeSetBypass(handle, musicPreMixed)
     }
     val rc = nativeSetPreset(handle, preset)
     used = true
+    // effect on: room music moves after it (MusicCaptureRouter), "none": back before APM
+    com.gravitycompile.gravix_cloud.music.MusicMixerEngine.router.effectWanted = preset != 0 && rc == 0
     val installed = GxNoiseProcessor.installOn(plugin, "fxConfigure")
-    Log.i(TAG, "[GravixFX] step=configure effect=$name rc=$rc installed=$installed music=$musicActive")
+    Log.i(TAG, "[GravixFX] step=configure effect=$name rc=$rc installed=$installed music=$musicActive bypass=$musicPreMixed")
     return state(handle) + mapOf("ok" to (rc == 0), "installed" to installed, "reason" to if (rc == 0) "ok" else "failed")
   }
 
-  /** Any thread. */
+  /** Music session start / end (any thread). The bypass itself follows [setMusicBypass]. */
   fun onMusic(active: Boolean) {
     if (musicActive == active) return
     musicActive = active
+    if (handle == 0L) return
+    Log.i(TAG, "[GravixFX] step=music active=$active bypass=$musicPreMixed")
+  }
+
+  /**
+   * MusicCaptureRouter: [on] = the music is in the buffer before the effect
+   * (go dry), off = no music there (effect on the voice; the music, if any,
+   * is added after it). Record or control thread: an atomic store, the log
+   * and the event go to [worker].
+   */
+  fun setMusicBypass(on: Boolean) {
+    if (musicPreMixed == on) return
+    musicPreMixed = on
     val h = handle
     if (h == 0L) return
-    nativeSetBypass(h, active)
-    Log.i(TAG, "[GravixFX] step=music bypass=$active")
-    eventSink?.invoke(state(h) + ("type" to "music"))
+    nativeSetBypass(h, on)
+    worker.execute {
+      Log.i(TAG, "[GravixFX] step=music bypass=$on active=$musicActive")
+      eventSink?.invoke(state(handle) + ("type" to "music"))
+    }
+  }
+
+  /** Delay of the active chain, ms (0 = none). Control / timer thread. */
+  fun latencyMs(): Int {
+    val h = handle
+    if (h == 0L || !used) return 0
+    val v = IntArray(9)
+    nativeStatus(h, v)
+    return if (v[1] == 0 || v[4] != 0) 0 else v[5] // no chain, or watchdog: passthrough
   }
 
   fun stats(): Map<String, Any?> {

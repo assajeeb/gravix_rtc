@@ -39,6 +39,8 @@ import '../rtc_core/src/support/region_url_provider.dart' show toHttpUrl;
 import '../rtc_core/src/support/websocket/standby.dart';
 import 'gravix_data_saver.dart';
 import 'gravix_red_mode.dart';
+import 'gravix_singer_mode.dart';
+import '../noise/gravix_noise_native.dart' show GravixNoiseNative;
 import '../large_room/gravix_publish_presets.dart' show GravixPublishPresets;
 import '../rtc_core/src/track/local/engine_mic_mute.dart' show GravixEngineMicMute;
 import '../rtc_core/src/track/local/mic_republish.dart';
@@ -137,7 +139,74 @@ class GravixRoomService implements GravixAudioHost {
        _regionProber = regionProber ?? GravixRegionProber(),
        _regionCache = regionDecisionCache ?? GravixRegionDecisionCache.shared,
        _connectRoomSeam = connectRoom,
-       _createRoomSeam = createRoom;
+       _createRoomSeam = createRoom {
+    this.roomMusic.gravixMicProfileHeld = () => _singer.active;
+    GravixNoiseSuppression.instance.gravixProcessingHeld = () => _singer.active;
+  }
+
+  // ══ SINGER MODE (2026-11-20) ═══════════════════════════════════════════════
+
+  late final GravixSingerModeController _singer = GravixSingerModeController(
+    mic: () {
+      final local = localParticipant;
+      final t = local?.getTrackPublicationBySource(TrackSource.microphone)?.track;
+      if (local == null || t is! LocalAudioTrack) return null;
+      final room = _room;
+      return GravixSingerTrackMic(
+        local,
+        t,
+        // still this room, connected and not leaving (0.4.12)
+        stillWanted: () => identical(_room, room) && (room?.gravixCanRepublish ?? false),
+      );
+    },
+    music: () => GravixSingerRoomMusicHooks(roomMusic),
+    native: (on, source) async {
+      final r = await GravixNoiseNative.setSingerMode(on, source.name);
+      return r != null && r['ok'] == true;
+    },
+    defaults: () => (
+      processing: GravixNoiseSuppression.instance.adjustCapture(_audioCaptureOptions).processing,
+      dtx: _dtx,
+      bitrate: _micBaseBitrate,
+    ),
+  );
+
+  /// Singer / music mode for the published microphone: an explicit opt-in for
+  /// singers and live-stream sound cards (V8-type cards, a mixer). Runtime,
+  /// mid-room, on or off at any time (also together with a room music preset
+  /// such as karaoke); stays on across rooms until switched off.
+  ///
+  /// On: our noise suppression, AGC and pause expander off (only the limiter
+  /// near clip), WebRTC's NS/AGC/high-pass off and echo cancellation off unless
+  /// [GravixSingerOptions.echoCancellation], the phone's platform effects off,
+  /// Android capture from [GravixSingerOptions.captureSource] (MIC) instead of
+  /// the call path, the sender at [GravixSingerOptions.maxBitrate] (96 kbps),
+  /// Opus DTX off. The audio device module is not rebuilt; only the DTX change
+  /// republishes the microphone (a ~100-300 ms gap, a new track for the
+  /// listeners; [GravixSingerOptions.disableDtx] false skips it), and the
+  /// Android capture source change restarts the recorder (tens to a few
+  /// hundred ms). Not changed: the capture rate (fixed when WebRTC
+  /// initialises: 48 kHz in the standard scenario, 16 kHz under
+  /// GravixAudioScenario.chatRoom) and the audio mode (the audio session's:
+  /// AudioManager.setAudioSessionOptions).
+  ///
+  /// Echo: with echo cancellation off the loudspeaker's sound reaches the
+  /// microphone and the room hears itself. Meant for headphones / a sound
+  /// card's monitor; on the loudspeaker pass `echoCancellation: true`. Never
+  /// switched on by the SDK (not on a wired route either).
+  Future<GravixSingerModeState> setSingerMode(bool on, {GravixSingerOptions options = const GravixSingerOptions()}) {
+    debugPrint('singer mode -> ${on ? options : 'off'}');
+    return _singer.set(on, options).then((s) {
+      debugPrint('singer mode: $s');
+      return s;
+    });
+  }
+
+  /// Singer mode is on ([setSingerMode]).
+  bool get singerMode => _singer.active;
+
+  /// Singer mode's options while it is on.
+  GravixSingerOptions? get singerOptions => _singer.options;
 
   StreamSubscription<AudioInterruptionEvent>? _interruptionSub;
   StreamSubscription<void>? _becomingNoisySub;
@@ -1197,7 +1266,9 @@ class GravixRoomService implements GravixAudioHost {
       if (regionWaited.waited > Duration.zero) {
         timeline?.notePath('svc:regionWait', detail: regionWaited.waited.inMilliseconds);
       }
-      final measuredList = _regionEntries.isNotEmpty ? _regionEntries : gravixMeasuredCandidates(url, media: joinMedia, homeRegion: homeRegion);
+      final measuredList = _regionEntries.isNotEmpty
+          ? _regionEntries
+          : gravixMeasuredCandidates(url, media: joinMedia, homeRegion: homeRegion);
       final measuredPick = gravixPickMeasuredRegion(url, measuredList, homeRegion: homeRegion, media: joinMedia);
       // still nothing measured: the gateway's est_rtt_ms between home and the best estimate
       final estPick = measuredPick != null || (gravixRegionMeasurement()?.best?.ok ?? false)
@@ -2296,6 +2367,11 @@ class GravixRoomService implements GravixAudioHost {
         if (!_disposed) joinRetry.value = e;
         onJoinRetry?.call(e);
       })
+      ..on<LocalTrackPublishedEvent>((e) {
+        // singer mode: a new microphone track (join, reconnect, republish)
+        // gets its processing and bitrate again
+        if (_singer.active && e.publication.source == TrackSource.microphone) unawaited(_singer.onMicPublished());
+      })
       ..on<ParticipantConnectedEvent>((e) {
         final uid = e.participant.identity;
         // re-announced after a full restart and never really gone: no callback
@@ -2829,10 +2905,21 @@ class GravixRoomService implements GravixAudioHost {
   /// cost ~1-2 kbps instead of the full rate; off keeps transmitting during
   /// silence (connect's `dtx: false`).
   @visibleForTesting
-  static AudioPublishOptions audioPublishOptionsFor({required bool red, bool dtx = true}) =>
-      AudioPublishOptions(encoding: const AudioEncoding(maxBitrate: 64000), dtx: dtx, red: red);
+  static AudioPublishOptions audioPublishOptionsFor({
+    required bool red,
+    bool dtx = true,
+    int maxBitrate = _micBaseBitrate,
+  }) => AudioPublishOptions(
+    encoding: AudioEncoding(maxBitrate: maxBitrate),
+    dtx: dtx,
+    red: red,
+  );
 
-  AudioPublishOptions _audioPublishOptions({required bool red}) => audioPublishOptionsFor(red: red, dtx: _dtx);
+  static const int _micBaseBitrate = 64000;
+
+  // singer mode on: its DTX and bitrate for every (re)publish of the microphone
+  AudioPublishOptions _audioPublishOptions({required bool red}) =>
+      audioPublishOptionsFor(red: red, dtx: _dtx && !_singer.dtxOff, maxBitrate: _singer.maxBitrate ?? _micBaseBitrate);
 
   /// DTX for this call's microphone (connect's `dtx`); kept by every republish.
   bool _dtx = true;
@@ -3142,7 +3229,13 @@ class GravixRoomService implements GravixAudioHost {
   int _ownedCameraOffs = 0;
   Future<void>? _ownedCameraBusy;
 
-  Future<bool> _setOwnedCameraEnabledNow(bool enabled, GravixCameraEffect owner, LocalParticipant local, int call, int offs) async {
+  Future<bool> _setOwnedCameraEnabledNow(
+    bool enabled,
+    GravixCameraEffect owner,
+    LocalParticipant local,
+    int call,
+    int offs,
+  ) async {
     // GRAVIX (0.8.4): a camera between two sessions: its publication comes back, no second one opens
     if (enabled && local.gravixRepublishPending(TrackSource.camera)) {
       final back = await local.gravixAfterHeldTrack(TrackSource.camera);

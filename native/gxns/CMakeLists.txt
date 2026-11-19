@@ -52,7 +52,7 @@ if(GXNS_BUILD_TESTS)
   target_compile_options(gxns_alloctrap PRIVATE -include ${GXNS_DIR}/tests/alloc_trap.h)
 
   set(GXNS_FIXTURES ${GXNS_DIR}/tests/fixtures)
-  foreach(t timer golden rates crossfade agc external pregain dtx_quiet dtx_street room_replay wind)
+  foreach(t timer golden rates crossfade agc external pregain dtx_quiet dtx_street room_replay wind sustain)
     add_executable(test_${t} ${GXNS_DIR}/tests/test_${t}.c ${GXNS_DIR}/tests/test_util.c)
     target_link_libraries(test_${t} gxns)
     target_compile_definitions(test_${t} PRIVATE GXNS_FIXTURES="${GXNS_FIXTURES}"

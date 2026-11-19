@@ -541,9 +541,18 @@ class GravixNoiseSuppression {
     _tracks.add(WeakReference(track));
   }
 
+  /// Singer mode holds the microphone's WebRTC processing (GravixRoomService.setSingerMode):
+  /// a runtime NS change then leaves the live track alone.
+  @internal
+  bool Function()? gravixProcessingHeld;
+
   Future<void> _reapplyTrackProcessing() async {
     final o = _options;
     if (o == null) return;
+    if (gravixProcessingHeld?.call() ?? false) {
+      debugPrint('[GravixNS] singer mode holds the microphone processing: not re-applied');
+      return;
+    }
     for (final w in List.of(_tracks)) {
       final t = w.target;
       final base = t == null ? null : _trackBase[t];

@@ -612,6 +612,12 @@ class GravixRoomMusic {
         _sendMute(pub.sid, false);
       }
     }
+    // singer mode holds the microphone's processing, DTX and bitrate (its
+    // profile is the music one and more): the session leaves them alone
+    if (gravixMicProfileHeld?.call() ?? false) {
+      debugPrint('room music: singer mode holds the microphone profile; processing/DTX/bitrate left as they are');
+      return;
+    }
     if (options.relaxVoiceProcessing) await _relaxProcessing(track);
     if (options.disableDtxWhileMusic && (track.lastPublishOptions?.dtx ?? false)) {
       final (fresh, swapped) = await _republish(track, dtx: false);
@@ -620,6 +626,100 @@ class GravixRoomMusic {
     }
     final current = _sessionTrack;
     if (current != null) await _applyBitrate(current);
+  }
+
+  /// Singer mode (GravixRoomService.setSingerMode) is on: a session starting
+  /// meanwhile leaves the microphone's processing, DTX and bitrate alone.
+  @internal
+  bool Function()? gravixMicProfileHeld;
+
+  /// A music session holds the microphone (between play and stop).
+  @internal
+  bool get gravixSessionActive => _sessionTrack != null;
+
+  /// Singer mode starts during a session: the session's restore duties (the
+  /// processing, DTX and bitrate it replaced) go to singer mode, the session
+  /// restores nothing at its end.
+  @internal
+  ({AudioProcessingOptions? processing, bool dtxSwapped, int? bitrate, bool bitrateApplied})
+  gravixHandOverMicProfile() {
+    final r = (
+      processing: _processingBefore,
+      dtxSwapped: _dtxSwapped,
+      bitrate: _bitrateBefore,
+      bitrateApplied: _bitrateApplied,
+    );
+    _processingBefore = null;
+    _dtxSwapped = false;
+    _bitrateApplied = false;
+    _bitrateSender = null;
+    _bitrateBefore = null;
+    return r;
+  }
+
+  /// Singer mode ends during a session: the session takes the microphone
+  /// again (relaxed processing, music bitrate) and restores [processingBefore]
+  /// / [bitrateBefore] at its end. DTX: the microphone is DTX-off (singer
+  /// mode); with [GravixMusicOptions.disableDtxWhileMusic] the session turns it
+  /// back on at its end when [dtxBefore]. Returns false when the session keeps
+  /// no DTX duty (the caller restores DTX itself).
+  @internal
+  Future<bool> gravixRetakeMicProfile({
+    required AudioProcessingOptions processingBefore,
+    required bool dtxBefore,
+    required int? bitrateBefore,
+  }) async {
+    final pub = _room?.localParticipant?.getTrackPublicationBySource(TrackSource.microphone);
+    final live = pub?.track;
+    final track = live is LocalAudioTrack ? live : _sessionTrack;
+    if (track == null || _sessionTrack == null) return false;
+    _sessionTrack = track;
+    if (options.relaxVoiceProcessing) {
+      final relaxed = AudioProcessingOptions(
+        echoCancellation: processingBefore.echoCancellation,
+        noiseSuppression: false,
+        autoGainControl: false,
+        highPassFilter: processingBefore.highPassFilter,
+        echoCancellationMode: processingBefore.echoCancellationMode,
+        noiseSuppressionMode: processingBefore.noiseSuppressionMode,
+        autoGainControlMode: processingBefore.autoGainControlMode,
+        highPassFilterMode: processingBefore.highPassFilterMode,
+      );
+      if (await _setProcessing(track, relaxed)) _processingBefore = processingBefore;
+    } else {
+      await _setProcessing(track, processingBefore);
+    }
+    // the sender carries singer mode's rate: music's rate now, the one before
+    // singer mode at the session's end
+    _bitrateApplied = false;
+    final target = options.musicMaxBitrate;
+    final sender = track.sender;
+    if (target > 0 && sender != null && !track.wireMuted) {
+      try {
+        final params = sender.parameters;
+        final enc = params.encodings;
+        if (enc != null && enc.isNotEmpty) {
+          final keep = enc.first.maxBitrate;
+          enc.first.maxBitrate = (bitrateBefore != null && bitrateBefore >= target) ? bitrateBefore : target;
+          if (await sender.setParameters(params)) {
+            if (enc.first.maxBitrate == target) {
+              _bitrateSender = sender;
+              _bitrateBefore = bitrateBefore;
+              _bitrateApplied = true;
+            }
+          } else {
+            enc.first.maxBitrate = keep;
+          }
+        }
+      } catch (e) {
+        debugPrint('room music: bitrate not retaken: $e');
+      }
+    }
+    if (options.disableDtxWhileMusic) {
+      _dtxSwapped = dtxBefore;
+      return true;
+    }
+    return false;
   }
 
   /// Gives the microphone back: bitrate, mute signal, voice processing, DTX.

@@ -59,11 +59,16 @@ export 'src/beauty/default_gravix_beauty_filter.dart';
 export 'src/beauty/gravix_beauty_filter.dart';
 export 'src/beauty/gravix_video_effect.dart' hide GravixVideoEffectBinding, GravixVideoEffectChain;
 export 'src/beauty/gravix_beauty_effect.dart';
-
 export 'package:gravix_effects_webrtc/gravix_effects_webrtc.dart'
-    show GravixCamera, GravixPreview, GravixLook, GravixLooks, GravixLens,
-        GravixEffects, GravixPackAvailability, GravixPackState;
-
+    show
+        GravixCamera,
+        GravixPreview,
+        GravixLook,
+        GravixLooks,
+        GravixLens,
+        GravixEffects,
+        GravixPackAvailability,
+        GravixPackState;
 export 'src/join/gravix_join.dart';
 export 'src/join/gravix_join_event.dart';
 export 'src/join/gravix_join_hooks.dart';
@@ -84,6 +89,8 @@ export 'src/room/gravix_audio_first.dart';
 export 'src/room/gravix_effective_quality.dart';
 export 'src/room/gravix_data_saver.dart' show GravixDataSaverEvent, GravixDataSaverEventKind;
 export 'src/room/gravix_red_mode.dart';
+export 'src/room/gravix_singer_mode.dart' show GravixSingerCaptureSource, GravixSingerOptions, GravixSingerModeState;
 export 'src/room/gravix_room_service.dart';
 export 'src/rtc_core/gravix_client.dart';
-export 'src/rtc_core/src/support/websocket/standby_types.dart' show GravixStandbyState, kGravixStandbyJoinWait, kGravixStandbyLowRttUpgradeFloorDefault;
+export 'src/rtc_core/src/support/websocket/standby_types.dart'
+    show GravixStandbyState, kGravixStandbyJoinWait, kGravixStandbyLowRttUpgradeFloorDefault;

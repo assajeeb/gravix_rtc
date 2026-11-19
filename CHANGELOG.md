@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0 — 2026-11-20
+
+Voice effects with room music, and singers on sound cards (report 2026-11-20: a voice effect
+and room music clashed; pro singers on V8-type sound cards heard loud and high notes lowered
+and notes dropped).
+
+### Fixed (voice effect + room music)
+- Android: a voice effect now stays on while room music plays. Before, the music was mixed
+  into the microphone before the effect, so the effect was switched off for the whole song
+  (and the music was briefly pitch shifted around its start and stop). With an effect on, the
+  music is now added after the effect, delayed by the noise suppression + effect latency so
+  voice and music stay in sync for listeners; effect switches mid-song fade the music out and
+  in (~40 ms), a capture restart or mic republish keeps this path. With no effect the music
+  path is unchanged. `GravixRoomMusic` state adds `mixRoute`, `mixDelaySamples`,
+  `mixSwitches`, `mixDropped`, `mixCaptureGaps`, `mixRetimes`; logcat `GxMusicMixer ...
+  route=POST`. Verified on an Infinix X6728 in a room (effect + music, track change, effect
+  toggles: dropped=0).
+- iOS: unchanged for now; the effect still goes dry while room music plays.
+
+### Fixed (singers)
+- The pause expander (DTX) no longer cuts a held sung note. A steady note never rose 15 dB
+  over its own 1 s minimum, so after ~1 s it stopped counting as talk and the expander pulled
+  it down 15 dB (simulated: held 220 Hz vowel -15.0 dB -> no cut; a 440 Hz crescendo, a hot
+  -0.5 dBFS line and a clipped line likewise). Talk that is going on now stays talk while it
+  holds within 15 dB of its onset level, 10 dB over the last real pause (at the NS output and
+  the input), its level moves like a voice (a mains buzz or a pure test tone is flat and is still expanded) and for at most 15 s
+  without a new onset. Noise between phrases is still expanded; quiet-room, street, wind and
+  golden tests unchanged. Our AGC still levels loud singing (down to -10 dB on a clipping
+  line); singer mode turns it off.
+
+### Added
+- `GravixRoomService.setSingerMode(on, options: GravixSingerOptions(...))`: an opt-in,
+  runtime singer / sound-card mode (README "Singer mode"): our NS, AGC and expander off
+  (limiter near clip only), WebRTC NS/AGC/high-pass off and AEC off unless
+  `echoCancellation: true`, platform effects off, Android capture from MIC (or
+  VOICE_RECOGNITION / UNPROCESSED) instead of VOICE_COMMUNICATION, 96 kbps, DTX off. No
+  audio device module rebuild; only the DTX change republishes the microphone. Echo risk on
+  the loudspeaker with AEC off. The capture rate and the audio mode are not changed.
+  iOS: our chain bypass, WebRTC processing, bitrate and DTX (no capture source change).
+  On the built-in mic the MIC source is ~6-10 dB quieter than the call path (no phone AGC):
+  meant for sound cards and wired mics. Verified on an Infinix X6728 in a room: source MIC
+  after a ~250 ms recorder restart, back to VOICE_COMMUNICATION on off, a 25 s held 784 Hz
+  note with music stays at level.
+
 ## 0.10.2 — 2026-11-15
 
 Reconnecting after long network cuts (Bangladesh networks drop often). Same rules as the JS SDK

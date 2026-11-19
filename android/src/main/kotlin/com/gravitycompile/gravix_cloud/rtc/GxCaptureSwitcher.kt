@@ -36,6 +36,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   stop/init/start paths run. A failed open falls back to the original source.
  * - MUTE: the engine's microphone mute, combined with the user's own mute
  *   ([OtherAppAudioPolicy.engineMute]) so neither undoes the other.
+ * - singer mode ([setSingerSource], 2026-11-20): the recorder re-opened with
+ *   the source singer mode asks for (MIC by default, see [GxSingerSource]),
+ *   the same reflective restart. It wins over the VOICE_COMMUNICATION and
+ *   PLATFORM_EFFECTS actions (both would put the voice processing back that
+ *   singer mode takes out); MUTE still applies. Off: back to the source the
+ *   other-app action wants (the original one for NONE).
  *
  * All recorder work runs on [executor] (the plugin's audio device module
  * thread), never on the main thread.
@@ -53,6 +59,10 @@ internal class GxCaptureSwitcher(
 
   @Volatile
   private var action = OtherAppAudioPolicy.Action.NONE
+
+  /** The capture source singer mode wants (null: singer mode off / "keep"). */
+  @Volatile
+  private var singerSource: Int? = null
   private var originalSource: Int? = null
   private var effectsSession = 0
   private val main = Handler(Looper.getMainLooper())
@@ -81,8 +91,18 @@ internal class GxCaptureSwitcher(
     run { applyOnWorker(next, attempt = 0) }
   }
 
+  /** Singer mode's capture source (null = singer mode off or "keep"). */
+  fun setSingerSource(source: Int?) {
+    // set here, applied on the module thread (idempotent: a later call, or
+    // the next other-app action, re-applies it if the executor was not up)
+    singerSource = source
+    Log.i(TAG, "singer capture source -> ${source ?: "off"}")
+    run { applyOnWorker(action, attempt = 0) }
+  }
+
   /** Plugin detach: back to the original capture. */
   fun reset() {
+    singerSource = null
     run { applyOnWorker(OtherAppAudioPolicy.Action.NONE, attempt = 0) }
   }
 
@@ -105,8 +125,9 @@ internal class GxCaptureSwitcher(
     val prev = action
     action = next
     Log.i(TAG, "capture action $prev -> $next")
-    val wantSource = next == OtherAppAudioPolicy.Action.VOICE_COMMUNICATION
-    val wantEffects = next == OtherAppAudioPolicy.Action.PLATFORM_EFFECTS || wantSource
+    val singer = singerSource
+    val wantSource = singer == null && next == OtherAppAudioPolicy.Action.VOICE_COMMUNICATION
+    val wantEffects = singer == null && (next == OtherAppAudioPolicy.Action.PLATFORM_EFFECTS || wantSource)
     val wantMute = next == OtherAppAudioPolicy.Action.MUTE
 
     setAutoMute(wantMute)
@@ -115,7 +136,7 @@ internal class GxCaptureSwitcher(
     if (input != null) {
       val original = originalSource ?: readSource(input)?.also { originalSource = it }
       if (original != null) {
-        val target = if (wantSource) MediaRecorder.AudioSource.VOICE_COMMUNICATION else original
+        val target = singer ?: if (wantSource) MediaRecorder.AudioSource.VOICE_COMMUNICATION else original
         if (readSource(input) != target) switchSource(input, target, original)
       }
     }

@@ -65,6 +65,9 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
     private var startedAt = Date()
     private var route = "unknown"
     private var musicActive = false
+    /// Singer mode: our chain bypassed (limiter-only path), like Android.
+    private var singerMode = false
+    private var bypassWanted: Bool { singerMode || (config.musicBypass && musicActive) }
     private var observers: [NSObjectProtocol] = []
     private let packQueue = DispatchQueue(label: "gravix.ns.pack", qos: .utility)
     private var packInFlight = false
@@ -156,6 +159,18 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         case "nsSetMusicBypass":
             let on = (args["on"] as? Bool) ?? false
             queue.async { self.setMusicActive(on, source: "dart"); DispatchQueue.main.async { result(nil) } }
+        case "nsSetSingerMode":
+            // iOS: our chain bypass only; the capture source stays (no MIC switch here)
+            let on = (args["on"] as? Bool) ?? false
+            queue.async {
+                if self.singerMode != on {
+                    self.singerMode = on
+                    if let ns = self.ns { gx_ns_set_bypass(ns, self.bypassWanted ? 1 : 0) }
+                    self.log("singerMode", detail: "on=\(on ? 1 : 0) bypass=\(self.bypassWanted ? 1 : 0)")
+                    self.emit(["type": "singerMode", "singerMode": on])
+                }
+                DispatchQueue.main.async { result(["ok": true, "sourceRequested": NSNull()]) }
+            }
         case "nsGetState":
             queue.async { let s = self.stateMap(); DispatchQueue.main.async { result(s) } }
         case "nsDeviceFacts":
@@ -246,8 +261,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         gx_ns_set_agc_order(ns, GX_NS_AGC_AFTER_NS)
         gx_ns_set_atten_limit(ns, c.studioAttenLimitDb)
         gx_ns_set_ext_p95_budget(ns, c.studioP95BudgetUs)
-        if !c.musicBypass, musicActive { gx_ns_set_bypass(ns, 0) }
-        if c.musicBypass, musicActive { gx_ns_set_bypass(ns, 1) }
+        if musicActive || singerMode { gx_ns_set_bypass(ns, bypassWanted ? 1 : 0) }
         log("policy", detail: "engine=\(c.engine) agc=\(c.agcEnabled ? 1 : 0) order=\(c.agcOrder) music=\(c.musicBypass ? 1 : 0) wd=\(c.watchdogUs)us/\(c.watchdogConsecutive)")
 
         switch c.engine {
@@ -366,8 +380,8 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         GxVoiceFx.shared.setMusicActive(on)
         guard musicActive != on else { return }
         musicActive = on
-        guard let ns, config.musicBypass else { return }
-        gx_ns_set_bypass(ns, on ? 1 : 0)
+        guard let ns, config.musicBypass || singerMode else { return }
+        gx_ns_set_bypass(ns, bypassWanted ? 1 : 0)
         log("musicBypass", detail: "on=\(on ? 1 : 0) src=\(source)")
         emit(["type": "musicBypass", "on": on])
     }

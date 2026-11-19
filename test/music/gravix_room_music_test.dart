@@ -707,6 +707,7 @@ void main() {
     Future<(Room, LocalParticipant, GravixRoomMusic)> musicOnDtxMic({
       bool failRestore = false,
       void Function()? onRestorePublish,
+      bool Function()? held,
     }) async {
       var started = false;
       final (room, lp, track, _, _) = await roomWithMic();
@@ -749,8 +750,9 @@ void main() {
         },
       );
       addTearDown(m.dispose);
+      m.gravixMicProfileHeld = held;
       await m.start(const GravixMusicSource.file('/a.mp3'));
-      expect(rec, ['create', 'unpublish TR_mic', 'publish dtx=false']);
+      expect(rec, held == null ? ['create', 'unpublish TR_mic', 'publish dtx=false'] : isEmpty);
       started = true;
       rec.clear();
       clientNative.clear();
@@ -813,6 +815,35 @@ void main() {
       expect(media, hasLength(2));
       expect(media[1].stopped, isTrue); // the unpublished new track
       expect(clientNative, ['startLocalRecording', 'stopLocalRecording']);
+    });
+
+    // singer mode (GravixRoomService.setSingerMode, 2026-11-20) and a session
+    test('singer mode on first: the session leaves DTX alone; singer off mid-session hands DTX back to it', () async {
+      var singer = true;
+      final (_, lp, m) = await musicOnDtxMic(held: () => singer);
+      expect(m.gravixSessionActive, isTrue);
+      // singer mode turned DTX off itself (its own republish)
+      (lp.getTrackPublicationBySource(TrackSource.microphone)!.track as LocalAudioTrack).lastPublishOptions =
+          const AudioPublishOptions(dtx: false);
+      singer = false;
+      final keeps = await m.gravixRetakeMicProfile(
+        processingBefore: const AudioProcessingOptions.communication(),
+        dtxBefore: true,
+        bitrateBefore: 64000,
+      );
+      expect(keeps, isTrue);
+      expect(rec, isEmpty);
+      await m.stop();
+      expect(rec, ['create', 'unpublish TR_mic', 'publish dtx=true']);
+    });
+
+    test('a session first, then singer mode: the hand-over leaves the session nothing to restore', () async {
+      final (_, _, m) = await musicOnDtxMic();
+      final h = m.gravixHandOverMicProfile();
+      expect(h.dtxSwapped, isTrue);
+      m.gravixMicProfileHeld = () => true;
+      await m.stop();
+      expect(rec, isEmpty); // DTX stays off: singer mode owns it now
     });
 
     test('a republish refused three times (connected): the new track is stopped and released', () async {

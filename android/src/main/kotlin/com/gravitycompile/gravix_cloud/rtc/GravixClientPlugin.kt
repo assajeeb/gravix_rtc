@@ -848,6 +848,26 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
         result.success(null)
       }
 
+      // singer mode (2026-11-20): our NS/AGC/expander bypassed + the capture
+      // source; voice processing, bitrate and DTX are Dart's (runtime, no
+      // audio device module rebuild)
+      "nsSetSingerMode" -> {
+        val on = call.argument<Boolean>("on") ?: false
+        val name = call.argument<String>("source")
+        val unprocessed = Build.VERSION.SDK_INT >= 24 && try {
+          (applicationContext?.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager)
+            ?.getProperty(android.media.AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
+        } catch (_: Throwable) {
+          false
+        }
+        val source = if (on) GxSingerSource.resolve(name, Build.VERSION.SDK_INT, unprocessed) else null
+        GxNoiseProcessor.setSingerMode(on)
+        captureSwitcher.setSingerSource(source)
+        // the source is requested: the recorder restart runs on the module
+        // thread and falls back to the original source if the phone refuses it
+        result.success(mapOf("ok" to true, "sourceRequested" to source, "unprocessedSupported" to unprocessed))
+      }
+
       "setOtherAppCaptureAction" -> {
         captureSwitcher.apply(OtherAppAudioPolicy.Action.parse(call.argument<String>("action")))
         result.success(null)

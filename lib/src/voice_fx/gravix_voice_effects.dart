@@ -93,7 +93,11 @@ class GravixVoiceEffectState {
   final GravixVoiceEffect active;
   final GravixVoiceEffectReason reason;
 
-  /// Room music is playing: the voice goes out without the effect, so the music is not pitch shifted.
+  /// Room music is mixed in before the effect, so the voice goes out without
+  /// it (the music is never pitch shifted). Android adds the music after the
+  /// effect while one is on, so this is only true there for a moment around a
+  /// switch, or when that path is unavailable (APM rate differs from the
+  /// capture rate, stereo capture). iOS: true whenever music plays.
   final bool musicBypass;
 
   /// Delay the effect adds to the microphone (0 unless the effect changes pitch, about 40 when it does).

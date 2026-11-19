@@ -47,9 +47,27 @@ void t_bad_input(){gx_fx*fx=ready(GX_FX_HALL,48000);float z[10]={1};CHECK(gx_fx_
 void t_nan_input(){for(int p=1;p<GX_FX_PRESET_COUNT;p++){gx_fx*fx=ready(p,48000);V x=voice(48000,1);x[12000]=NAN;x[12500]=INFINITY;V y=feed(fx,x,48000,480);V y2=feed(fx,voice(48000,1),48000,480);bool ok=true;for(float v:y2)if(!std::isfinite(v))ok=false;CHECK(ok,"preset %d not finite after NaN input",p);gx_fx_destroy(fx);}}
 void t_stress(){gx_fx*fx=gx_fx_create();std::atomic<bool> stop{false};std::thread a([&]{std::vector<float> b(480);V v=voice(48000,1);size_t k=0;while(!stop){memcpy(b.data(),&v[k],1920);k=(k+480)%47520;int r=gx_fx_process(fx,b.data(),480,k%9600==0?16000:48000);(void)r;}});for(int i=0;i<3000;i++){gx_fx_set_preset(fx,i%GX_FX_PRESET_COUNT);gx_fx_rebuild(fx);gx_fx_set_bypass(fx,i&1);gx_fx_status s;gx_fx_get_status(fx,&s);}stop=true;a.join();gx_fx_destroy(fx);}
 void t_int16_scale(){V x=voice(48000,3);for(int p=1;p<GX_FX_PRESET_COUNT;p++){gx_fx*f=gx_fx_create();gx_fx_set_preset(f,p);double in=0,out=0;long cnt=0;for(size_t k=0;k+480<=x.size();k+=480){float b[480];for(int i=0;i<480;i++)b[i]=x[k+i]*32768.f;double e=0;for(int i=0;i<480;i++)e+=b[i]*b[i];int rc=gx_fx_process_int16_scale(f,b,480,48000);if(rc==GX_FX_NEED_REBUILD)gx_fx_rebuild(f);if(k>48000){in+=e;for(int i=0;i<480;i++)out+=b[i]*b[i];cnt++;}}gx_fx_destroy(f);double r=std::sqrt(out/(in+1e-9));if(r<0.1){printf("  int16 scale preset %d: output/input level %.5f\n",p,r);}CHECK(r>=0.1,"int16-scale voice must stay audible");}gx_fx*f=gx_fx_create();float b[480],c[480];for(int i=0;i<480;i++)c[i]=b[i]=(float)(i*37%65536-32768);gx_fx_process_int16_scale(f,b,480,48000);CHECK(!memcmp(b,c,sizeof b),"no effect: int16-scale block unchanged");gx_fx_destroy(f);}
+// Room music with an effect on (MusicCaptureRouter post route): the music is added AFTER gx_fx on the
+// int16-scale frame, so it must come out bit-for-bit with its level and spectrum, while the voice is
+// pitch shifted. Negative control: the same tone mixed BEFORE the effect loses its 1 kHz line (shifted / smeared).
+static double tone(const V&x,size_t a,size_t b,int rate,double f){double w=2*M_PI*f/rate,c=2*cos(w),s1=0,s2=0;for(size_t i=a;i<b;i++){double s0=x[i]+c*s1-s2;s2=s1;s1=s0;}return 2*sqrt(fabs(s1*s1+s2*s2-c*s1*s2))/(b-a);}
+void t_music_after_fx(){const int r=48000,n=480;const double up=1000*pow(2,5/12.);V v=sine(r,3,220),m(r*3);for(size_t i=0;i<m.size();i++)m[i]=8000*sin(2*M_PI*1000*i/r);
+ gx_fx*a=gx_fx_create(),*b=gx_fx_create(),*c=gx_fx_create();for(gx_fx*f:{a,b,c})gx_fx_set_preset(f,GX_FX_GIRL);
+ V post(v.size()),wet(v.size()),pre(v.size());
+ for(size_t k=0;k+n<=v.size();k+=n){float x[n],y[n],z[n];for(int i=0;i<n;i++){x[i]=y[i]=v[k+i]*32768.f;z[i]=x[i]+(float)m[k+i];}
+  for(auto p:{std::make_pair(a,x),std::make_pair(b,y),std::make_pair(c,z)})if(gx_fx_process_int16_scale(p.first,p.second,n,r)==GX_FX_NEED_REBUILD)gx_fx_rebuild(p.first);
+  for(int i=0;i<n;i++){post[k+i]=x[i]+(float)m[k+i];wet[k+i]=y[i];pre[k+i]=z[i];}}
+ size_t s0=r,s1=r*3-r/10;double err=0,mr=0;for(size_t i=s0;i<s1;i++){double d=(post[i]-wet[i])-m[i];err=std::max(err,fabs(d));mr+=(post[i]-wet[i])*(post[i]-wet[i]);}mr=sqrt(mr/(s1-s0));
+ double m1k=tone(post,s0,s1,r,1000),mup=tone(post,s0,s1,r,up),v220=tone(post,s0,s1,r,220),vup=tone(post,s0,s1,r,220*pow(2,5/12.));
+ double p1k=tone(pre,s0,s1,r,1000),pup=tone(pre,s0,s1,r,up);
+ printf("  music after fx: err %.4f rms %.1f (want 5657), 1k %.1f, %.0fHz %.1f, voice 220 %.1f -> 294 %.1f; pre-mixed: 1k %.1f, %.0fHz %.1f\n",err,mr,m1k,up,mup,v220,vup,p1k,up,pup);
+ CHECK(err<0.01,"music altered by %.4f",err);CHECK(fabs(mr-5657)<20,"music level %.1f",mr);CHECK(fabs(m1k-8000)<80,"1 kHz level %.1f",m1k);CHECK(mup<80,"music shifted %.1f",mup);
+ CHECK(vup>v220*3,"voice not shifted 220=%.1f 294=%.1f",v220,vup);CHECK(vup>1000,"voice level %.1f",vup);
+ CHECK(p1k<8000*0.5,"negative control: pre-mixed music kept its 1 kHz line %.1f (up %.1f)",p1k,pup);
+ for(gx_fx*f:{a,b,c})gx_fx_destroy(f);}
 int main(int c,char**v){
  if(c>2&&!strcmp(v[1],"render")){V x=rd(v[2]);if(x.empty())return 2;const char*n[]={"none","studio","hall","robot","girl","transformer","boy","child","woman","man","foreigner","ethereal","magnetic","fresh","energetic","rich","muffled","round","falsetto","full","clear","resonant","loudClear","softRoom","largeRoom","valley","basement","ktv","enhancedKtv","popular","rock","vocalConcert","gramophone","autotuneMajorC","autotuneMinorA","autotuneHarmonicMinor"};for(int p=1;p<GX_FX_PRESET_COUNT;p++){gx_fx*fx=ready(p,48000);V y=feed(fx,x,48000,480);wr(std::string(v[3])+"/"+n[p]+".wav",y,48000);gx_fx_destroy(fx);}return 0;}
  if(c>1&&!strcmp(v[1],"stress")){t_stress();puts("stress done");return 0;}
- t_int16_scale();t_passthrough_exact();t_none_after_effect();t_noalloc();t_rates();t_rate_change_mid();t_pitch();t_scale_snap();t_all_distinct();t_transformer_lower();t_hall_tail();t_studio_room_shorter();t_robot_changes();t_latency();t_bypass_dry();t_watchdog();t_bad_input();t_nan_input();t_stress();
+ t_int16_scale();t_passthrough_exact();t_none_after_effect();t_noalloc();t_rates();t_rate_change_mid();t_pitch();t_scale_snap();t_all_distinct();t_transformer_lower();t_hall_tail();t_studio_room_shorter();t_robot_changes();t_latency();t_bypass_dry();t_watchdog();t_bad_input();t_nan_input();t_music_after_fx();t_stress();
  for(int p=1;p<GX_FX_PRESET_COUNT;p++){gx_fx_bench b;int r=gx_fx_benchmark(p,48000,5,&b);CHECK(r==0,"bench");printf("  bench preset %d: p50 %d us p95 %d us max %d us latency %d ms\n",p,b.p50_us,b.p95_us,b.max_us,b.latency_ms);}
  printf(fails?"%d FAILED\n":"ALL PASS\n",fails);return fails?1:0;}

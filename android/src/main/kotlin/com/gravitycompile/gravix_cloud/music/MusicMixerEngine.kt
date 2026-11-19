@@ -31,6 +31,10 @@ import java.nio.ByteOrder
  *
  * POSITION: playedSamples counts the music samples consumed by the capture
  * thread (what listeners heard), rebased on seek.
+ *
+ * VOICE EFFECT: with an effect on, the music is added after it, in the APM
+ * post-processing slot ([onPostProcess], see MusicCaptureRouter); with none,
+ * the pre-APM mix above is unchanged.
  */
 object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
 
@@ -70,6 +74,45 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
 
     val kernel = MusicMixKernel()
 
+    /** Pre-APM vs post-effect mix site (record thread). */
+    val router = MusicCaptureRouter(kernel).apply {
+        fx = object : MusicCaptureRouter.Fx {
+            override fun setMusicBypass(on: Boolean) = com.gravitycompile.gravix_cloud.rtc.GxVoiceFx.setMusicBypass(on)
+        }
+    }
+
+    private val delayTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "GxMusicDelay").apply { isDaemon = true }
+    }
+    @Volatile private var delayTask: java.util.concurrent.ScheduledFuture<*>? = null
+
+    /**
+     * The voice's delay between the capture callback and the post site, at
+     * the capture rate: gx_ns latency + the active effect chain's. Control /
+     * timer thread (status readbacks allocate; never on the audio thread).
+     */
+    fun refreshDelay() {
+        val rate = session?.rate ?: captureSampleRate
+        var samples = com.gravitycompile.gravix_cloud.rtc.GxVoiceFx.latencyMs() * rate / 1000
+        val ns = try { com.gravitycompile.gravix_cloud.rtc.GxNoiseProcessor.stats() } catch (_: Throwable) { null }
+        val nsLat = (ns?.get("latencySamples") as? Number)?.toInt() ?: 0
+        val nsRate = (ns?.get("rate") as? Number)?.toInt() ?: 0
+        if (nsLat > 0 && nsRate > 0) samples += (nsLat.toLong() * rate / nsRate).toInt()
+        router.delayTargetSamples = samples.coerceIn(0, MusicCaptureRouter.MAX_DELAY)
+    }
+
+    private fun startDelayWatch() {
+        delayTask?.cancel(false)
+        delayTask = delayTimer.scheduleWithFixedDelay({
+            try { refreshDelay() } catch (_: Throwable) {}
+        }, 500, 500, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    private fun stopDelayWatch() {
+        delayTask?.cancel(false)
+        delayTask = null
+    }
+
     @Volatile private var session: Session? = null
     private var interruptions: MusicInterruptionWatcher? = null
 
@@ -88,9 +131,27 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         @Volatile var completedFired = false
         @Volatile var baseUs: Long = 0
         @Volatile var playedSamples: Long = 0
-        var voice: ShortArray = ShortArray(0)
-        var music: ShortArray = ShortArray(0)
-        var musicOut: ShortArray = ShortArray(0)
+
+        /** The router's view of this session (record thread). */
+        val track = object : MusicCaptureRouter.Track {
+            override val paused: Boolean get() = this@Session.paused
+            override fun read(dst: ShortArray, n: Int): Int {
+                val got = ring.read(dst, n)
+                playedSamples += got
+                return got
+            }
+            override fun onShort(got: Int) {
+                if (got == 0 && decoder.finished && decoder.failed == null && !completedFired) {
+                    completedFired = true
+                    listener?.onCompleted()
+                }
+            }
+            override fun monitor(musicOut: ShortArray, n: Int) { this@Session.monitor?.write(musicOut, n) }
+            override fun onEnvZero() {
+                if (pauseRequested) { this@Session.paused = true; pauseRequested = false }
+                if (stopRequested) fadedOut = true
+            }
+        }
     }
 
     class StartException(val code: String, message: String) : Exception(message)
@@ -136,10 +197,14 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         kernel.envTarget = 1f
         // noise suppression: the whole chain goes dry (crossfade) while music plays
         com.gravitycompile.gravix_cloud.rtc.GxNoiseProcessor.onMusic(true)
+        // voice effect on: the music is added after it (post route), else the effect goes dry
+        refreshDelay()
+        router.begin(rate, ch)
         session = s
+        startDelayWatch()
         decoder.start()
         startInterruptionWatch()
-        Log.i(TAG, "music started: ${rate}Hz/${ch}ch loop=$loop monitor=${monitor != null}")
+        Log.i(TAG, "music started: ${rate}Hz/${ch}ch loop=$loop monitor=${monitor != null} ${router.describe()}")
         return durationMs()
     }
 
@@ -212,8 +277,11 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         stopInterruptionWatch()
         s.decoder.shutdown()
         s.monitor?.release()
+        val routeInfo = router.describe()
+        stopDelayWatch()
+        router.end()
         com.gravitycompile.gravix_cloud.rtc.GxNoiseProcessor.onMusic(false)
-        Log.i(TAG, "music stopped")
+        Log.i(TAG, "music stopped $routeInfo")
     }
 
     // ---- interruptions (phone call / audio focus) ----
@@ -279,6 +347,23 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
     // ---- capture-thread hot path ----
 
     @Volatile private var mixFailureLogged = false
+    @Volatile private var postFailureLogged = false
+
+    /**
+     * APM capturePostProcessing, after the voice effect (GxNoiseProcessor.process):
+     * [buffer] = [numFrames] int16-scale floats, [channels] = APM channels
+     * (0 unknown). Adds the music handed over by the capture callback, if any.
+     */
+    fun onPostProcess(buffer: ByteBuffer, numFrames: Int, channels: Int) {
+        try {
+            router.post(buffer, numFrames, channels)
+        } catch (e: Throwable) {
+            if (!postFailureLogged) {
+                postFailureLogged = true
+                Log.e(TAG, "post mix failed, passing the frame through", e)
+            }
+        }
+    }
 
     override fun onBuffer(
         buffer: ByteBuffer,
@@ -326,44 +411,13 @@ object MusicMixerEngine : JavaAudioDeviceModule.AudioBufferCallback {
         // WebRTC delivers buffer.capacity() bytes after this callback,
         // regardless of bytesRead, so operate across the full capacity.
         val samples = buffer.capacity() / 2
-        if (s.voice.size != samples) {
-            s.voice = ShortArray(samples)
-            s.music = ShortArray(samples)
-            s.musicOut = ShortArray(samples)
-        }
         // A view over the WHOLE buffer: the record thread may hand it over with
         // its position moved (the module mute rewrites it with a relative put:
         // field 2026-10-05, BufferUnderflowException on the first muted frame).
         val sb = MusicMixKernel.wholeShortView(buffer)
-        sb.get(s.voice, 0, samples)
-
-        val consuming = !s.paused
-        var got = 0
-        if (consuming) {
-            got = s.ring.read(s.music, samples)
-            s.playedSamples += got
-            if (got < samples) {
-                // underrun or end of track: pad the tail with silence
-                java.util.Arrays.fill(s.music, got, samples, 0)
-                if (got == 0 && s.decoder.finished && s.decoder.failed == null && !s.completedFired) {
-                    s.completedFired = true
-                    listener?.onCompleted()
-                }
-            }
-        }
         val frames = samples / channelCount.coerceAtLeast(1)
         val bps = if (frames > 0) (sampleRate / frames).coerceAtLeast(1) else 100
-        kernel.mix(s.voice, if (consuming) s.music else null, s.musicOut, samples, bps)
-        sb.position(0)
-        sb.put(s.voice, 0, samples)
-
-        if (consuming) {
-            s.monitor?.write(s.musicOut, samples)
-            if (kernel.env == 0f) {
-                if (s.pauseRequested) { s.paused = true; s.pauseRequested = false }
-                if (s.stopRequested) s.fadedOut = true
-            }
-        }
+        router.pre(sb, samples, channelCount, sampleRate, bps, s.track)
         return ts
     }
 }

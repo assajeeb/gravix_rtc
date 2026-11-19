@@ -240,6 +240,13 @@ class MusicMixerPlugin : FlutterPlugin, ActivityAware, MethodChannel.MethodCallH
                     "captureSampleRate" to e.captureSampleRate,
                     "captureChannels" to e.captureChannels,
                     "installed" to isInstalled(),
+                    // voice-effect route (MusicCaptureRouter): diagnostics / device tests
+                    "mixRoute" to e.router.route.name.lowercase(),
+                    "mixSwitches" to e.router.switches,
+                    "mixDropped" to e.router.droppedTokens,
+                    "mixCaptureGaps" to e.router.captureGaps,
+                    "mixDelaySamples" to e.router.delaySamples,
+                    "mixRetimes" to e.router.retimes,
                 ))
                 else -> r.notImplemented()
             }

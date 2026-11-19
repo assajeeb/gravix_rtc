@@ -67,6 +67,10 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   @Volatile private var batterySaver = false
   @Volatile private var musicActive = false
   @Volatile private var musicSinceMs = 0L
+  // singer mode (GravixRoomService.setSingerMode, 2026-11-20): our chain stays
+  // bypassed (dry + limiter near clip, our AGC and pause expander at unity)
+  // while it is on, with or without room music
+  @Volatile private var singerMode = false
   @Volatile private var decided = GxNsNative.ENGINE_OFF
   @Volatile private var decidedReason = "mode_off"
 
@@ -132,6 +136,8 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   override fun process(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
     processNoise(numBands, numFrames, buffer)
     GxVoiceFx.process(buffer, numFrames, initChannels)
+    // room music joins here, after the effect, while a voice effect is on (MusicCaptureRouter)
+    com.gravitycompile.gravix_cloud.music.MusicMixerEngine.onPostProcess(buffer, numFrames, initChannels)
   }
 
   private fun processNoise(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
@@ -230,7 +236,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     val h = handle
     GxNsNative.nativeSetAgc(h, agcOn, agcOrder)
     GxNsNative.nativeSetStudioLimits(h, (studioAttenLimitDb * 100).toInt(), studioP95BudgetUs)
-    GxNsNative.nativeSetBypass(h, musicBypassEnabled && musicActive)
+    GxNsNative.nativeSetBypass(h, bypassWanted())
     applyDecision("configure")
     val installed = installOn(plugin, "configure")
     if ((mode == "auto" || mode == "studio") && studioLowLatency) ensurePack()
@@ -310,6 +316,19 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     emit("routeReset", mapOf("from" to prev))
   }
 
+  private fun bypassWanted(): Boolean = (musicBypassEnabled && musicActive) || singerMode
+
+  /** Singer mode on / off (nsSetSingerMode from Dart, any thread). */
+  fun setSingerMode(on: Boolean) {
+    if (singerMode == on) return
+    singerMode = on
+    val h = handle
+    if (h != 0L) GxNsNative.nativeSetBypass(h, bypassWanted())
+    if (h == 0L) return
+    log("singerMode", decided, "on=$on bypass=${bypassWanted()}")
+    emit("singerMode", mapOf("singerMode" to on))
+  }
+
   /** MusicMixerEngine session start / end (any thread). */
   fun onMusic(active: Boolean) {
     GxVoiceFx.onMusic(active)
@@ -318,7 +337,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     val now = SystemClock.elapsedRealtime()
     val h = handle
     val bypass = musicBypassEnabled && active
-    if (h != 0L && musicBypassEnabled) GxNsNative.nativeSetBypass(h, active)
+    if (h != 0L && (musicBypassEnabled || singerMode)) GxNsNative.nativeSetBypass(h, bypassWanted())
     if (h == 0L) return
     val detail = if (active) {
       musicSinceMs = now

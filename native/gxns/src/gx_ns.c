@@ -166,6 +166,19 @@ struct gx_ns {
   int pnf_have;     /* blocks with signal seen, up to GX_NS_TALK_WARM */
   int talk_now;     /* this / the last block was talk */
   int talk_hang;    /* blocks of hangover left */
+  /* Sustained talk (singer report 2026-11-20): a held sung note (or a legato
+   * phrase) never rises 15 dB over its own 1 s minimum, so it used to stop
+   * counting as talk after ~1 s and the pause expander cut it by 15 dB. Talk
+   * that is going on stays talk while it holds near the level it started at
+   * and well over the level of the last real pause. */
+  float talk_lvl_db;  /* post-NS level of talk onsets (EMA over rise-detected talk blocks) */
+  float quiet_db;     /* post-NS level of the last pause (EMA over pause blocks) */
+  float in_quiet_db;  /* input level of the last pause (an NS that erased loud input is no pause) */
+  int quiet_have;     /* a pause has been seen (quiet_db is valid) */
+  int sus_run;        /* blocks of sustained talk since the last rise-detected one */
+  float lvl_jit_db;   /* EMA of the block-to-block change of the post-NS level: a voice
+                       * (shimmer, vibrato) moves, a mains buzz / a fan's hum is flat */
+  float prev_post_db;
   float pg_applied_db; /* pre-gain actually applied to the last block */
   float gate;
   float lim_env, lim_rel, lim_ceil;
@@ -450,6 +463,20 @@ static void stream_reset(gx_ns *st, rate_ctx *r, int n, const gx_ns_external_eng
 #ifndef GX_NS_TALK_VAD
 #define GX_NS_TALK_VAD 0.9f     /* ... and RNNoise is sure it is voice (2026-10-21 fan room:
                                  * sounds RNNoise is unsure of opened the gate 43% of the time) */
+#endif
+#ifndef GX_NS_SUS_OVER_DB
+#define GX_NS_SUS_OVER_DB 10.f /* sustained talk: this far over the last pause ... */
+#endif
+#ifndef GX_NS_SUS_DROP_DB
+#define GX_NS_SUS_DROP_DB 15.f /* ... and within this of the onset level ... */
+#endif
+#ifndef GX_NS_SUS_JITTER_DB
+#define GX_NS_SUS_JITTER_DB 0.1f /* ... and its level moves (mean block-to-block change; a held
+                                  * vowel: 0.3-1 dB, a 100 Hz buzz: ~0.02 dB, test_sustain) ... */
+#endif
+#ifndef GX_NS_SUS_MAX
+#define GX_NS_SUS_MAX 1500 /* ... for at most 15 s without a new onset (a steady noise that starts
+                            * while someone talks cannot hold the gate open for longer) */
 #endif
 #define GX_NS_PAUSE_TARGET_DB (-56.f) /* pause expander: what the NS leaves of loud noise ... */
 #define GX_NS_PAUSE_MAX_ATT_DB 15.f   /* ... is pulled down to here, by at most this */
@@ -816,10 +843,39 @@ static void process_block(gx_ns *st, float *blk) {
       float in_ref = in_rms_db;
       for (k = 0; k < 3; k++) if (st->in_hist[k] > in_ref) in_ref = st->in_hist[k];
       st->in_hist[st->post_pos % 3] = in_rms_db;
-      st->talk_now = st->pnf_have >= GX_NS_TALK_WIN0 && post_db > mn + GX_NS_TALK_OVER_DB && post_db > GX_NS_TALK_MIN_DB &&
+      int was_talk = st->talk_now || st->talk_hang > 0;
+      {
+        float d = fabsf(post_db - st->prev_post_db);
+        st->lvl_jit_db += 0.05f * ((d > 6.f ? 6.f : d) - st->lvl_jit_db);
+        st->prev_post_db = post_db;
+      }
+      int rise = st->pnf_have >= GX_NS_TALK_WIN0 && post_db > mn + GX_NS_TALK_OVER_DB;
+      /* talk going on (this block or the hangover) that holds: near its onset
+       * level and well over the last pause, at the NS output and at the input
+       * (a held note, a legato line). The input check: when RNNoise erased a
+       * loud input (a note over a mains buzz) the "pause" it left is no pause,
+       * and the buzz coming back must not ride on it (pre-gain + AGC lifted it
+       * 26 dB in the first cut of this, test_sustain) */
+      int sustain = !rise && was_talk && st->quiet_have && st->sus_run < GX_NS_SUS_MAX &&
+                    post_db > st->quiet_db + GX_NS_SUS_OVER_DB && in_rms_db > st->in_quiet_db + GX_NS_SUS_OVER_DB &&
+                    post_db > st->talk_lvl_db - GX_NS_SUS_DROP_DB && st->lvl_jit_db > GX_NS_SUS_JITTER_DB;
+      st->talk_now = (rise || sustain) && post_db > GX_NS_TALK_MIN_DB &&
                      post_db > in_ref - GX_NS_TALK_KEEP_DB &&
                      vad >= ((st->exp_quiet < GX_NS_TALK_RECENT || in_rms_db > st->nf_db + GX_NS_TALK_RISE_DB)
                                  ? GX_NS_TALK_VAD_HOLD : GX_NS_TALK_VAD);
+      if (st->talk_now && rise) {
+        st->talk_lvl_db = st->sus_run || !was_talk ? post_db : st->talk_lvl_db + 0.1f * (post_db - st->talk_lvl_db);
+        st->sus_run = 0;
+      } else if (st->talk_now) {
+        st->sus_run++;
+      } else if (!was_talk) {
+        /* a pause block (also the warm-up): the level the next talk must stand out from */
+        if (!st->quiet_have) { st->quiet_db = post_db; st->in_quiet_db = in_rms_db; st->quiet_have = 1; }
+        else {
+          st->quiet_db += 0.05f * (post_db - st->quiet_db);
+          st->in_quiet_db += 0.05f * (in_rms_db - st->in_quiet_db);
+        }
+      }
     }
     st->post_hist[st->post_pos] = post_db;
     st->post_pos = (st->post_pos + 1) % GX_NS_TALK_WIN;

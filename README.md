@@ -853,6 +853,52 @@ doubles the audio rate (see above). The music mixer turns DTX off while music pl
 `connectWithTokenProvider` / `reconnectWithToken`); the choice is kept across RED
 republishes.
 
+### Singer mode (sound cards, live singing)
+
+The voice chain is built for talk. For singers, and for live-stream sound cards
+(V8-type cards, a mixer, a line input), it pulls loud and high notes down and drops
+some notes: our noise suppression (RNNoise) erases sung fundamentals over ~520 Hz
+and much of a backing track, our AGC lowers loud singing by up to 10 dB, and WebRTC's
+voice processing and the phone's call path (VOICE_COMMUNICATION) do the same again.
+Singer mode is an explicit opt-in, switched on and off at runtime, in the room:
+
+```dart
+// e.g. together with the app's karaoke preset
+await room.setSingerMode(true); // GravixSingerOptions() defaults
+await room.roomMusic.start(source);
+...
+await room.setSingerMode(false);
+```
+
+On: our noise suppression, AGC and pause expander are off (only the limiter near
+clip, -1 dBFS, stays); WebRTC's NS, AGC and high-pass are off, and echo cancellation
+unless `GravixSingerOptions(echoCancellation: true)`; the phone's platform effects
+are off; on Android the recorder records from `captureSource` (`mic` by default;
+`voiceRecognition`, `unprocessed`, or `keep`) instead of the call path; the sender
+goes to `maxBitrate` (96 kbps mono); Opus DTX is off (`disableDtx`).
+
+- **Mid-room cost:** no audio device module rebuild. Only the DTX change republishes
+  the microphone (a ~100-300 ms gap, a new track for the listeners; skip it with
+  `disableDtx: false`); the capture source change restarts the Android recorder
+  (tens to a few hundred ms). Everything else applies live. It stays on across
+  rooms until `setSingerMode(false)`, and room music sessions leave the microphone
+  to it while it is on (at the end of singer mode a running session takes it back).
+- **Echo:** with echo cancellation off, what the loudspeaker plays reaches the
+  microphone and the room hears itself. Singer mode is for headphones or a sound
+  card's monitor; on the loudspeaker pass `echoCancellation: true`. The SDK never
+  switches singer mode on by itself (not on a wired route either).
+- **Not changed:** the capture rate (fixed when WebRTC initialises: the device rate,
+  48 kHz on phones, in the standard scenario; `GravixAudioScenario.chatRoom` stays at
+  16 kHz, so use the standard scenario for singers) and the audio mode, which stays
+  the audio session's (`AudioManager.setAudioSessionOptions` switches it at runtime;
+  the playout's usage is fixed when WebRTC initialises, and Bluetooth headsets use the
+  communication mode). Media volume + MODE_NORMAL with singer mode is untested.
+- **iOS:** WebRTC processing, bitrate and DTX only (no capture source; our chain's
+  bypass is Android's).
+
+Without singer mode (all users): a held sung note no longer counts as a pause, so
+the pause expander no longer cuts it by 15 dB after ~1 s.
+
 ### Music mixer
 
 Room music: a local file is decoded on the phone and mixed into the **published

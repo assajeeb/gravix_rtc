@@ -119,6 +119,12 @@ class GravixNoiseNative {
     await _call('nsSetMusicBypass', {'on': on});
   }
 
+  /// Singer mode (Android): our chain bypassed and the capture [source]
+  /// (`keep` | `mic` | `voiceRecognition` | `unprocessed`). Null: not on
+  /// this platform.
+  static Future<Map<String, Object?>?> setSingerMode(bool on, String source) =>
+      _call('nsSetSingerMode', {'on': on, 'source': source});
+
   static Future<Map<String, Object?>?> getState() => _call('nsGetState', const {});
 
   static Future<Map<String, Object?>?> _call(String method, Map<String, Object?> args) async {
