@@ -53,7 +53,6 @@ final class GravixMusicMixer: NSObject {
     static let shared = GravixMusicMixer()
 
     private let lock = NSRecursiveLock()
-    private weak var channel: FlutterMethodChannel?
 
     // Engine state captured from the audio device module callbacks.
     private weak var engine: AVAudioEngine?
@@ -106,8 +105,10 @@ final class GravixMusicMixer: NSObject {
 
     static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "com.gravitycompile.gravix_rtc/music", binaryMessenger: registrar.messenger())
-        shared.channel = channel
-        channel.setMethodCallHandler { call, result in
+        // the handler keeps the channel alive for as long as its engine lives
+        GxChannelHub.music.add(channel)
+        channel.setMethodCallHandler { [channel] call, result in
+            _ = channel
             shared.handle(call, result: result)
         }
     }
@@ -365,7 +366,7 @@ final class GravixMusicMixer: NSObject {
             }
             if stillCurrent { self.stopLocked() }
             self.lock.unlock()
-            if stillCurrent { self.channel?.invokeMethod("onCompleted", arguments: nil) }
+            if stillCurrent { GxChannelHub.music.invoke("onCompleted", nil) }
         }
     }
 

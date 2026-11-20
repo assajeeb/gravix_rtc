@@ -119,7 +119,7 @@ final class GxVoiceFx {
     private func emit(_ type: String) {
         var m = stateMap()
         m["type"] = type
-        DispatchQueue.main.async { self.channel?.invokeMethod("onVoiceEffects", arguments: m) }
+        GxChannelHub.client.invoke("onVoiceEffects", m)
     }
 
     private static func benchmark(_ name: String, rate: Int, seconds: Int) -> [String: Any] {

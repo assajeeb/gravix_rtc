@@ -104,11 +104,6 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
     }
   }
 
-  // handed off at once: WebRTC calls it with its recorder locks held
-  private val recordFailureSink: (Map<String, Any?>) -> Unit = { m ->
-    mainHandler.post { invokeOnChannel("onMicrophoneFailure", m) }
-  }
-
   private fun invokeOnChannel(method: String, arguments: Any? = null) {
     try {
       if (::channel.isInitialized) channel.invokeMethod(method, arguments)
@@ -151,12 +146,17 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
         GxNoiseProcessor.onChatroom(engaged)
       }
     }
-    // noise suppression events (switch, routeReset, musicBypass, summary) to Dart
-    GxVoiceFx.eventSink = { m -> mainHandler.post { invokeOnChannel("onVoiceEffects", m) } }
-    GxNoiseProcessor.eventSink = { m -> mainHandler.post { invokeOnChannel("onNoiseSuppression", m) } }
-    GxRecordStartGuard.eventSink = recordFailureSink
+    // Native events (voice effect watchdog/music bypass, noise suppression, mic failures) go to
+    // every attached engine. The sinks are process-wide: set per engine, a second engine (a
+    // foreground-task or FCM engine) took them over and the UI engine stopped getting events.
+    attached.add(this)
+    GxVoiceFx.eventSink = { m -> broadcast("onVoiceEffects", m) }
+    GxNoiseProcessor.eventSink = { m -> broadcast("onNoiseSuppression", m) }
+    GxRecordStartGuard.eventSink = { m -> broadcast("onMicrophoneFailure", m) }
+    // the UI engine's WebRTC, not the last engine that attached (a headless one has no factory)
     GxNoiseProcessor.stateReader = {
-      flutterWebRTCPlugin?.getPeerConnectionFactory()?.audioProcessingState?.let { audioProcessingStateToMap(it).toString() }
+      val e = attached.firstOrNull { it.isMainEngine } ?: attached.firstOrNull()
+      e?.flutterWebRTCPlugin?.getPeerConnectionFactory()?.audioProcessingState?.let { audioProcessingStateToMap(it).toString() }
     }
     audioDeviceModuleExecutor?.shutdown()
     audioDeviceModuleExecutor = Executors.newSingleThreadExecutor()
@@ -1000,7 +1000,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
   override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
     channel.setMethodCallHandler(null)
     flutterEngine = null
-    if (GxRecordStartGuard.eventSink === recordFailureSink) GxRecordStartGuard.eventSink = null
+    attached.remove(this)
 
     micMonitor?.dispose()
     micMonitor = null
@@ -1037,5 +1037,19 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
 
   companion object {
     private const val TAG = "GravixClientPlugin"
+
+    /** Engines this plugin is attached to (UI engine plus any headless ones). */
+    private val attached = java.util.concurrent.CopyOnWriteArraySet<GravixClientPlugin>()
+
+    /**
+     * One native event to every attached engine. Handed off to the main thread at once: WebRTC
+     * calls some sinks with its recorder locks held. An engine whose Dart side does not listen
+     * drops the event.
+     */
+    private fun broadcast(method: String, arguments: Map<String, Any?>) {
+      val targets = attached.toList()
+      if (targets.isEmpty()) return
+      targets[0].mainHandler.post { targets.forEach { it.invokeOnChannel(method, arguments) } }
+    }
   }
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.2 — 2026-11-20
+
+### Fixed
+- Android and iOS: native events reach the app's UI engine again when the app runs a second
+  Flutter engine (a foreground task, push or background engine). The voice effect, noise
+  suppression, microphone failure, audio engine and music events were sent only to the last
+  engine that started, so the UI missed them. For example, with music playing, an effect turned
+  back on stayed shown as "paused while music plays" while it was actually on. They now go to
+  every engine. Android was verified on an Infinix X6728 in GC Party; iOS builds but was not
+  run on a phone.
+- iOS: room music's `onCompleted` (track ended) is no longer lost when the music channel was
+  freed (it was held only weakly).
+
 ## 0.11.1 — 2026-11-20
 
 ### Changed

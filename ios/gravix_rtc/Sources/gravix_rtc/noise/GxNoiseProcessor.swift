@@ -618,8 +618,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
     }
 
     private func emit(_ event: [String: Any]) {
-        guard let channel else { return }
-        DispatchQueue.main.async { channel.invokeMethod("onNsEvent", arguments: event) }
+        GxChannelHub.client.invoke("onNsEvent", event)
     }
 
     static func deviceFacts() -> [String: Any] {

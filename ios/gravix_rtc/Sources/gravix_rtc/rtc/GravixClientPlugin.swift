@@ -99,6 +99,7 @@ public class GravixClientPlugin: NSObject, FlutterPlugin {
         // the same process) must not reset it. Only the notification channel
         // is rebound to the latest registration.
         instance.channel = channel
+        GxChannelHub.client.add(channel)
         let audioEngineObserver = sharedAudioEngineObserver ?? GxAudioEngineObserver(channel: channel)
         audioEngineObserver.updateChannel(channel)
         sharedAudioEngineObserver = audioEngineObserver
@@ -1318,14 +1319,10 @@ class GxAudioEngineObserver: NSObject, RTCAudioDeviceModuleDelegate {
 
     private func notifyEngineState(isPlayoutEnabled: Bool, isRecordingEnabled: Bool) {
         lock.lock()
-        let channel = channel
         lock.unlock()
-        guard let channel else { return }
-        DispatchQueue.main.async {
-            channel.invokeMethod("onAudioEngineState", arguments: [
-                "isPlayoutEnabled": isPlayoutEnabled,
-                "isRecordingEnabled": isRecordingEnabled,
-            ])
-        }
+        GxChannelHub.client.invoke("onAudioEngineState", [
+            "isPlayoutEnabled": isPlayoutEnabled,
+            "isRecordingEnabled": isRecordingEnabled,
+        ])
     }
 }
