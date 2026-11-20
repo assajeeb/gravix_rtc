@@ -51,6 +51,21 @@ JNIEXPORT void JNICALL JNI_FN(nativeSetBypass)(JNIEnv *env, jclass cls, jlong h,
   if (h) gx_ns_set_bypass(ST(h), b ? 1 : 0);
 }
 
+JNIEXPORT void JNICALL JNI_FN(nativeSetAutoMusic)(JNIEnv *env, jclass cls, jlong h, jboolean on) {
+  (void)env; (void)cls;
+  if (h) gx_ns_set_auto_music(ST(h), on ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL JNI_FN(nativeResetMusic)(JNIEnv *env, jclass cls, jlong h) {
+  (void)env; (void)cls;
+  if (h) gx_ns_reset_music(ST(h));
+}
+
+JNIEXPORT void JNICALL JNI_FN(nativeSetBypassMakeup)(JNIEnv *env, jclass cls, jlong h, jfloat db) {
+  (void)env; (void)cls;
+  if (h) gx_ns_set_bypass_makeup(ST(h), db);
+}
+
 JNIEXPORT void JNICALL JNI_FN(nativeSetAgc)(JNIEnv *env, jclass cls, jlong h, jboolean on, jint order) {
   (void)env; (void)cls;
   if (!h) return;
@@ -95,10 +110,11 @@ JNIEXPORT void JNICALL JNI_FN(nativeStats)(JNIEnv *env, jclass cls, jlong h, jin
 /* out[0..6] = requested, active, crossfading, reason, rate, latencySamples, agcGainDb*100
  * (+ out[7] = preGainDb*100 when the array has 8; + out[8..10] = the APPLIED
  * pre-gain*100, applied AGC*100, pause attenuation*100 when it has 11: the
- * held values above are not what a pause gets); returns vad*1000 */
+ * held values above are not what a pause gets; + out[11] = auto music detected
+ * when it has 12); returns vad*1000 */
 JNIEXPORT jint JNICALL JNI_FN(nativeStatus)(JNIEnv *env, jclass cls, jlong h, jintArray out) {
   gx_ns_status s;
-  jint v[11];
+  jint v[12];
   jsize len;
   (void)cls;
   if (!h || (len = (*env)->GetArrayLength(env, out)) < 7) return 0;
@@ -106,7 +122,8 @@ JNIEXPORT jint JNICALL JNI_FN(nativeStatus)(JNIEnv *env, jclass cls, jlong h, ji
   v[0] = s.requested; v[1] = s.active; v[2] = s.crossfading; v[3] = s.reason; v[4] = s.rate; v[5] = s.latency_samples;
   v[6] = (jint)(s.agc_gain_db * 100.f); v[7] = (jint)(s.pregain_db * 100.f);
   v[8] = (jint)(s.pregain_applied_db * 100.f); v[9] = (jint)(s.agc_applied_db * 100.f); v[10] = (jint)(s.pause_att_db * 100.f);
-  (*env)->SetIntArrayRegion(env, out, 0, len >= 11 ? 11 : len >= 8 ? 8 : 7, v);
+  v[11] = s.music_detected;
+  (*env)->SetIntArrayRegion(env, out, 0, len >= 12 ? 12 : len >= 11 ? 11 : len >= 8 ? 8 : 7, v);
   return (jint)(s.vad * 1000.f);
 }
 

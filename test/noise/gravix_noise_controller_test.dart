@@ -157,6 +157,7 @@ void main() {
       expect(n.calls.single['engine'], 'rnnoise');
       expect(n.calls.single['agcOrder'], 'ownAfterNs');
       expect(n.calls.single['musicBypass'], isTrue);
+      expect(n.calls.single['autoMusic'], isTrue);
       expect(n.calls.single['watchdogFrameUs'], 8000);
       final o = c.adjustCapture(_base);
       expect(o.noiseSuppression, isFalse);
@@ -247,6 +248,34 @@ void main() {
       expect(reports.map((r) => r.step), containsAllInOrder(['init', 'routeReset', 'musicBypass']));
       final s = await c.refreshStats();
       expect(s.p95Us, 450);
+    });
+
+    test('auto music: musicDetected events set the state and reach onReport', () async {
+      final n = _FakeNative();
+      final reports = <GravixNsReport>[];
+      final c = GravixNoiseSuppression.forTesting(n);
+      await c.configure(GravixNoiseSuppressionOptions(onReport: reports.add));
+      expect(c.state.value.musicDetected, isFalse);
+      n.emit({'step': 'musicDetected', 'eng': 'rnnoise', 'reason': 'ok', 'musicDetected': true});
+      await Future<void>.delayed(Duration.zero);
+      expect(c.state.value.musicDetected, isTrue);
+      expect(reports.last.step, GravixNsStep.musicDetected);
+      expect(reports.last.musicDetected, isTrue);
+      expect(reports.last.toJson()['musicDetected'], isTrue);
+      n.emit({'step': 'summary', 'eng': 'rnnoise', 'reason': 'ok', 'p95Us': 400});
+      await Future<void>.delayed(Duration.zero);
+      expect(c.state.value.musicDetected, isTrue, reason: 'other events keep it');
+      n.emit({'step': 'musicDetected', 'eng': 'rnnoise', 'reason': 'ok', 'musicDetected': false});
+      await Future<void>.delayed(Duration.zero);
+      expect(c.state.value.musicDetected, isFalse);
+    });
+
+    test('auto music can be turned off', () async {
+      final n = _FakeNative();
+      final c = GravixNoiseSuppression.forTesting(n);
+      await c.configure(const GravixNoiseSuppressionOptions(autoMusic: false));
+      expect(n.calls.single['autoMusic'], isFalse);
+      expect(const GravixNoiseSuppressionOptions().copyWith(autoMusic: false).autoMusic, isFalse);
     });
   });
 
@@ -344,6 +373,10 @@ void main() {
         containsPair('eng', 'rnnoise'),
       );
       expect(gravixNsNormalizeIosEvent({'type': 'musicBypass', 'on': true}), containsPair('musicBypass', true));
+      final md = gravixNsNormalizeIosEvent({'type': 'musicDetected', 'on': true});
+      expect(md['step'], 'musicDetected');
+      expect(md['musicDetected'], isTrue);
+      expect(gravixNsFlattenIosState({'active': 'rnnoise', 'musicDetected': true})?['musicDetected'], isTrue);
       expect(gravixNsNormalizeIosEvent({'type': 'routeReset', 'route': 'bt-sco'})['step'], 'routeReset');
       final flat = gravixNsFlattenIosState({
         'active': 'rnnoise',

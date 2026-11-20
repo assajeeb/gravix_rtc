@@ -19,6 +19,7 @@ void main() {
       expect(a['agcOrder'], 'ownAfterNs');
       expect(a['agc'], true);
       expect(a['musicBypass'], true);
+      expect(a['autoMusic'], true);
       expect(a['watchdogUs'], 8000);
       expect(a['watchdogConsecutive'], 3);
       expect(a['benchmarkP95Us'], 3000);

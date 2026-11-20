@@ -17,7 +17,11 @@ int main(void) {
   int a0, f0, ri, k;
   gx_ns_stats s; gx_ns_status t;
   gx_ns_external_engine e = {ident, NULL, NULL, 960};
-  struct gx_ns *st = gx_ns_create(NULL);
+  gx_ns_config cfg;
+  struct gx_ns *st;
+  gx_ns_default_config(&cfg);
+  cfg.auto_music = 1; /* the detector's FFT and window run on the hot path too */
+  st = gx_ns_create(&cfg);
   CHECK(st != NULL, "create");
   CHECK(gxt_allocs > 0, "the trap sees create()'s allocations (%d)", gxt_allocs);
   a0 = gxt_allocs; f0 = gxt_frees;

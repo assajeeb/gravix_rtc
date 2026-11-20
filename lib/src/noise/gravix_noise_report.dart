@@ -17,6 +17,10 @@ class GravixNsStep {
   static const switch_ = 'switch';
   static const routeReset = 'routeReset';
   static const musicBypass = 'musicBypass';
+
+  /// Auto music: music detected on the microphone (on/off), see
+  /// [GravixNoiseSuppressionOptions.autoMusic].
+  static const musicDetected = 'musicDetected';
   static const summary = 'summary';
 }
 
@@ -107,6 +111,7 @@ class GravixNsReport {
     this.headsetNs,
     this.musicBypassMs,
     this.cpuPercent,
+    this.musicDetected,
   });
 
   final String step;
@@ -136,6 +141,10 @@ class GravixNsReport {
   final int? musicBypassMs;
   final double? cpuPercent;
 
+  /// Auto music: the microphone carries music right now (step `musicDetected`
+  /// and later reports while it lasts); null when the native side did not say.
+  final bool? musicDetected;
+
   Map<String, dynamic> toJson() => {
     'step': step,
     'mode': gravixNsModeName(mode),
@@ -163,5 +172,6 @@ class GravixNsReport {
     if (headsetNs != null) 'headsetNs': headsetNs,
     if (musicBypassMs != null) 'musicBypassMs': musicBypassMs,
     if (cpuPercent != null) 'cpuPercent': cpuPercent,
+    if (musicDetected != null) 'musicDetected': musicDetected,
   };
 }

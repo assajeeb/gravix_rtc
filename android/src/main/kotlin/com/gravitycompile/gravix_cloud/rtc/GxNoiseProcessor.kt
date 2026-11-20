@@ -36,6 +36,9 @@ import java.nio.ByteBuffer
 internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProcessing {
   private const val TAG = "GravixNS"
   private const val SUMMARY_EVERY_S = 10
+  /** Singer mode makeup gain on built-in mics (dB), see applyMakeup. 0 until
+   * the singer level is measured on the test phones (one reading so far). */
+  internal const val SINGER_BUILTIN_MAKEUP_DB = 0f
 
   @Volatile private var handle = 0L
   @Volatile private var controller: AudioProcessingController? = null
@@ -55,6 +58,10 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   @Volatile private var agcOrder = GxNsNative.AGC_AFTER_NS
   @Volatile private var agcOrderName = "ownAfterNs"
   @Volatile private var musicBypassEnabled = true
+  // auto music (2026-11-20): gx_ns detects music on the mic and relaxes the chain
+  @Volatile private var autoMusic = true
+  private var musicDetected = false
+  private var musicDetectedSinceMs = 0L
   @Volatile private var preferHeadset = false
   @Volatile private var thermalFallback = true
   @Volatile private var saverFallback = true
@@ -71,6 +78,9 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   // bypassed (dry + limiter near clip, our AGC and pause expander at unity)
   // while it is on, with or without room music
   @Volatile private var singerMode = false
+  // the recorder source singer mode asked for (GxSingerSource), null = kept
+  @Volatile private var singerSource: Int? = null
+  @Volatile private var makeupDb = 0f
   @Volatile private var decided = GxNsNative.ENGINE_OFF
   @Volatile private var decidedReason = "mode_off"
 
@@ -118,7 +128,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
   private var cpuTicks0 = -1L
   private var cpuWall0 = 0L
   private val statsBuf = IntArray(13)
-  private val statusBuf = IntArray(11)
+  private val statusBuf = IntArray(12)
 
   // ============================== audio thread ==============================
 
@@ -126,11 +136,13 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     initRate = sampleRateHz
     initChannels = numChannels
     lastNumFrames = -1 // re-check the shape at the next frame
+    handle.let { if (it != 0L) GxNsNative.nativeResetMusic(it) } // a new capture: auto music starts over
   }
 
   override fun reset(newRate: Int) {
     initRate = newRate
     lastNumFrames = -1
+    handle.let { if (it != 0L) GxNsNative.nativeResetMusic(it) }
   }
 
   override fun process(numBands: Int, numFrames: Int, buffer: ByteBuffer) {
@@ -192,6 +204,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     agcOrderName = args["agcOrder"] as? String ?: "ownAfterNs"
     agcOrder = GxNsNative.AGC_AFTER_NS
     musicBypassEnabled = args["musicBypass"] as? Boolean ?: true
+    autoMusic = args["autoMusic"] as? Boolean ?: true
     preferHeadset = args["headsetNs"] == "preferHeadset"
     thermalFallback = args["thermalFallback"] as? Boolean ?: true
     saverFallback = args["batterySaverFallback"] as? Boolean ?: true
@@ -237,13 +250,15 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     GxNsNative.nativeSetAgc(h, agcOn, agcOrder)
     GxNsNative.nativeSetStudioLimits(h, (studioAttenLimitDb * 100).toInt(), studioP95BudgetUs)
     GxNsNative.nativeSetBypass(h, bypassWanted())
+    GxNsNative.nativeSetAutoMusic(h, autoMusic)
+    applyMakeup("configure")
     applyDecision("configure")
     val installed = installOn(plugin, "configure")
     if ((mode == "auto" || mode == "studio") && studioLowLatency) ensurePack()
     log(
       "init", decided,
       "mode=$mode requested=${GxNsNative.engineName(requested)} reason=$decidedReason agc=${if (agcOn) "ownAfterNs" else agcOrderName} " +
-        "musicBypass=$musicBypassEnabled headsetNs=${if (preferHeadset) "preferHeadset" else "keepOurs"} installed=$installed",
+        "musicBypass=$musicBypassEnabled autoMusic=$autoMusic headsetNs=${if (preferHeadset) "preferHeadset" else "keepOurs"} installed=$installed",
       t0,
     )
     return mapOf(
@@ -260,6 +275,8 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
    */
   @Synchronized
   fun installOn(plugin: FlutterWebRTCPlugin?, where: String): Boolean {
+    // a capture (re)starts: auto music must not carry the last session's state
+    if (where == "startLocalRecording") handle.let { if (it != 0L) GxNsNative.nativeResetMusic(it) }
     if (handle == 0L && !GxVoiceFx.wanted()) return false
     val c = try {
       plugin?.audioProcessingController
@@ -312,21 +329,46 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     GxNsNative.nativeRequestReset(h)
     lastNumFrames = -1 // re-check the shape and rate at the next frame
     applyDecision("route")
+    applyMakeup("route")
     log("routeReset", decided, "from=$prev why=$why narrowband=${GxNsRoute.isNarrowband(next)}")
     emit("routeReset", mapOf("from" to prev))
   }
 
   private fun bypassWanted(): Boolean = (musicBypassEnabled && musicActive) || singerMode
 
-  /** Singer mode on / off (nsSetSingerMode from Dart, any thread). */
-  fun setSingerMode(on: Boolean) {
-    if (singerMode == on) return
+  /** Singer mode on / off (nsSetSingerMode from Dart, any thread); [source] = the GxSingerSource asked for. */
+  fun setSingerMode(on: Boolean, source: Int? = null) {
+    singerSource = if (on) source else null
+    if (singerMode == on) { applyMakeup("source"); return }
     singerMode = on
     val h = handle
     if (h != 0L) GxNsNative.nativeSetBypass(h, bypassWanted())
+    applyMakeup("singerMode")
     if (h == 0L) return
-    log("singerMode", decided, "on=$on bypass=${bypassWanted()}")
+    log("singerMode", decided, "on=$on bypass=${bypassWanted()} makeupDb=$makeupDb")
     emit("singerMode", mapOf("singerMode" to on))
+  }
+
+  /**
+   * Singer mode on a built-in mic: the raw sources (MIC / VOICE_RECOGNITION /
+   * UNPROCESSED) have no HAL AGC and come in quiet (Redmi seat, MIC: sung
+   * median -39 dBFS, 2026-11-20). A fixed makeup gain on the bypassed signal,
+   * before the -1 dBFS limiter. Never on a wired / USB / Bluetooth input (a
+   * sound card or headset sets its own level) or the kept call source, and
+   * not while room music plays: on the PRE route it is in the same buffer and
+   * would be lifted with the voice (0.11.2 levels then).
+   */
+  @Synchronized
+  private fun applyMakeup(why: String) {
+    val src = singerSource
+    val builtIn = route == "speaker" || route == "earpiece"
+    val want = if (singerMode && !musicActive && builtIn && src != null && src != GxSingerSource.VOICE_COMMUNICATION) SINGER_BUILTIN_MAKEUP_DB else 0f
+    val h = handle
+    if (h != 0L) GxNsNative.nativeSetBypassMakeup(h, want)
+    if (want != makeupDb) {
+      makeupDb = want
+      if (h != 0L) log("singerMakeup", decided, "db=$want why=$why source=$src route=$route")
+    }
   }
 
   /** MusicMixerEngine session start / end (any thread). */
@@ -338,6 +380,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     val h = handle
     val bypass = musicBypassEnabled && active
     if (h != 0L && (musicBypassEnabled || singerMode)) GxNsNative.nativeSetBypass(h, bypassWanted())
+    applyMakeup("music")
     if (h == 0L) return
     val detail = if (active) {
       musicSinceMs = now
@@ -494,7 +537,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     val h = handle
     if (h == 0L) return null
     val s = IntArray(10)
-    val st = IntArray(11)
+    val st = IntArray(12)
     GxNsNative.nativeStats(h, s)
     GxNsNative.nativeStatus(h, st)
     return mapOf(
@@ -504,7 +547,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
       "reason" to if (st[3] != 0) GxNsNative.nativeReasonName(st[3]) else decidedReason,
       "route" to route, "rate" to st[4], "latencySamples" to st[5], "agcGainDb" to st[6] / 100.0,
       "preGainDb" to st[7] / 100.0, "agcAppliedDb" to st[9] / 100.0, "preGainAppliedDb" to st[8] / 100.0,
-      "pauseAttDb" to st[10] / 100.0,
+      "pauseAttDb" to st[10] / 100.0, "musicDetected" to (st[11] != 0),
       "musicBypass" to (musicActive && musicBypassEnabled), "installed" to (controller != null),
       "shapeReject" to shapeReject,
       "studioModel" to studioEngine?.model?.id, "studioAttached" to studioAttached,
@@ -664,6 +707,15 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
       lastActive = active
       lastReasonName = reasonName
     }
+    val music = statusBuf[11] != 0
+    if (music != musicDetected) {
+      val now = SystemClock.elapsedRealtime()
+      val ms = if (musicDetectedSinceMs > 0) now - musicDetectedSinceMs else 0L
+      musicDetected = music
+      musicDetectedSinceMs = now
+      log("musicDetected", decided, "on=$music ms=$ms agcAppliedDb=${statusBuf[9] / 100.0} preAppliedDb=${statusBuf[8] / 100.0}")
+      emit("musicDetected", mapOf("musicDetected" to music))
+    }
     if (tick % SUMMARY_EVERY_S == 0) summary(h)
   }
 
@@ -674,7 +726,7 @@ internal object GxNoiseProcessor : AudioProcessingAdapter.ExternalAudioFrameProc
     val detail = "p50=${statsBuf[1]} p95=${statsBuf[2]} p99=${statsBuf[3]} max=${statsBuf[4]} over=${statsBuf[5]}" +
       (if (cpu != null) " cpu=${String.format(java.util.Locale.US, "%.1f", cpu)}" else "") +
       " frames=${statsBuf[0]} underflows=${statsBuf[7]} switches=${statsBuf[9]} errors=$processErrors" +
-      " music=${musicActive && musicBypassEnabled} agcDb=${statusBuf[6] / 100.0} preDb=${statusBuf[7] / 100.0}" +
+      " music=${musicActive && musicBypassEnabled} musicDetected=$musicDetected agcDb=${statusBuf[6] / 100.0} preDb=${statusBuf[7] / 100.0}" +
       " agcAppliedDb=${statusBuf[9] / 100.0} preAppliedDb=${statusBuf[8] / 100.0} pauseAttDb=${statusBuf[10] / 100.0}"
     log("summary", lastActive.coerceAtLeast(0), detail)
     emit(

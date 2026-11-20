@@ -38,6 +38,7 @@ class GravixNsState {
     this.rate,
     this.installed = false,
     this.musicBypass = false,
+    this.musicDetected = false,
     this.p50Us,
     this.p95Us,
     this.overBudget,
@@ -62,6 +63,11 @@ class GravixNsState {
   /// Room music is playing: the chain is bypassed (dry).
   final bool musicBypass;
 
+  /// Music is detected on the microphone and the chain is relaxed
+  /// ([GravixNoiseSuppressionOptions.autoMusic]). False while [musicBypass] or
+  /// singer mode already take the chain out.
+  final bool musicDetected;
+
   /// Frame time of the processor, last stats window (us).
   final int? p50Us;
   final int? p95Us;
@@ -75,6 +81,7 @@ class GravixNsState {
     int? rate,
     bool? installed,
     bool? musicBypass,
+    bool? musicDetected,
     int? p50Us,
     int? p95Us,
     int? overBudget,
@@ -86,6 +93,7 @@ class GravixNsState {
     rate: rate ?? this.rate,
     installed: installed ?? this.installed,
     musicBypass: musicBypass ?? this.musicBypass,
+    musicDetected: musicDetected ?? this.musicDetected,
     p50Us: p50Us ?? this.p50Us,
     p95Us: p95Us ?? this.p95Us,
     overBudget: overBudget ?? this.overBudget,
@@ -101,17 +109,19 @@ class GravixNsState {
       other.rate == rate &&
       other.installed == installed &&
       other.musicBypass == musicBypass &&
+      other.musicDetected == musicDetected &&
       other.p50Us == p50Us &&
       other.p95Us == p95Us &&
       other.overBudget == overBudget;
 
   @override
-  int get hashCode => Object.hash(mode, engine, reason, route, rate, installed, musicBypass, p50Us, p95Us, overBudget);
+  int get hashCode =>
+      Object.hash(mode, engine, reason, route, rate, installed, musicBypass, musicDetected, p50Us, p95Us, overBudget);
 
   @override
   String toString() =>
       'GravixNsState(mode=${mode.name} eng=${gravixNsEngineName(engine)} reason=$reason '
-      'route=${gravixNsRouteName(route)} rate=${rate ?? '?'} installed=$installed music=$musicBypass p95=${p95Us ?? '-'})';
+      'route=${gravixNsRouteName(route)} rate=${rate ?? '?'} installed=$installed music=$musicBypass musicDetected=$musicDetected p95=${p95Us ?? '-'})';
 }
 
 /// The native side, a seam for tests.
@@ -325,6 +335,7 @@ class GravixNoiseSuppression {
         'reason': r.reason,
         'agcOrder': o.agcOrder.name,
         'musicBypass': o.musicBypass,
+        'autoMusic': o.autoMusic,
         'hardwareNs': o.hardwareNs.name,
         'headsetNs': o.headsetNs.name,
         'watchdogFrameUs': o.watchdogFrame.inMicroseconds,
@@ -491,6 +502,7 @@ class GravixNoiseSuppression {
       route: e['route'] is String ? gravixNsRouteFromName(e['route'] as String) : null,
       rate: e['rate'] is int ? e['rate'] as int : null,
       musicBypass: e['musicBypass'] is bool ? e['musicBypass'] as bool : null,
+      musicDetected: e['musicDetected'] is bool ? e['musicDetected'] as bool : null,
       p50Us: e['p50Us'] is int ? e['p50Us'] as int : null,
       p95Us: e['p95Us'] is int ? e['p95Us'] as int : null,
       overBudget: e['over'] is int ? e['over'] as int : null,
@@ -511,6 +523,7 @@ class GravixNoiseSuppression {
         maxUs: e['maxUs'] is int ? e['maxUs'] as int : null,
         framesOverBudget: s.overBudget,
         cpuPercent: e['cpu'] is num ? (e['cpu'] as num).toDouble() : null,
+        musicDetected: s.musicDetected,
       ),
     );
   }

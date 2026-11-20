@@ -99,6 +99,9 @@ typedef enum {
  * engine is re-attached. */
 #define GX_NS_EXT_SUPPRESS_DB 20
 #define GX_NS_EXT_SUPPRESS_BLOCKS 200
+#define GX_NS_MUSIC_FLOOR_DB 6     /* auto music: the NS takes at most this off the input */
+#define GX_NS_MUSIC_MAX_DBFS (-18) /* auto music: held boosts never lift the music over this */
+#define GX_NS_MAKEUP_MAX_DB 18       /* gx_ns_set_bypass_makeup ceiling */
 #define GX_NS_EXT_VS_RNN_DB 10 /* ... or this far under RNNoise (its shadow) on the same speech blocks */
 
 /* Why the active engine differs from the requested one (gx_ns_status.reason). */
@@ -143,6 +146,7 @@ typedef struct {
   int pregain_enabled;     /* default 1 */
   float pregain_target_dbfs; /* default GX_NS_DEFAULT_PREGAIN_TARGET_DBFS */
   float pregain_max_db;    /* default GX_NS_DEFAULT_PREGAIN_MAX_DB */
+  int auto_music;          /* music on the mic relaxes the chain (gx_ns_set_auto_music), default 0 */
 } gx_ns_config;
 
 typedef struct {
@@ -174,6 +178,7 @@ typedef struct {
   float agc_applied_db;
   float pause_att_db;       /* pause expander attenuation (>= 0) */
   int talk;                 /* the talk detector: this block is talk (or its hangover) */
+  int music_detected;       /* auto music: the mic carries music, the chain is relaxed (2026-11-20) */
 } gx_ns_status;
 
 GX_NS_API void gx_ns_default_config(gx_ns_config *cfg);
@@ -199,6 +204,28 @@ GX_NS_API void gx_ns_set_atten_limit(struct gx_ns *st, float db);    /* studio a
 GX_NS_API void gx_ns_set_ext_p95_budget(struct gx_ns *st, int us);   /* studio rolling-p95 budget; 0 = off */
 GX_NS_API void gx_ns_reset_stats(struct gx_ns *st);
 GX_NS_API void gx_ns_set_pregain(struct gx_ns *st, int enabled);
+/* Auto music (2026-11-20): music played into the mic (a speaker, another app,
+ * an instrument) is detected from the input itself (sustained, tonal, changing
+ * notes, no speech pauses: about 3 s to enter, 3 s of non-music to leave).
+ * While detected, over ~300 ms: the NS keeps at least half of the input
+ * (attenuation <= GX_NS_MUSIC_FLOOR_DB), the pause gate stays open and the
+ * pause expander is off, the pre-gain and AGC hold their gains (no learning;
+ * boosts capped so the music is not lifted over GX_NS_MUSIC_MAX_DBFS). Music
+ * bypass and engine off already take the chain out: detection then rests.
+ * Off = exactly the chain without it. */
+GX_NS_API void gx_ns_set_auto_music(struct gx_ns *st, int enabled);
+/* Auto music starts over (not detected, not relaxed): call when a capture
+ * stream (re)starts. gx_ns_request_reset and a rate change do it too. */
+GX_NS_API void gx_ns_reset_music(struct gx_ns *st);
+/* Makeup gain while the bypass is on (singer mode on a quiet built-in mic,
+ * 2026-11-20): applied to the dry signal, ramped over 100 ms, before the peak
+ * limiter (GX_NS_DEFAULT config limiter_dbfs, -1 dBFS), so a hot input is
+ * limited, never clipped. 0..GX_NS_MAKEUP_MAX_DB; 0 = none (default). */
+GX_NS_API void gx_ns_set_bypass_makeup(struct gx_ns *st, float db);
+/* Detector features of the last block (tuning, gxns_replay --music):
+ * [0] dip share, [1] tonal share, [2] note onsets in the window, [3] stable
+ * peaks this block, [4] state (0/1), [5] relax amount 0..1, [6] music level dBFS. */
+GX_NS_API void gx_ns_get_music_debug(struct gx_ns *st, float out[7]);
 
 /* The pre-gain the core settles on for speech at `speech_dbfs` (default target
  * and max): what a studio benchmark applies to its input to test the engine at

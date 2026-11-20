@@ -861,7 +861,7 @@ class GravixClientPlugin : FlutterPlugin, MethodCallHandler {
           false
         }
         val source = if (on) GxSingerSource.resolve(name, Build.VERSION.SDK_INT, unprocessed) else null
-        GxNoiseProcessor.setSingerMode(on)
+        GxNoiseProcessor.setSingerMode(on, source)
         captureSwitcher.setSingerSource(source)
         // the source is requested: the recorder restart runs on the module
         // thread and falls back to the original source if the phone refuses it

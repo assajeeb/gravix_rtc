@@ -11,6 +11,7 @@
 #include "speex_resampler.h"
 
 #define NB_RATES 6
+#define GX_PI 3.14159265358979323846
 #define GX_NS_TALK_WIN 100  /* talk detector: 1 s of post-NS block levels */
 #define GX_NS_TALK_WARM 200 /* the first 2 s (RNNoise's output on noise still rising) ... */
 #define GX_NS_TALK_WIN0 30  /* ... compare with the last 300 ms only */
@@ -83,6 +84,43 @@ static void dl_read(const delay_line *d, float *out, int n, int delay) {
 }
 
 /* ---------- per-rate resamplers (pre-allocated) ---------- */
+/* auto music detector (2026-11-20) */
+#define GX_MU_N 1024      /* FFT size at 48 kHz (21 ms window, 10 ms hop) */
+#define GX_MU_K0 4        /* analysed bins: ~190 Hz ... */
+#define GX_MU_K1 110      /* ... ~5.2 kHz (46.9 Hz per bin) */
+#define GX_MU_WIN 300     /* decision window: 3 s of blocks */
+#define GX_MU_PEAKWIN 20  /* dip test: under the max of the last 200 ms ... */
+#ifndef GX_MU_DIP_DB
+#define GX_MU_DIP_DB 15.f /* ... by this much (speech pauses between words) */
+#endif
+#ifndef GX_MU_HOLD
+#define GX_MU_HOLD 15     /* a spectral peak held 150 ms is a note */
+#endif
+#ifndef GX_MU_PROM_DB
+#define GX_MU_PROM_DB 5.f /* peak prominence over its neighbourhood (8 missed dense mixes) */
+#endif
+#ifndef GX_MU_ENTER_DIP
+#define GX_MU_ENTER_DIP 0.04f
+#endif
+#ifndef GX_MU_ENTER_TONAL
+#define GX_MU_ENTER_TONAL 0.5f
+#endif
+#ifndef GX_MU_ENTER_ONSETS
+#define GX_MU_ENTER_ONSETS 20
+#endif
+#ifndef GX_MU_STAY_DIP
+#define GX_MU_STAY_DIP 0.12f
+#endif
+#ifndef GX_MU_STAY_TONAL
+#define GX_MU_STAY_TONAL 0.12f
+#endif
+#ifndef GX_MU_STAY_ONSETS
+#define GX_MU_STAY_ONSETS 10
+#endif
+#define GX_MU_ENTER_RUN 30   /* the enter test holds 300 ms (on top of the 3 s window) */
+#define GX_MU_LEAVE_RUN 300  /* the stay test fails for 3 s */
+#define GX_MU_RAMP 30        /* 300 ms fades */
+
 typedef struct {
   int rate, block; /* block = samples per 10 ms at this rate */
   SpeexResamplerState *up, *down;
@@ -191,6 +229,31 @@ struct gx_ns {
   float blk[GX_NS_BLOCK], b_rnn[GX_NS_BLOCK], b_ext[GX_NS_BLOCK], b_tmp[GX_NS_BLOCK];
   float s_dry[GX_NS_BLOCK], s_rnn[GX_NS_BLOCK], s_ext[GX_NS_BLOCK];
 
+  /* auto music (2026-11-20): detector on the input block before the pre-gain */
+  _Atomic int req_auto_music;
+  _Atomic uint32_t req_mu_reset;
+  uint32_t mu_reset_seen;
+  _Atomic float req_makeup_db;
+  float mk_lin, mk_db; /* bypass makeup gain applied to the last block */
+  atomic_int pub_music;
+  _Atomic float pub_mu_dbg[7];
+  float mu_buf[GX_MU_N];             /* the last GX_MU_N input samples */
+  float mu_hann[GX_MU_N], mu_re[GX_MU_N], mu_im[GX_MU_N];
+  float mu_twr[GX_MU_N / 2], mu_twi[GX_MU_N / 2];
+  uint16_t mu_rev[GX_MU_N];
+  float mu_db[GX_MU_K1 + 4];         /* power spectrum (dB) up to the last analysed bin + 3 */
+  uint8_t mu_cnt[GX_MU_K1 + 1];      /* blocks a spectral peak has held (+-1 bin) */
+  uint8_t mu_cnt2[GX_MU_K1 + 1];
+  uint8_t mu_fl[GX_MU_WIN];          /* per block: bit0 dip, bit1 tonal */
+  uint8_t mu_on[GX_MU_WIN];          /* per block: note onsets */
+  int mu_pos, mu_fill, mu_sdip, mu_ston, mu_sons;
+  float mu_lv[GX_MU_PEAKWIN];        /* block levels for the dip test */
+  int mu_lpos;
+  int mu_state, mu_run;              /* detected; blocks the enter / leave test has held */
+  float mu_m;                        /* relax amount, ramps 0..1 over GX_MU_RAMP blocks */
+  float mu_lvl_db;                   /* music level (EMA of block levels while detected) */
+  int mu_have_lvl;
+
   gx_timer timer;
   _Atomic uint32_t underflows, ext_errors, switches;
 };
@@ -278,6 +341,144 @@ void gx_ns_destroy(gx_ns *st) {
   free(st);
 }
 
+
+/* ---------- auto music detector (2026-11-20) ----------
+ * Music played into the mic (field case: a guest's song from a speaker)
+ * looked like noise to the chain: RNNoise erased the gaps between notes, the
+ * pause gate dropped the boosts and the expander cut the rest (dips of
+ * 15-25 dB every few seconds). Speech pauses between words, noise is
+ * stationary; music is continuous AND holds tonal peaks that change (notes).
+ * Per block on the input (before the pre-gain, so relaxing the chain never
+ * changes what the detector sees):
+ *   dip    : the level falls GX_MU_DIP_DB under the max of the last 200 ms
+ *   tonal  : >= 2 spectral peaks (190 Hz - 5.2 kHz) held >= 150 ms
+ *   onsets : peaks that just reached 150 ms (a new note)
+ * Over 3 s: enter when dips are rare, most blocks tonal and notes keep
+ * starting; leave when that fails for 3 s (looser thresholds). */
+static void mu_reset(gx_ns *st) {
+  int i;
+  for (i = 0; i < GX_MU_PEAKWIN; i++) st->mu_lv[i] = -200.f; /* no level yet: no dips */
+  memset(st->mu_cnt, 0, sizeof(st->mu_cnt));
+  memset(st->mu_fl, 0, sizeof(st->mu_fl));
+  memset(st->mu_on, 0, sizeof(st->mu_on));
+  st->mu_pos = st->mu_fill = st->mu_sdip = st->mu_ston = st->mu_sons = 0;
+  st->mu_state = st->mu_run = 0;
+}
+
+static void mu_init(gx_ns *st) {
+  int i, j, bits = 0;
+  while ((1 << bits) < GX_MU_N) bits++;
+  for (i = 0; i < GX_MU_N; i++) {
+    int r = 0;
+    for (j = 0; j < bits; j++) if (i & (1 << j)) r |= 1 << (bits - 1 - j);
+    st->mu_rev[i] = (uint16_t)r;
+    st->mu_hann[i] = (float)(0.5 - 0.5 * cos(2.0 * GX_PI * i / GX_MU_N));
+  }
+  mu_reset(st);
+  for (i = 0; i < GX_MU_N / 2; i++) {
+    st->mu_twr[i] = (float)cos(-2.0 * GX_PI * i / GX_MU_N);
+    st->mu_twi[i] = (float)sin(-2.0 * GX_PI * i / GX_MU_N);
+  }
+}
+
+
+/* in-place radix-2 complex FFT of mu_re/mu_im (GX_MU_N points) */
+static void mu_fft(gx_ns *st) {
+  int i, len, k;
+  float *re = st->mu_re, *im = st->mu_im;
+  for (i = 0; i < GX_MU_N; i++) {
+    int r = st->mu_rev[i];
+    if (r > i) { float t = re[i]; re[i] = re[r]; re[r] = t; t = im[i]; im[i] = im[r]; im[r] = t; }
+  }
+  for (len = 2; len <= GX_MU_N; len <<= 1) {
+    int half = len >> 1, step = GX_MU_N / len;
+    for (i = 0; i < GX_MU_N; i += len) {
+      for (k = 0; k < half; k++) {
+        float wr = st->mu_twr[k * step], wi = st->mu_twi[k * step];
+        int a = i + k, b = a + half;
+        float xr = re[b] * wr - im[b] * wi, xi = re[b] * wi + im[b] * wr;
+        re[b] = re[a] - xr; im[b] = im[a] - xi;
+        re[a] += xr; im[a] += xi;
+      }
+    }
+  }
+}
+
+/* One input block (48 kHz, before the pre-gain); updates mu_state. */
+static void mu_block(gx_ns *st, const float *x, float lvl_db) {
+  int i, k, stable = 0, onsets = 0, dip, tonal, p;
+  float mx = -200.f, fmax = -200.f;
+  memmove(st->mu_buf, st->mu_buf + GX_NS_BLOCK, sizeof(float) * (GX_MU_N - GX_NS_BLOCK));
+  memcpy(st->mu_buf + GX_MU_N - GX_NS_BLOCK, x, sizeof(float) * GX_NS_BLOCK);
+  for (i = 0; i < GX_MU_N; i++) { st->mu_re[i] = st->mu_buf[i] * st->mu_hann[i]; st->mu_im[i] = 0.f; }
+  mu_fft(st);
+  for (k = 0; k <= GX_MU_K1 + 3; k++) {
+    float pw = st->mu_re[k] * st->mu_re[k] + st->mu_im[k] * st->mu_im[k];
+    st->mu_db[k] = 10.f * log10f(pw + 1e-3f);
+    if (k >= GX_MU_K0 && st->mu_db[k] > fmax) fmax = st->mu_db[k];
+  }
+  /* held peaks: a bin that is a prominent local max carries the longest hold
+   * of itself and its neighbours (a note may wander by a bin: vibrato) */
+  for (k = GX_MU_K0; k <= GX_MU_K1; k++) {
+    float d = st->mu_db[k], nb = 0.f;
+    int peak = 0;
+    if (k >= GX_MU_K0 && d > st->mu_db[k - 1] && d >= st->mu_db[k + 1] && d > fmax - 50.f && lvl_db > -65.f) {
+      for (i = 2; i <= 3; i++) nb += st->mu_db[k - i] + st->mu_db[k + i];
+      peak = d - nb * 0.25f >= GX_MU_PROM_DB;
+    }
+    if (peak) {
+      /* the same bin grows the hold; a neighbour's hold is carried without
+       * growing (vibrato wanders back and forth, a gliding voice keeps moving) */
+      int own = st->mu_cnt[k] ? st->mu_cnt[k] + 1 : 1, c = own;
+      if (k > GX_MU_K0 && st->mu_cnt[k - 1] > c) c = st->mu_cnt[k - 1];
+      if (k < GX_MU_K1 && st->mu_cnt[k + 1] > c) c = st->mu_cnt[k + 1];
+      if (c > 250) c = 250;
+      st->mu_cnt2[k] = (uint8_t)c;
+      if (c >= GX_MU_HOLD) stable++;
+      if (own == GX_MU_HOLD && c == own) onsets++; /* a note reached the hold in its own bin (not a hop) */
+    } else {
+      st->mu_cnt2[k] = 0;
+    }
+  }
+  memcpy(st->mu_cnt + GX_MU_K0, st->mu_cnt2 + GX_MU_K0, (size_t)(GX_MU_K1 - GX_MU_K0 + 1));
+  /* dip: under the max of the last 200 ms */
+  for (i = 0; i < GX_MU_PEAKWIN; i++) if (st->mu_lv[i] > mx) mx = st->mu_lv[i];
+  st->mu_lv[st->mu_lpos] = lvl_db;
+  st->mu_lpos = (st->mu_lpos + 1) % GX_MU_PEAKWIN;
+  dip = lvl_db < mx - GX_MU_DIP_DB || lvl_db < -65.f;
+  tonal = stable >= 2;
+  /* 3 s window sums */
+  p = st->mu_pos;
+  if (st->mu_fill == GX_MU_WIN) {
+    st->mu_sdip -= st->mu_fl[p] & 1;
+    st->mu_ston -= (st->mu_fl[p] >> 1) & 1;
+    st->mu_sons -= st->mu_on[p];
+  } else {
+    st->mu_fill++;
+  }
+  st->mu_fl[p] = (uint8_t)(dip | (tonal << 1));
+  st->mu_on[p] = (uint8_t)(onsets > 255 ? 255 : onsets);
+  st->mu_sdip += dip; st->mu_ston += tonal; st->mu_sons += st->mu_on[p];
+  st->mu_pos = (p + 1) % GX_MU_WIN;
+  if (st->mu_fill == GX_MU_WIN) {
+    float fd = (float)st->mu_sdip / GX_MU_WIN, ft = (float)st->mu_ston / GX_MU_WIN;
+    if (!st->mu_state) {
+      int ok = fd <= GX_MU_ENTER_DIP && ft >= GX_MU_ENTER_TONAL && st->mu_sons >= GX_MU_ENTER_ONSETS;
+      st->mu_run = ok ? st->mu_run + 1 : 0;
+      if (st->mu_run >= GX_MU_ENTER_RUN) { st->mu_state = 1; st->mu_run = 0; }
+    } else {
+      int ok = fd <= GX_MU_STAY_DIP && ft >= GX_MU_STAY_TONAL && st->mu_sons >= GX_MU_STAY_ONSETS;
+      st->mu_run = ok ? 0 : st->mu_run + 1;
+      if (st->mu_run >= GX_MU_LEAVE_RUN) { st->mu_state = 0; st->mu_run = 0; }
+    }
+    atomic_store_explicit(&st->pub_mu_dbg[0], fd, memory_order_relaxed);
+    atomic_store_explicit(&st->pub_mu_dbg[1], ft, memory_order_relaxed);
+    atomic_store_explicit(&st->pub_mu_dbg[2], (float)st->mu_sons, memory_order_relaxed);
+  }
+  atomic_store_explicit(&st->pub_mu_dbg[3], (float)stable, memory_order_relaxed);
+  atomic_store_explicit(&st->pub_mu_dbg[4], (float)st->mu_state, memory_order_relaxed);
+}
+
 gx_ns *gx_ns_create(const gx_ns_config *cfg) {
   gx_ns *st;
   int i, err = 0, maxf, dl_cap;
@@ -320,6 +521,14 @@ gx_ns *gx_ns_create(const gx_ns_config *cfg) {
   rnnoise_process_frame(st->rnn, st->b_tmp, st->blk);
   rnnoise_reset(st->rnn);
   (void)gx_timer_now_ns(); /* Apple: fills the timebase outside the audio thread */
+
+  mu_init(st);
+  atomic_init(&st->req_auto_music, st->cfg.auto_music ? 1 : 0);
+  atomic_init(&st->pub_music, 0);
+  atomic_init(&st->req_mu_reset, 0);
+  atomic_init(&st->req_makeup_db, 0.f);
+  st->mk_lin = 1.f;
+  for (i = 0; i < 7; i++) atomic_init(&st->pub_mu_dbg[i], 0.f);
 
   gx_timer_init(&st->timer, (uint32_t)st->cfg.watchdog_us);
   atomic_init(&st->req_engine, (int)st->cfg.initial_engine);
@@ -385,6 +594,15 @@ void gx_ns_set_atten_limit(gx_ns *st, float db) { atomic_store(&st->req_atten_db
 void gx_ns_set_ext_p95_budget(gx_ns *st, int us) { atomic_store(&st->req_p95_budget, us > 0 ? us : 0); }
 void gx_ns_reset_stats(gx_ns *st) { atomic_fetch_add(&st->req_stats_reset, 1); }
 void gx_ns_set_pregain(gx_ns *st, int on) { atomic_store(&st->req_pregain, on ? 1 : 0); }
+void gx_ns_set_auto_music(gx_ns *st, int on) { atomic_store(&st->req_auto_music, on ? 1 : 0); }
+void gx_ns_reset_music(gx_ns *st) { atomic_fetch_add(&st->req_mu_reset, 1); }
+void gx_ns_set_bypass_makeup(gx_ns *st, float db) {
+  atomic_store(&st->req_makeup_db, db < 0.f ? 0.f : db > (float)GX_NS_MAKEUP_MAX_DB ? (float)GX_NS_MAKEUP_MAX_DB : db);
+}
+void gx_ns_get_music_debug(gx_ns *st, float out[7]) {
+  int i;
+  for (i = 0; i < 7; i++) out[i] = atomic_load_explicit(&st->pub_mu_dbg[i], memory_order_relaxed);
+}
 uint32_t gx_ns_blocks_processed(gx_ns *st) { return atomic_load(&st->blocks); }
 
 int gx_ns_set_external_engine(gx_ns *st, const gx_ns_external_engine *eng) {
@@ -422,6 +640,7 @@ int gx_ns_latency_samples(gx_ns *st, int sample_rate) {
 /* ---------- stream reset (no allocation) ---------- */
 static void stream_reset(gx_ns *st, rate_ctx *r, int n, const gx_ns_external_engine *ext) {
   st->rc = r;
+  atomic_fetch_add_explicit(&st->req_mu_reset, 1, memory_order_relaxed); /* auto music starts over */
   fifo_clear(&st->in48);
   fifo_clear(&st->out_r);
   if (r->up) {
@@ -492,6 +711,21 @@ static void stream_reset(gx_ns *st, rate_ctx *r, int n, const gx_ns_external_eng
 /* A boost scaled by the pause gate; an attenuation always applies. */
 static float gated_db(const gx_ns *st, float db) { return db > 0.f ? db * st->gate : db; }
 
+/* Auto music: a boost held open (not gated) but capped at `cap`, blended in by
+ * the relax amount. mu_m == 0 is exactly gated_db. */
+static float music_db(const gx_ns *st, float db, float cap) {
+  float g = gated_db(st, db), h;
+  if (st->mu_m <= 0.f) return g;
+  h = db > 0.f ? (db < cap ? db : cap) : db;
+  return g + st->mu_m * (h - g);
+}
+
+/* Auto music: the boost room left before the music passes GX_NS_MUSIC_MAX_DBFS. */
+static float music_cap(const gx_ns *st, float already_db) {
+  float c = (float)GX_NS_MUSIC_MAX_DBFS - (st->mu_lvl_db + already_db);
+  return c > 0.f ? c : 0.f;
+}
+
 static float energy_vad(gx_ns *st, float rms_db) {
   if (!st->nf_have) {
     if (rms_db < -90.f) return 0.f; /* digital silence (a mic starting up) is no floor */
@@ -507,7 +741,7 @@ static float energy_vad(gx_ns *st, float rms_db) {
 static void agc_block(gx_ns *st, float *x, float vad, int gated) {
   int i;
   float rms_db = block_rms_db(x, GX_NS_BLOCK), g_lin, step;
-  if (vad >= 0.5f && rms_db > -65.f) {
+  if (vad >= 0.5f && rms_db > -65.f && st->mu_m <= 0.f) { /* auto music: held */
     if (!st->have_level) { st->level_db = rms_db; st->have_level = 1; }
     else st->level_db += 0.05f * (rms_db - st->level_db);
     {
@@ -518,7 +752,7 @@ static void agc_block(gx_ns *st, float *x, float vad, int gated) {
       else { step = 0.2f; st->gain_db = (st->gain_db - want < step) ? want : st->gain_db - step; } /* 20 dB/s down */
     }
   }
-  g_lin = db_to_lin(gated ? gated_db(st, st->gain_db) : st->gain_db);
+  g_lin = db_to_lin(gated ? music_db(st, st->gain_db, music_cap(st, st->pg_applied_db)) : st->gain_db);
   for (i = 0; i < GX_NS_BLOCK; i++) {
     float a = (float)(i + 1) / GX_NS_BLOCK;
     x[i] *= st->prev_gain_lin + (g_lin - st->prev_gain_lin) * a;
@@ -540,7 +774,7 @@ static void pregain_block(gx_ns *st, float *x, float rms_db, int on) {
     st->pg_gain_db = 0.f;
   } else {
     /* learns on talk (post-NS detector, last block) that RNNoise also calls voice */
-    int speech = st->talk_now && st->vad >= 0.5f && rms_db > -80.f;
+    int speech = st->talk_now && st->vad >= 0.5f && rms_db > -80.f && st->mu_m <= 0.f; /* auto music: held */
     if (speech) {
       float want;
       int first = !st->pg_have;
@@ -555,7 +789,7 @@ static void pregain_block(gx_ns *st, float *x, float rms_db, int on) {
       else st->pg_gain_db = (want - st->pg_gain_db < 0.15f) ? want : st->pg_gain_db + 0.15f;                       /* <= 15 dB/s up */
     }
   }
-  st->pg_applied_db = gated_db(st, st->pg_gain_db);
+  st->pg_applied_db = music_db(st, st->pg_gain_db, music_cap(st, 0.f));
   g_lin = db_to_lin(st->pg_applied_db);
   if (g_lin == 1.f && st->pg_prev_lin == 1.f) return;
   {
@@ -716,6 +950,43 @@ static void process_block(gx_ns *st, float *blk) {
 
   /* pre-gain (all engines), then the probe-only AGC before NS */
   in_rms_db = block_rms_db(blk, GX_NS_BLOCK);
+  /* auto music: a new capture stream (gx_ns_reset_music / route reset / rate
+   * change) starts from scratch, not relaxed */
+  g = atomic_load_explicit(&st->req_mu_reset, memory_order_relaxed);
+  if (g != st->mu_reset_seen || st->reset_pending) {
+    st->mu_reset_seen = g;
+    mu_reset(st);
+    st->mu_m = 0.f;
+    st->mu_have_lvl = 0;
+  }
+  /* auto music: judged on the input (before the pre-gain); rests while the
+   * music bypass or engine off already take the chain out */
+  if (atomic_load_explicit(&st->req_auto_music, memory_order_relaxed) && !bypass && req != GX_NS_ENGINE_OFF) {
+    mu_block(st, blk, in_rms_db);
+  } else if (st->mu_fill || st->mu_state) {
+    mu_reset(st);
+  }
+  atomic_store_explicit(&st->pub_music, st->mu_state, memory_order_relaxed);
+  if (st->mu_state) {
+    if (in_rms_db > -60.f) {
+      if (!st->mu_have_lvl) {
+        /* seed from the loudest block of the last 200 ms, never a quiet instant
+         * (a low seed would let the held boosts lift the music for ~1 s) */
+        int q;
+        float mx = in_rms_db;
+        for (q = 0; q < GX_MU_PEAKWIN; q++) if (st->mu_lv[q] > mx) mx = st->mu_lv[q];
+        st->mu_lvl_db = mx;
+        st->mu_have_lvl = 1;
+      }
+      else st->mu_lvl_db += 0.01f * (in_rms_db - st->mu_lvl_db); /* ~1 s */
+    }
+    st->mu_m = st->mu_m + 1.f / GX_MU_RAMP < 1.f ? st->mu_m + 1.f / GX_MU_RAMP : 1.f;
+  } else {
+    st->mu_m = st->mu_m - 1.f / GX_MU_RAMP > 0.f ? st->mu_m - 1.f / GX_MU_RAMP : 0.f;
+    if (st->mu_m <= 0.f) st->mu_have_lvl = 0;
+  }
+  atomic_store_explicit(&st->pub_mu_dbg[5], st->mu_m, memory_order_relaxed);
+  atomic_store_explicit(&st->pub_mu_dbg[6], st->mu_lvl_db, memory_order_relaxed);
   pg_on = atomic_load_explicit(&st->req_pregain, memory_order_relaxed) && !bypass && req != GX_NS_ENGINE_OFF;
   pregain_block(st, blk, in_rms_db, pg_on);
 
@@ -806,6 +1077,13 @@ static void process_block(gx_ns *st, float *blk) {
       st->xf_pos = 0;
       atomic_fetch_add_explicit(&st->switches, 1, memory_order_relaxed);
     }
+  }
+
+  /* Auto music: the NS keeps at least GX_NS_MUSIC_FLOOR_DB of the input
+   * (dry mix, same alignment: L does not change) */
+  if (st->mu_m > 0.f && !(st->cur == SRC_DRY && st->next == SRC_DRY)) {
+    const float g = st->mu_m * db_to_lin(-(float)GX_NS_MUSIC_FLOOR_DB);
+    for (i = 0; i < GX_NS_BLOCK; i++) blk[i] += g * (st->s_dry[i] - blk[i]);
   }
 
   /* Route change: the old engine has faded out to dry (continuous signal);
@@ -915,6 +1193,7 @@ static void process_block(gx_ns *st, float *blk) {
       if (att > GX_NS_PAUSE_MAX_ATT_DB) att = GX_NS_PAUSE_MAX_ATT_DB;
       if (att < 0.f) att = 0.f;
       att *= 1.f - st->gate;
+      att *= 1.f - st->mu_m; /* auto music: off */
       /* only in a real pause: never on a word's first syllable after a short gap */
       if (st->exp_quiet < GX_NS_EXP_WAIT) att = 0.f;
       else if (st->exp_quiet < GX_NS_EXP_WAIT + 10) att *= (float)(st->exp_quiet - GX_NS_EXP_WAIT) / 10.f;
@@ -957,6 +1236,18 @@ static void process_block(gx_ns *st, float *blk) {
     }
   }
 
+  /* bypass makeup gain (singer mode on a quiet built-in mic): <= 1.5 dB per
+   * block toward the target (12 dB in 80 ms), ramped inside the block */
+  {
+    float want = bypass ? atomic_load_explicit(&st->req_makeup_db, memory_order_relaxed) : 0.f, g_lin;
+    if (st->mk_db < want) st->mk_db = want - st->mk_db > 1.5f ? st->mk_db + 1.5f : want;
+    else if (st->mk_db > want) st->mk_db = st->mk_db - want > 1.5f ? st->mk_db - 1.5f : want;
+    g_lin = st->mk_db == 0.f ? 1.f : db_to_lin(st->mk_db);
+    if (g_lin != 1.f || st->mk_lin != 1.f)
+      for (i = 0; i < GX_NS_BLOCK; i++) blk[i] *= st->mk_lin + (g_lin - st->mk_lin) * (float)(i + 1) / GX_NS_BLOCK;
+    st->mk_lin = g_lin;
+  }
+
   limiter_block(st, blk);
 
   st->vad = vad;
@@ -964,7 +1255,7 @@ static void process_block(gx_ns *st, float *blk) {
   atomic_store_explicit(&st->pub_gain_db, st->gain_db, memory_order_relaxed);
   atomic_store_explicit(&st->pub_pregain_db, st->pg_gain_db, memory_order_relaxed);
   atomic_store_explicit(&st->pub_pg_applied_db, st->pg_applied_db, memory_order_relaxed);
-  atomic_store_explicit(&st->pub_agc_applied_db, !agc_on ? 0.f : agc_order == GX_NS_AGC_AFTER_NS ? gated_db(st, st->gain_db) : st->gain_db, memory_order_relaxed);
+  atomic_store_explicit(&st->pub_agc_applied_db, !agc_on ? 0.f : agc_order == GX_NS_AGC_AFTER_NS ? music_db(st, st->gain_db, music_cap(st, st->pg_applied_db)) : st->gain_db, memory_order_relaxed);
   atomic_store_explicit(&st->pub_talk, st->talk_now || st->talk_hang > 0, memory_order_relaxed);
   atomic_store_explicit(&st->pub_active, st->cur, memory_order_relaxed);
   atomic_store_explicit(&st->pub_xfade, st->cur != st->next, memory_order_relaxed);
@@ -1068,4 +1359,5 @@ void gx_ns_get_status(gx_ns *st, gx_ns_status *o) {
   o->agc_applied_db = atomic_load_explicit(&st->pub_agc_applied_db, memory_order_relaxed);
   o->pause_att_db = atomic_load_explicit(&st->pub_pause_att_db, memory_order_relaxed);
   o->talk = atomic_load_explicit(&st->pub_talk, memory_order_relaxed);
+  o->music_detected = atomic_load_explicit(&st->pub_music, memory_order_relaxed);
 }

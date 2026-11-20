@@ -130,6 +130,7 @@ class GravixNoiseSuppressionOptions {
     this.headsetNs = GravixHeadsetNs.keepOurs,
     this.agcOrder = kGravixNsDefaultAgcOrder,
     this.musicBypass = true,
+    this.autoMusic = true,
     this.studioDownload = GravixStudioDownload.unmeteredIdle,
     this.studioSource = GravixStudioSource.auto,
     this.studioPackUrl,
@@ -164,6 +165,17 @@ class GravixNoiseSuppressionOptions {
 
   /// Crossfade to dry while room music plays (RNNoise treats music as noise).
   final bool musicBypass;
+
+  /// Music played INTO the microphone (a song from a speaker or another app,
+  /// an instrument) is detected from the sound itself and the chain relaxes
+  /// while it lasts: the noise suppressor keeps most of the music, the pause
+  /// gate and expander stop cutting the quiet passages, and the gain holds
+  /// instead of pumping. It takes about 3 s of music to start and about 3 s
+  /// of speech or quiet to end; speech, noise, fans and babble do not trigger
+  /// it. Watch [GravixNsState.musicDetected] (for example, to suggest singer
+  /// mode). Off = the chain exactly as before 0.11.3. Room music played by the
+  /// SDK uses [musicBypass] instead.
+  final bool autoMusic;
 
   /// When the studio pack may be downloaded.
   final GravixStudioDownload studioDownload;
@@ -234,6 +246,7 @@ class GravixNoiseSuppressionOptions {
     GravixHeadsetNs? headsetNs,
     GravixNsAgcOrder? agcOrder,
     bool? musicBypass,
+    bool? autoMusic,
     GravixStudioDownload? studioDownload,
     GravixStudioSource? studioSource,
     String? studioPackUrl,
@@ -256,6 +269,7 @@ class GravixNoiseSuppressionOptions {
     headsetNs: headsetNs ?? this.headsetNs,
     agcOrder: agcOrder ?? this.agcOrder,
     musicBypass: musicBypass ?? this.musicBypass,
+    autoMusic: autoMusic ?? this.autoMusic,
     studioDownload: studioDownload ?? this.studioDownload,
     studioSource: studioSource ?? this.studioSource,
     studioPackUrl: studioPackUrl ?? this.studioPackUrl,

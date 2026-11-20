@@ -50,6 +50,12 @@ internal object GxNsNative {
   @JvmStatic external fun nativeSetEngine(h: Long, engine: Int)
   @JvmStatic external fun nativeSetBypass(h: Long, bypass: Boolean)
   @JvmStatic external fun nativeSetAgc(h: Long, on: Boolean, order: Int)
+  /** Auto music (gx_ns_set_auto_music): music on the mic relaxes the chain. */
+  @JvmStatic external fun nativeSetAutoMusic(h: Long, on: Boolean)
+  /** Auto music starts over (a new capture stream). */
+  @JvmStatic external fun nativeResetMusic(h: Long)
+  /** Makeup gain (dB, 0..18) on the bypassed (dry) signal, before the -1 dBFS limiter (singer mode). */
+  @JvmStatic external fun nativeSetBypassMakeup(h: Long, db: Float)
   @JvmStatic external fun nativeRequestReset(h: Long)
   @JvmStatic external fun nativeResetStats(h: Long)
 
@@ -59,7 +65,8 @@ internal object GxNsNative {
   /** out[0..9] = frames, p50, p95, p99, max, over, consecutive, underflows, extErrors, switches */
   @JvmStatic external fun nativeStats(h: Long, out: IntArray)
 
-  /** out[0..6] = requested, active, crossfading, reason, rate, latency, agcGainDb*100; returns vad*1000 */
+  /** out[0..6] = requested, active, crossfading, reason, rate, latency, agcGainDb*100
+   * (+ [7..10] pre-gain, applied pre-gain, applied AGC, pause attenuation, *100; + [11] auto music detected); returns vad*1000 */
   @JvmStatic external fun nativeStatus(h: Long, out: IntArray): Int
   @JvmStatic external fun nativeReasonName(reason: Int): String
   /** gx_ns_pregain_for_level: the pre-gain (dB) for speech at [db] dBFS. */

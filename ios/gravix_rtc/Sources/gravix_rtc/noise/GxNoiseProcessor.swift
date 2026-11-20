@@ -68,6 +68,9 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
     /// Singer mode: our chain bypassed (limiter-only path), like Android.
     private var singerMode = false
     private var bypassWanted: Bool { singerMode || (config.musicBypass && musicActive) }
+    /// Auto music (2026-11-20): gx_ns detected music on the mic (relaxed chain).
+    private var musicDetected = false
+    private var musicDetectedSince = Date()
     private var observers: [NSObjectProtocol] = []
     private let packQueue = DispatchQueue(label: "gravix.ns.pack", qos: .utility)
     private var packInFlight = false
@@ -78,6 +81,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         var agcEnabled = true
         var agcOrder = "ownAfterNs"
         var musicBypass = true
+        var autoMusic = true
         var vpioAgcOff = true
         var watchdogUs: Int32 = 8000
         var watchdogConsecutive: UInt32 = 3
@@ -213,6 +217,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         let agcWanted = (a["agc"] as? Bool) ?? (c.agcOrder != "webrtcBeforeNs")
         c.agcEnabled = c.engine != "off" && agcWanted
         if let v = a["musicBypass"] as? Bool { c.musicBypass = v }
+        if let v = a["autoMusic"] as? Bool { c.autoMusic = v }
         if let v = a["vpioAgcOff"] as? Bool { c.vpioAgcOff = v }
         if let v = a["watchdogUs"] as? Int { c.watchdogUs = Int32(v) }
         if let v = a["watchdogConsecutive"] as? Int { c.watchdogConsecutive = UInt32(max(1, v)) }
@@ -261,8 +266,9 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         gx_ns_set_agc_order(ns, GX_NS_AGC_AFTER_NS)
         gx_ns_set_atten_limit(ns, c.studioAttenLimitDb)
         gx_ns_set_ext_p95_budget(ns, c.studioP95BudgetUs)
+        gx_ns_set_auto_music(ns, c.autoMusic ? 1 : 0)
         if musicActive || singerMode { gx_ns_set_bypass(ns, bypassWanted ? 1 : 0) }
-        log("policy", detail: "engine=\(c.engine) agc=\(c.agcEnabled ? 1 : 0) order=\(c.agcOrder) music=\(c.musicBypass ? 1 : 0) wd=\(c.watchdogUs)us/\(c.watchdogConsecutive)")
+        log("policy", detail: "engine=\(c.engine) agc=\(c.agcEnabled ? 1 : 0) order=\(c.agcOrder) music=\(c.musicBypass ? 1 : 0) autoMusic=\(c.autoMusic ? 1 : 0) wd=\(c.watchdogUs)us/\(c.watchdogConsecutive)")
 
         switch c.engine {
         case "off":
@@ -482,6 +488,14 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
         let blocks = gx_ns_blocks_processed(ns)
         retiredBoxes.removeAll { $0.block != blocks }
 
+        let music = s.music_detected != 0
+        if music != musicDetected {
+            let ms = Int(Date().timeIntervalSince(musicDetectedSince) * 1000)
+            musicDetected = music
+            musicDetectedSince = Date()
+            log("musicDetected", rate: s.rate, detail: "on=\(music ? 1 : 0) ms=\(ms) agcApplied=\(String(format: "%.1f", s.agc_applied_db))dB preApplied=\(String(format: "%.1f", s.pregain_applied_db))dB")
+            emit(["type": "musicDetected", "on": music])
+        }
         if Date().timeIntervalSince(lastSummary) >= 60 {
             lastSummary = Date()
             logSummary(s, st)
@@ -567,6 +581,7 @@ final class GxNoiseProcessor: NSObject, ExternalAudioProcessingDelegate {
             "route": route,
             "apmInitRate": Int(gxns_flag_get(initRate)),
             "musicActive": musicActive,
+            "musicDetected": musicDetected,
             "studioAvailable": GxNsStudioEngines.bundledModelURL() != nil,
             "studioModel": config.studioModel,
             "studioEngine": studioBox?.engine.name ?? "",

@@ -7,7 +7,7 @@
 //   nsSetMusicBypass({on})    -> null        (iOS bypasses natively from the music mixer too)
 //   nsGetState()              -> state map   (requested, active, reason, rate, route, stats{...})
 // Native -> Dart: onNsEvent(map) with `type` = engineChanged | benchmark |
-//   download | routeReset | musicBypass.
+//   download | routeReset | musicBypass | musicDetected.
 // A platform without the native side answers MissingPluginException /
 // `Unimplemented`: every call here then returns null and never throws.
 
@@ -43,6 +43,7 @@ Map<String, Object?> gravixNsConfigureArgs(
     'agcOrder': options.agcOrder.name,
     'agc': agcOwn,
     'musicBypass': options.musicBypass,
+    'autoMusic': options.autoMusic,
     'watchdogUs': options.watchdogFrame.inMicroseconds,
     'watchdogConsecutive': options.watchdogConsecutive,
     'thermalFallback': options.thermalFallback,
@@ -93,6 +94,9 @@ Map<String, Object?> gravixNsNormalizeIosEvent(Map<String, Object?> e) {
     case 'musicBypass':
       out['step'] = 'musicBypass';
       out['musicBypass'] = e['on'] == true;
+    case 'musicDetected':
+      out['step'] = 'musicDetected';
+      out['musicDetected'] = e['on'] == true;
     default:
       out['step'] = e['type'] ?? 'event';
   }
@@ -162,6 +166,7 @@ Map<String, dynamic>? gravixNsFlattenIosState(Map<String, dynamic>? r) {
     'route': r['route'],
     'rate': r['rate'],
     'musicBypass': r['musicActive'],
+    'musicDetected': r['musicDetected'],
     'p50Us': st['p50Us'],
     'p95Us': st['p95Us'],
     'p99Us': st['p99Us'],

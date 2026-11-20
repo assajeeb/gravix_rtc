@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.11.3 — 2026-11-21
+
+### Added
+- Noise suppression: **auto music**. When someone plays music into the microphone (a phone
+  speaker, a TV, a guitar), Gravix NS now notices it within a few seconds and stops treating it
+  as noise. It keeps at least -6 dB of the original sound, holds the pause gate open, turns the
+  pause expander off and freezes the automatic gain so the music is not pumped or lifted above
+  about -18 dBFS. Normal processing returns about 3 s after the music ends. Speech, laughter,
+  babble, fans, AC hum, street noise and TV talk never turn it on, and while it is off the
+  output is bit-identical to 0.11.2.
+  - On by default: `GravixNoiseSuppressionOptions(autoMusic: false)` turns it off.
+  - `GravixNsState.musicDetected`, step `musicDetected` in the report stream and
+    `GravixNsReport.musicDetected` show when it is active (Android and iOS).
+  - It rests while in-app room music or singer mode bypasses the NS (no change there), and it
+    starts over on every new capture stream.
+- Android: singer mode on the built-in mic can apply a fixed makeup gain before a -1 dBFS
+  limiter (skipped for wired/USB input and while room music plays). The gain stays 0 dB in this
+  release until the singer level is measured.
+
+### Verified
+- Infinix X6728, a real song from a speaker, Opus with DTX on, measured at the listener:
+  dropouts in the song (> 15 dB under the 1 s median) went from 8.4% to 1.8% of frames, and
+  frames under -50 dB from 2.2% to 0%. Music mode turned on 5 s into the song and off 4 s after
+  it; it never turned on for talk, laughter or a fan.
+- Redmi Note 11 (and phones whose voice-call capture gates sound in the HAL before Gravix NS):
+  the music arrives already chopped up, so auto music does not turn on and nothing changes.
+- iOS builds; not run on a phone.
+
 ## 0.11.2 — 2026-11-20
 
 ### Fixed
