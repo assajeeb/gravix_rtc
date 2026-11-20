@@ -13,7 +13,8 @@ import io.flutter.plugin.common.MethodChannel
  *
  * The check is the SDK's face model asset, not a class lookup: the app's R8 renames or drops the SDK's classes
  * (2026-10-24, Infinix: Class.forName("com.gravix.effects.GravixEngine") failed in a release build that had the SDK),
- * while assets keep their names and go away with the stripped AAR.
+ * while assets keep their names and go away with the stripped AAR. The asset is the core SDK's (gravix-effects AAR),
+ * not the face pack's: a pack-less build (`gravixEffectsPack=models` or `false`) still has the camera.
  */
 internal class GravixEffectsProbe {
   private var channel: MethodChannel? = null
@@ -22,7 +23,9 @@ internal class GravixEffectsProbe {
     channel = MethodChannel(binding.binaryMessenger, "com.gravitycompile.gravix_rtc/effects").also {
       it.setMethodCallHandler { call, result ->
         when (call.method) {
-          "nativeAvailable" -> result.success(hasAsset(binding.applicationContext, "face_landmarker.task"))
+          // the core SDK's own asset: with gravixEffectsPack=models (face models downloaded on first use)
+          // or =false the pack's face_landmarker.task is not in the APK, but the camera still works
+          "nativeAvailable" -> result.success(hasAsset(binding.applicationContext, CORE_ASSET))
           else -> result.notImplemented()
         }
       }
@@ -32,6 +35,10 @@ internal class GravixEffectsProbe {
   fun onDetachedFromEngine() {
     channel?.setMethodCallHandler(null)
     channel = null
+  }
+
+  private companion object {
+    const val CORE_ASSET = "face_mesh_canonical.json"
   }
 
   private fun hasAsset(context: android.content.Context, name: String): Boolean = try {

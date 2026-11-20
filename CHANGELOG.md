@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.1 — 2026-11-20
+
+### Changed
+- Beauty effects: `gravix_effects_webrtc` ^1.4.0 (AR looks with physics, smoke looks, face
+  games, Mood Reader, stylized looks, particles, eye colour, post effects; apply with
+  `GravixCamera.setOverlay` or as a look).
+
+### Fixed
+- Android: with `gravixEffectsPack=models` (face models downloaded on first use) or `=false`
+  the beauty camera was reported as unavailable, because the probe looked for the face pack's
+  model in the APK. It now checks the core effects SDK's own asset, so the beauty camera works
+  in those builds too.
+
 ## 0.11.0 — 2026-11-20
 
 Voice effects with room music, and singers on sound cards (report 2026-11-20: a voice effect
